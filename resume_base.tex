@@ -1,0 +1,211 @@
+%-------------------------
+% Resume in Latex
+% Author : Jake Gutierrez
+% Based off of: https://github.com/sb2nov/resume
+% License : MIT
+%------------------------
+
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+
+
+%----------FONT OPTIONS----------
+% sans-serif
+% \usepackage[sfdefault]{FiraSans}
+% \usepackage[sfdefault]{roboto}
+% \usepackage[sfdefault]{noto-sans}
+% \usepackage[default]{sourcesanspro}
+
+% serif
+% \usepackage{CormorantGaramond}
+% \usepackage{charter}
+
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Adjust margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Sections formatting
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubSubheading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \textit{\small#1} & \textit{\small #2} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    \textbf{\Huge \scshape Divine Jojolola} \\ \vspace{1pt}
+    \small 343-558-5872 $|$ \href{mailto:jojololadivine05@gmail.com}{\underline{jojololadivine05@gmail.com}} $|$
+    \href{https://www.linkedin.com/in/divine-jojolola-082a5b249/}{\underline{linkedin.com/in/divine-jojolola-082a5b249}} $|$
+    \href{https://github.com/whoissegun}{\underline{github.com/whoissegun}}
+\end{center}
+
+
+%-----------EDUCATION-----------
+\section{Education}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {Carleton University}{Ottawa, ON}
+      {Bachelor of Computer Science}{Sep 2022 - Apr 2027}
+  \resumeSubHeadingListEnd
+
+
+%-----------EXPERIENCE-----------
+\section{Experience}
+  \resumeSubHeadingListStart
+
+    \resumeSubheading
+      {Software Developer Intern}{Sep 2025 - Present}
+      {Shopify}{Ottawa, ON}
+      \resumeItemListStart
+        \resumeItem{Converted \textbf{React} components into reusable \textbf{Web Components} with \textbf{TypeScript}, enabling framework-agnostic use by first-party and 3rd-party developers}
+        \resumeItem{Implemented unit and end-to-end tests with \textbf{Jest} and \textbf{Playwright}, raising test coverage by \textbf{~30\%} and reducing regressions}
+        \resumeItem{Enforced consistent styling using \textbf{Shadow DOM} and \textbf{CSS Custom Properties}, minimizing cross-app UI inconsistencies}
+        \resumeItem{Optimized builds with \textbf{ESM} and tree-shaking, cutting bundle size by \textbf{15\%}}
+
+
+      \resumeItemListEnd
+
+
+    \resumeSubheading
+      {Software Developer Intern}{Apr 2025 - Aug 2025}
+      {Hootsuite}{Vancouver, BC}
+      \resumeItemListStart
+        \resumeItem{Developed scalable, reusable frontend components using \textbf{React} and \textbf{TypeScript}, reducing complexity reduction by \textbf{30\%}}
+        \resumeItem{Migrated codebase from \textbf{React 17} to \textbf{React 18}, enabling concurrent features and improving load performance by \textbf{20\%}}
+        \resumeItem{Maintained and upgraded dependencies using \textbf{Renovate}, reducing security vulnerabilities and tech debt}
+        \resumeItem{Maintained and updated \textbf{Jenkins} CI/CD pipelines by integrating automated \textbf{unit and end-to-end} tests and security checks, improving release reliability and reducing regressions}
+
+
+      \resumeItemListEnd
+
+    \resumeSubheading
+      {Machine Learning Engineer}{Jan 2025 - Apr 2025}
+      {Techgen}{Ottawa, ON}
+      \resumeItemListStart
+        \resumeItem{Engineered \textbf{reinforcement learning models} using \textbf{PyTorch} for predictive analytics, achieving \textbf{23\%} accuracy improvement}
+        \resumeItem{Implemented \textbf{deep learning pipelines} on \textbf{Azure Databricks}, reducing deployment time from days to \textbf{2 hours}}
+        \resumeItem{Optimized \textbf{automated decision systems} processing \textbf{1TB+} daily data, reducing infrastructure costs by \textbf{35\%}}
+        \resumeItem{Developed real-time model monitoring framework to detect environmental shifts, reducing algorithm drift by \textbf{60\%}}
+      \resumeItemListEnd
+
+    \resumeSubheading
+      {Frontend Developer}{Jul 2023 - Jan 2024}
+      {Khoomi}{Lagos, NG}
+      \resumeItemListStart
+          \resumeItem{Developed and optimized \textbf{Next.js} and \textbf{Tailwind CSS} interfaces, improving mobile responsiveness across \textbf{100\%} of pages}
+          \resumeItem{Increased site performance by \textbf{18\%} through code-splitting, image optimization, and API response caching}
+          \resumeItem{Implemented WCAG-compliant accessibility features, raising usability scores and reducing support tickets from users with assistive tech}
+
+      \resumeItemListEnd
+
+  \resumeSubHeadingListEnd
+
+
+%-----------PROJECTS-----------
+\section{Projects}
+    \resumeSubHeadingListStart
+      \resumeProjectHeading
+        {\textbf{\href{https://studyrat.com}{StudyRat}} $|$ \emph{Next.js, TypeScript, Supabase, FastAPI, Scikit-Learn}}{May 2024 -- Present}
+        \resumeItemListStart
+            \resumeItem{Built and launched a course-specific learning platform from scratch, helping 100+ students study more effectively across universities}
+            \resumeItem{Designed a multimodal \textbf{RAG model} combining text and image data to accurately retrieve answers from academic documents}
+            \resumeItem{Developed a Chrome extension powered by an ML model to detect and block unproductive sites, improving study focus for users}
+            \resumeItem{Engineered full-stack features using \textbf{React}, \textbf{FastAPI}, and \textbf{Supabase}, enabling real-time collaboration and resource sharing}
+
+        \resumeItemListEnd
+
+      \resumeProjectHeading
+        {\textbf{\href{https://github.com/yourusername/sabi}{Sabi}} $|$ \emph{React Native, Next.js, Supabase, Stripe, FCM}}{Sep 2025}
+        \resumeItemListStart
+        \resumeItem{Built a full-stack task marketplace with real-time matching and secure escrow payments}
+        \resumeItem{Implemented location-based task discovery with \textbf{<2-second} proximity matching using PostGIS}
+        \resumeItem{Integrated \textbf{Stripe} payment processing with automated escrow release upon task completion}
+        \resumeItem{Deployed push notification system reaching \textbf{99\%+} delivery rate via Firebase Cloud Messaging}
+        \resumeItemListEnd
+
+
+    \resumeSubHeadingListEnd
+
+%-----------PROGRAMMING SKILLS-----------
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+     \textbf{Languages}{: JavaScript, TypeScript, Python, Java, C++, SQL} \\
+     \textbf{Frontend}{: React, Next.js, Tailwind CSS, Polymer (learning), HTML/CSS} \\
+     \textbf{Backend}{: Node.js, REST APIs, GraphQL, PostgreSQL, MongoDB} \\
+
+    }}
+ \end{itemize}
+
+%-------------------------------------------
+\end{document}
