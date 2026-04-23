@@ -70,13 +70,15 @@ Autonomous job-application engine for SWE/ML roles. Discovers openings, enriches
 
 ## What's not shipped yet
 
-- [ ] First real submit-for-real apply (gated behind more test-mode visual verification)
-- [ ] Daily digest (summary of applied/skipped/failed)
-- [ ] Real-time skip pings (Telegram/Discord)
-- [ ] Cloud deployment (Railway / Fly / Docker)
-- [ ] Contact discovery (Sema vs Apollo — open)
-- [ ] Cold outreach email (blocked on 3–4 week domain warm-up)
-- [ ] Structured JD extraction at enrichment time (cached on Job)
+Tracked as issues — see [the issue tracker](https://github.com/whoissegun/applyd/issues) for current status, priorities, and design notes:
+
+- [#1 Flip APPLYD_TEST_MODE=false (first real submit)](https://github.com/whoissegun/applyd/issues/1)
+- [#2 Daily digest of applied/skipped/failed](https://github.com/whoissegun/applyd/issues/2)
+- [#3 Real-time skip pings (Telegram/Discord)](https://github.com/whoissegun/applyd/issues/3)
+- [#4 Cloud deployment (Docker + Railway/Fly/DO)](https://github.com/whoissegun/applyd/issues/4)
+- [#5 Contact discovery: Sema vs Apollo](https://github.com/whoissegun/applyd/issues/5)
+- [#6 Cold outreach email pipeline](https://github.com/whoissegun/applyd/issues/6)
+- [#7 Structured JD extraction at enrichment time](https://github.com/whoissegun/applyd/issues/7)
 
 ---
 
