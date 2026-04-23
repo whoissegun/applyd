@@ -11,15 +11,38 @@ Positioned for eventual open-source release: BYO credentials, single user per in
 **Shipped:**
 - Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches
 - Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor)
-- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output
-- Filtering / CLI (`applyd discover | enrich | tailor | jobs | resolve`)
+- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output; writes `resume_pdf_path` back onto the Job
+- Apply layer (scaffold) — OpenClaw agent drives the browser; applyd provides callback + dispatch:
+  - `openclaw/skills/applyd-apply/SKILL.md` — prose instructions, loaded via `skills.load.extraDirs`
+  - `src/applyd/callback.py` — FastAPI `POST /apply-result` writes back to jobs.json
+  - `applyd callback` — runs the callback server
+  - `applyd apply-one` — picks next pending job and POSTs to OpenClaw's `/v1/chat/completions`
+- Filtering / CLI (`applyd discover | enrich | tailor | jobs | resolve | callback | apply-one`)
+
+**Scaffolded but NOT tested end-to-end yet:**
+- A live OpenClaw → Bright Data → real apply form run. Everything up to the dispatch is unit-smoke-tested, but the agent has never actually filled a real form via this pipeline.
 
 **Not yet built:**
-- HITL review UI (FastAPI + HTMX dashboard for approving tailored drafts)
-- Contact discovery (Sema vs Apollo — open question, see below)
+- Daily digest (summary of applied/skipped/failed at end of day)
+- Real-time chat channel for skip pings (Telegram/Discord integration in OpenClaw)
+- Cloud deployment (Railway/Fly/DO with Docker Compose for OpenClaw + callback + cron)
+- Contact discovery (Sema vs Apollo — open question)
 - Outreach email pipeline (blocked on 3–4 week domain warm-up)
 - Structured JD extraction (planned lazy, on first tailor per job)
-- Graduation-year filter (user is Apr 2027 grad; most "new grad 2026" postings don't fit)
+
+### Next session — priority order
+
+1. **Fill in USER.md.** Open `~/.openclaw/workspace/USER.md` (currently still the Jane Doe template) and replace with user's real info. The `profile.example.md` in repo is what the template looked like.
+2. **Get at least one tailored PDF.** Pick a job with a good description, run `applyd tailor <job_id>`. Confirm `resume_pdf_path` populated on the job.
+3. **First live end-to-end test** (`APPLYD_TEST_MODE=true`):
+   - Terminal 1: `applyd callback` (must be running when the skill hits it)
+   - Terminal 2: `applyd apply-one`
+   - Expect: agent loads page, fills form, takes screenshot to `data/apply_screenshots/`, POSTs `status=applied` to callback, jobs.json gets updated.
+4. **Debug whatever breaks.** Common suspects: skill doesn't know how to invoke OpenClaw's browser tool with the CDP URL; upload-file tool-use shape; react-select combobox picks on Greenhouse/Lever.
+5. **Watch token cost.** Record per-form prompt/completion tokens from the first 3 runs. Extrapolate before scaling up.
+6. **Flip `APPLYD_TEST_MODE=false` only after ≥5 test-mode runs visually verified.**
+
+Holding off until later: daily digest, Telegram skip pings, cloud deployment, anything multi-tenant.
 
 ---
 
@@ -28,12 +51,14 @@ Positioned for eventual open-source release: BYO credentials, single user per in
 ```bash
 applyd discover              # aggregators + broad search + targets.json companies
 applyd enrich                # fetch full JD descriptions (threaded, --workers 8 default)
-applyd tailor <job_id>       # LLM-tailored resume.tex + PDF + metadata.json
+applyd tailor <job_id>       # LLM-tailored resume.tex + PDF + metadata.json; sets resume_pdf_path
 applyd jobs --level new_grad --specialty ml --remote   # query store
 applyd resolve "Stripe"      # debug: company name → (ATS, slug)
+applyd callback              # run HTTP server the OpenClaw skill POSTs results to (port 9000)
+applyd apply-one             # dispatch the next pending job to OpenClaw
 ```
 
-Store: `data/jobs.json` (plain JSON dict keyed by stable job id).
+Store: `data/jobs.json` (plain JSON dict keyed by stable job id). Each Job carries its own lifecycle fields: `resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`.
 
 ---
 
@@ -129,6 +154,80 @@ Single-process Python. Pydantic `Job` model. JSON file store.
 - **"smart" mode sometimes picks HTTP for an SPA and returns the app shell (~25 chars).** Our cascade retries with explicit `request: "chrome"` as tier 3b.
 - **Response shape varies** (dict vs list-of-one-dict). Normalized in `SpiderClient.scrape`.
 
+### OpenClaw
+- **Symlinks outside `~/.openclaw/workspace/` are rejected** (`reason=symlink-escape` in skill loader). You can't symlink `profile.md` → `USER.md` or a skill dir from elsewhere. Workarounds: for skills, use `skills.load.extraDirs` config; for USER.md and other bootstrap files, write the actual file into the workspace.
+- **`/v1/chat/completions` is off by default.** Must set `gateway.http.endpoints.chatCompletions.enabled=true`.
+- **`gateway.mode` is not set by the onboarding wizard in all paths.** If the daemon refuses to start with "missing gateway.mode," run `openclaw config set gateway.mode local`.
+- **Onboarding wizard crashes at the Feishu plugin step** (`Cannot find module '@larksuiteoapi/node-sdk'`) on Node 24. The crash happens after model + auth setup, so the core config is usually fine — proceed with `openclaw config set` for anything else.
+- **Prompt tokens per call are large** (~10–30k before your question is even processed). Baseline context injection is heavy. Worth watching during apply runs; consider Haiku swap if apply-step tokens get expensive.
+
+---
+
+## Apply layer / OpenClaw integration
+
+### Architecture
+
+```
+cron (or manual) ──► applyd apply-one
+                         │
+                         │ POST /v1/chat/completions (model: openclaw/default)
+                         ▼
+                   OpenClaw gateway (127.0.0.1:18789)
+                         │ loads workspace context:
+                         │   USER.md           (user profile)
+                         │   skills/applyd_apply/SKILL.md  (via skills.load.extraDirs)
+                         ▼
+                   Claude Sonnet 4.6
+                         │ tool-use loop:
+                         ▼
+                   OpenClaw browser tool ──CDP──► Bright Data ──► apply form
+                         │
+                         │ at end, skill POSTs via curl:
+                         ▼
+                   applyd callback (127.0.0.1:9000/apply-result)
+                         │ writes apply_status to jobs.json
+```
+
+### File layout
+
+- **In repo (version controlled):**
+  - `openclaw/skills/applyd-apply/SKILL.md` — apply agent instructions. Loaded by OpenClaw via `skills.load.extraDirs` pointing at `openclaw/skills`. Hot-reloads on edit.
+  - `profile.example.md` — template for USER.md. Copy to workspace on new machine install.
+  - `src/applyd/callback.py` — FastAPI callback server.
+  - `src/applyd/apply/browser.py` — Bright Data CDP URL builder (legacy from pre-OpenClaw plan, kept in case we need it; the OpenClaw browser tool reads `BRIGHTDATA_CDP_URL` env directly).
+- **Outside repo (on the user's machine, not in git):**
+  - `~/.openclaw/openclaw.json` — OpenClaw config (gateway mode, token, extraDirs).
+  - `~/.openclaw/workspace/USER.md` — actual user profile. Edit here directly. Not symlinked.
+
+### What's tested vs what's not
+
+Tested in isolation:
+- Callback `/health`, `/apply-result` (200/401/404 paths all return correct codes and update jobs.json).
+- OpenClaw gateway responds to `/v1/chat/completions`.
+- Agent reads USER.md from workspace.
+- Agent reports `applyd_apply` skill as available.
+
+Not yet tested (priority for next session):
+- A full live apply-one → agent runs → agent drives Bright Data → agent POSTs callback → jobs.json updates. End-to-end.
+- Whether the agent actually follows SKILL.md's skip conditions correctly.
+- Real per-form token count and cost.
+
+### How to run (once USER.md is filled in)
+
+```bash
+# terminal 1 — keep running
+source .venv/bin/activate && applyd callback
+
+# terminal 2 — one dispatch
+source .venv/bin/activate && applyd apply-one
+```
+
+`APPLYD_TEST_MODE=true` in `.env` keeps the agent from clicking submit. Flip to `false` only after you've eyeballed a few test-mode runs.
+
+### Multi-tenant is off the table for v1
+
+Discussed and rejected for the personal-tool phase. If the product ever grows beyond one user: **do not try to make OpenClaw multi-tenant** — it's designed for personal use. Rebuild the apply step as a focused Claude API + Playwright/Browserbase service; discovery/enrich/tailor pipelines already multi-tenant-ready (stateless, just add user_id).
+
 ---
 
 ## Environment
@@ -137,14 +236,22 @@ Required env vars (`.env` at repo root, auto-loaded by `applyd.config.load_env`)
 - `BRAVE_SEARCH_API_KEY` — primary search provider
 - `SPIDER_API_KEY` — tier 3 fetcher
 - `ANTHROPIC_API_KEY` — tailoring
+- `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_ZONE`, `BRIGHTDATA_ZONE_PASSWORD` — Scraping Browser
+- `OPENCLAW_TOKEN` — bearer token for the OpenClaw gateway; auto-generated by their onboarding wizard, lives in `~/.openclaw/openclaw.json` under `gateway.auth.token`
+- `APPLYD_CALLBACK_TOKEN` — shared secret for the callback server; any random string
+- `APPLYD_TEST_MODE=true` — keep during testing so the agent fills but never submits
 
 Optional:
 - `SERPER_API_KEY` — fallback search
 - `SEARCH_PROVIDER=brave|serper` — override default
 - `BROAD_SEARCH_TTL_HOURS=6` — dork-result cache TTL
+- `OPENCLAW_URL` — defaults to `http://127.0.0.1:18789/v1/chat/completions`
+- `APPLYD_CALLBACK_URL` — defaults to `http://127.0.0.1:9000/apply-result`
+- `APPLYD_DISPATCH_TIMEOUT` — seconds to wait for the agent to finish (default 600)
 
 External tools:
 - `tectonic` — LaTeX → PDF (`brew install tectonic`)
+- `openclaw` — agent runtime (`curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard`)
 
 ---
 
@@ -179,6 +286,6 @@ When working in this repo with this user:
 
 ## Important context about the user
 
-Divine Jojolola — Carleton University Bachelor of CS, **graduates April 2027**. Currently Shopify ML Infra intern (Sep 2025–present); heading to Lyft summer 2026. Targets applied ML at AI labs (Runway, Stability, Anthropic, Adobe Firefly) + general new-grad SWE as backup. Canadian.
+Divine Jojolola — Carleton University Bachelor of CS, graduates April 2027. Currently Shopify ML Infra intern (Sep 2025–present); heading to Lyft summer 2026. Targets applied ML at AI labs (Runway, Stability, Anthropic, Adobe Firefly) + general new-grad SWE as backup. Nigerian national on a Canadian study/work permit — eligible to work in Canada; needs sponsorship for US/Europe/elsewhere.
 
-The **Apr 2027 graduation date** matters for filtering — most "new grad 2026" postings (e.g. Scale AI, which wants Fall 2025/Spring 2026 grads) don't fit the user even when the tech stack matches. Graduation-year filter is a planned addition to the `jobs` command.
+**Apply strategy is volume-first.** No grad-year filter, no location filter, no on-site/remote filter. Skip only on dedupe (already applied) or dead link. Work-auth questions on forms get answered truthfully (needs sponsorship outside Canada); if a US posting refuses sponsorship, rejection is the cost of being in the funnel — that's fine. Goal is maximum applications, not precision targeting.

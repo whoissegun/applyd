@@ -15,6 +15,58 @@ ATS_DOMAINS = {
 }
 
 
+# Domains that effectively always require account creation or login
+# before the apply form is reachable. `apply_gate="portal"` at URL-time.
+# See filters.py comment for why this is a hardcoded list, not LLM-classified.
+GATED_EXACT = {
+    "linkedin.com",
+    "www.linkedin.com",
+    "wellfound.com",
+    "www.wellfound.com",
+    "angel.co",
+    "www.angel.co",
+    "glassdoor.com",
+    "www.glassdoor.com",
+    "dice.com",
+    "www.dice.com",
+    "indeed.com",
+    "www.indeed.com",
+    "ziprecruiter.com",
+    "www.ziprecruiter.com",
+    "joinhandshake.com",
+    "www.joinhandshake.com",
+}
+
+GATED_SUFFIXES = (
+    ".myworkdayjobs.com",   # Workday
+    ".myworkdaysite.com",   # Workday (alt)
+    ".taleo.net",           # Taleo
+    ".oraclecloud.com",     # Oracle HCM / Taleo
+    ".successfactors.com",  # SAP SuccessFactors
+    ".icims.com",           # iCIMS
+)
+
+
+def detect_gate(url: str) -> Optional[str]:
+    """URL-level gate detection.
+
+    Returns "portal" for known account-required domains, else None.
+    Runtime (agent) can overwrite with specific reasons like
+    "signup_required", "captcha", etc.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    if host in GATED_EXACT:
+        return "portal"
+    if any(host.endswith(suf) for suf in GATED_SUFFIXES):
+        return "portal"
+    return None
+
+
 def detect_ats(url: str) -> Optional[str]:
     try:
         host = (urlparse(url).hostname or "").lower()

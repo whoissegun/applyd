@@ -6,5 +6,7 @@ venv/
 .env
 data/
 out/
+profile.json
+profile.md
 *.tmp
 .DS_Store

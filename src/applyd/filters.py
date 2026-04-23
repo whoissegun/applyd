@@ -6,9 +6,20 @@ from typing import Optional
 from .models import Job
 
 
+# Regex/keyword matching is intentional. Considered per-query LLM matching
+# but rejected at our volume: avg JD ~3k tokens × ~7.7k jobs (growing with
+# every `discover`) ≈ $23/query with Haiku 4.5 ($0.80/MTok in). Volume-first
+# mass-apply means we re-browse constantly — cost compounds per browse, not
+# per apply. Also non-deterministic, and this layer only powers `applyd jobs`;
+# apply-time ignores it. When nuance matters: add structured JD extraction
+# at enrichment (cached on Job) and query those fields here.
 LEVEL_PATTERNS = {
+    "intern": re.compile(
+        r"\b(intern|internship|co[\s\-]?op|coop|working\s+student|student\s+(engineer|developer))\b",
+        re.IGNORECASE,
+    ),
     "new_grad": re.compile(
-        r"\b(new\s*grad|new\s*graduate|entry[\s\-]?level|junior|jr\.?|graduate|intern|university)\b",
+        r"\b(new\s*grad|new\s*graduate|entry[\s\-]?level|junior|jr\.?|graduate|university)\b",
         re.IGNORECASE,
     ),
     "senior": re.compile(
@@ -55,6 +66,8 @@ def detect_level(job: Job) -> str:
     title = job.title or ""
     if LEVEL_PATTERNS["senior"].search(title):
         return "senior"
+    if LEVEL_PATTERNS["intern"].search(title):
+        return "intern"
     if LEVEL_PATTERNS["new_grad"].search(title):
         return "new_grad"
     return "mid"
@@ -83,6 +96,7 @@ def filter_jobs(
     remote: Optional[bool] = None,
     source: Optional[str] = None,
     company: Optional[str] = None,
+    gated: Optional[bool] = None,
 ) -> list[Job]:
     out: list[Job] = []
     for job in jobs:
@@ -97,6 +111,10 @@ def filter_jobs(
         if source and job.source != source:
             continue
         if company and company.lower() not in job.company.lower():
+            continue
+        if gated is True and job.apply_gate is None:
+            continue
+        if gated is False and job.apply_gate is not None:
             continue
         out.append(job)
     return out
