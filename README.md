@@ -37,13 +37,15 @@ Autonomous job-application engine for SWE/ML roles. Discovers openings, enriches
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  applyd apply (direct runner)                                        │
-│  ├── Picks next pending job (tailored, not gated, not attempted)     │
-│  ├── Loads profile + tailored resume + JD metadata as context        │
-│  ├── Anthropic SDK tool-use loop with prompt caching                 │
-│  │   tools: navigate / read_form / fill / fill_many / click /        │
-│  │          click_many / select_combobox / upload_file / submit /    │
-│  │          report_done                                              │
+│  applyd apply (direct runner — `python -m applyd.apply.runner`)      │
+│  ├── Picks one job, loads profile + tailored resume + metadata       │
+│  ├── OpenAI SDK → OpenRouter (default model anthropic/claude-sonnet) │
+│  │   with prompt caching on system + static user blocks              │
+│  ├── Ref-based tools — snapshot() mints stable refs (r0, r1, ...)    │
+│  │   on interactive elements; agent never sees CSS selectors         │
+│  │   tools: navigate / snapshot / click / fill / fill_many /         │
+│  │          click_many / open_dropdown / pick_option /               │
+│  │          upload_file / submit / report_done                       │
 │  ├── Connects via CDP to Bright Data residential Chrome              │
 │  ├── Fills form, answers free-text grounded in resume + profile      │
 │  └── Writes status + note inline to the job store (no callback HTTP) │
@@ -60,7 +62,9 @@ Autonomous job-application engine for SWE/ML roles. Discovers openings, enriches
 - [x] Resume tailoring with strict no-invention rules + structured JSON metadata
 - [x] Apply-gate detection — excludes Workday/Oracle/LinkedIn/Wellfound/etc. from apply pile before Claude tokens are spent
 - [x] Filtering: `--level`, `--specialty`, `--location`, `--remote`, `--source`, `--company`, `--gated`/`--no-gated`
-- [x] Direct apply runner (stateless library-shape) — Anthropic SDK + Playwright + Bright Data CDP, with prompt caching, idempotent navigate, batched `fill_many`/`click_many`, deterministic opener (forced `navigate` then `read_form`), and inline writeback to the job store
+- [x] Direct apply runner (stateless library-shape) — OpenAI SDK via OpenRouter + Playwright + Bright Data CDP, with prompt caching, idempotent navigate, batched `fill_many`/`click_many`, deterministic opener (forced `navigate` then `snapshot`), and inline writeback to the job store
+- [x] Ref-based tool design — `snapshot()` mints stable refs on interactive elements; `open_dropdown` + `pick_option` replace the brittle `select_combobox` and handle native `<select>` + ARIA comboboxes (react-select, Greenhouse, Workday) with one path
+- [x] Model swappability via OpenRouter — default `anthropic/claude-sonnet-4-6`; `--model deepseek/...` / `meta-llama/...` / `openai/...` for A/B tests
 - [x] Free-text answers grounded in the tailored resume + profile (no hallucinated projects/metrics)
 
 ## What's not shipped yet
@@ -116,10 +120,13 @@ pip install -e .
 ### 1. `.env` at repo root
 
 ```bash
-# required — discovery + enrichment + tailor + apply
+# required — discovery + enrichment + tailor
 BRAVE_SEARCH_API_KEY=...
 SPIDER_API_KEY=...
 ANTHROPIC_API_KEY=...
+
+# required — apply runner (LLM via OpenRouter)
+OPENROUTER_API_KEY=sk-or-v1-...
 
 # required — apply step (Bright Data residential Chrome via CDP)
 BRIGHTDATA_CUSTOMER_ID=...
@@ -297,9 +304,9 @@ applyd/
 │   ├── callback.py            # LEGACY — FastAPI receiver for the OpenClaw skill
 │   ├── apply/                 # the apply step
 │   │   ├── browser.py         # Bright Data CDP URL builder + Playwright context
-│   │   ├── tools.py           # tool dispatchers + TOOL_DEFS schema
+│   │   ├── tools.py           # ref-based tools + TOOL_DEFS (OpenAI shape)
 │   │   ├── prompts.py         # system prompt + per-job user prompt builder
-│   │   └── runner.py          # Anthropic tool-use loop; entry point
+│   │   └── runner.py          # OpenAI SDK → OpenRouter tool-use loop; entry
 │   ├── commands/              # one CLI subcommand per file
 │   │   ├── discover.py
 │   │   ├── enrich.py
