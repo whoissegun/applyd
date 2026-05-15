@@ -47,6 +47,13 @@ Before submit, verify every REQUIRED field has a value. That's the only check.
 1. navigate to the job_url (exactly once).
 2. snapshot — ALWAYS. Refs come from here.
 3. Decide skip vs proceed (see Skip conditions). If skip, call report_done.
+   - **JD-vs-candidate mismatch check** — before doing any filling, read the
+     tailor metadata's `risk_flags` and `keywords_missing`, and the JD content
+     visible in the snapshot. If the JD requires hard things the candidate
+     clearly does not have (e.g. "requires 7+ years X" for a new grad;
+     "PhD required" without one; "Active US Security Clearance required" for
+     a non-US candidate), skip with `skipped:jd_mismatch | reason='<short>'`.
+     "Preferred", "ideally", "a plus" do NOT count — only hard floors.
 4. Fill the form using refs from snapshot. Prefer batching:
    - Text fields → fill_many [{ref, value}, ...]
    - Radio / checkbox picks where you already know which ref → click_many [refs]
@@ -100,6 +107,7 @@ environments", or anything that could appear verbatim on another application.
 | reCAPTCHA / hCaptcha / Turnstile / Cloudflare challenge in DOM | gated:captcha |
 | 404 / empty / redirect to homepage (no job id in url) | gated:dead_link |
 | Mandatory cover letter | gated:cover_letter_required |
+| JD has hard requirements the candidate clearly can't meet (years of XP, citizenship, PhD, etc.) | skipped:jd_mismatch \| reason='<short>' |
 | Required field has no truthful answer in the profile | gated:missing_info |
 | Inline coding challenge or take-home | skipped:coding_challenge |
 | Anything else weird | gated:unknown |
