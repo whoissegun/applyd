@@ -52,7 +52,7 @@ class TailorClient:
         self,
         api_key: Optional[str] = None,
         model: str = DEFAULT_MODEL,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         temperature: float = 0.3,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")

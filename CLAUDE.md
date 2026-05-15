@@ -1,48 +1,38 @@
 # applyd
 
-Autonomous job-application engine for SWE/ML roles. Pipeline: **discover** jobs across aggregators + ATS APIs + search dorks → **enrich** with full descriptions via tiered cascade → **tailor** resume per job via Claude API → *(future)* contact discovery → *(future)* cold outreach.
+Autonomous job-application engine for SWE/ML roles. Pipeline: **discover** jobs across aggregators + ATS APIs + search dorks → **enrich** with full descriptions via tiered cascade → **tailor** resume per job via Claude API → *(future)* apply via headless browser → *(future)* contact discovery → *(future)* cold outreach.
 
-Positioned for eventual open-source release: BYO credentials, single user per instance, self-hostable.
+Direction as of 2026-05-14: pivoting from personal-tool / single-tenant to **multi-tenant SaaS** on Supabase. Discovery/enrich/tailor pipelines are stateless and ready to thread `user_id` through; auth, per-user repos, apply layer, and frontend are the in-flight work.
 
 ---
 
 ## Status
 
 **Shipped:**
-- Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches
-- Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor)
-- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output; writes `resume_pdf_path` back onto the Job
-- Apply layer (scaffold) — OpenClaw agent drives the browser; applyd provides callback + dispatch:
-  - `openclaw/skills/applyd-apply/SKILL.md` — prose instructions, loaded via `skills.load.extraDirs`
-  - `src/applyd/callback.py` — FastAPI `POST /apply-result` writes back to jobs.json
-  - `applyd callback` — runs the callback server
-  - `applyd apply-one` — picks next pending job and POSTs to OpenClaw's `/v1/chat/completions`
-- Filtering / CLI (`applyd discover | enrich | tailor | jobs | resolve | callback | apply-one`)
+- Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches.
+- Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor).
+- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output.
+- Direct apply runner (`src/applyd/apply/`) — library-shape `python -m applyd.apply.runner <job_id>`. OpenRouter (OpenAI-compatible API) → tool-use loop → Playwright over Bright Data CDP. Reads `./profile.md` (or `--profile <path>`) as prose. Writes status inline to the job store. No daemon, no callback HTTP.
+- Supabase schema (3 migrations in `supabase/migrations/`): users/profiles/resumes/subscriptions, shared `companies`+`jobs` catalog, applications, tailored_resumes, apply_attempts, usage_events, `internal.*` worker caches. RLS on every public table; explicit grants (handles the 2026-04-28 Data API exposure breaking change); auto-create-profile + auto-create-subscription on signup via trigger on `auth.users`.
+- Supabase-backed shared-catalog repos: `src/applyd/db/{client,jobs_repo,companies_repo}.py`. Smoke-tested live: upsert with company resolution, idempotency, get, mark_enriched, iter_pending_enrichment.
 
-**Scaffolded but NOT tested end-to-end yet:**
-- A live OpenClaw → Bright Data → real apply form run. Everything up to the dispatch is unit-smoke-tested, but the agent has never actually filled a real form via this pipeline.
-
-**Not yet built:**
-- Daily digest (summary of applied/skipped/failed at end of day)
-- Real-time chat channel for skip pings (Telegram/Discord integration in OpenClaw)
-- Cloud deployment (Railway/Fly/DO with Docker Compose for OpenClaw + callback + cron)
-- Contact discovery (Sema vs Apollo — open question)
-- Outreach email pipeline (blocked on 3–4 week domain warm-up)
-- Structured JD extraction (planned lazy, on first tailor per job)
+**In flight / not yet built:**
+- Auth flow (signup/login/session — frontend choice not made yet).
+- Per-user repos: `ApplicationsRepo`, `TailoredResumesRepo`, `ApplyAttemptsRepo`, `UsageEventsRepo`.
+- Migrating callers (discovery / enrichment / tailor CLI + apply runner) off `data/jobs.json` + `JobStore` onto the Supabase repos. Right now both coexist; the SDK-backed repos exist but nothing calls them yet.
+- Splitting per-user fields off the `Job` Pydantic model (`resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`) once the per-user repos land.
+- Adapting the direct apply runner to take `user_id` and write outcomes into `applications` + `apply_attempts` rows; replacing the `profile.md`-file path with a DB read of `user_profiles.profile_answers`.
+- Frontend dashboard — likely Next.js + Supabase SSR; not started.
+- Stripe billing / metered usage on `usage_events`.
+- Daily digest, skip-pings channel, cloud deployment, contact discovery, outreach pipeline.
 
 ### Next session — priority order
 
-1. **Fill in USER.md.** Open `~/.openclaw/workspace/USER.md` (currently still the Jane Doe template) and replace with user's real info. The `profile.example.md` in repo is what the template looked like.
-2. **Get at least one tailored PDF.** Pick a job with a good description, run `applyd tailor <job_id>`. Confirm `resume_pdf_path` populated on the job.
-3. **First live end-to-end test** (`APPLYD_TEST_MODE=true`):
-   - Terminal 1: `applyd callback` (must be running when the skill hits it)
-   - Terminal 2: `applyd apply-one`
-   - Expect: agent loads page, fills form, takes screenshot to `data/apply_screenshots/`, POSTs `status=applied` to callback, jobs.json gets updated.
-4. **Debug whatever breaks.** Common suspects: skill doesn't know how to invoke OpenClaw's browser tool with the CDP URL; upload-file tool-use shape; react-select combobox picks on Greenhouse/Lever.
-5. **Watch token cost.** Record per-form prompt/completion tokens from the first 3 runs. Extrapolate before scaling up.
-6. **Flip `APPLYD_TEST_MODE=false` only after ≥5 test-mode runs visually verified.**
-
-Holding off until later: daily digest, Telegram skip pings, cloud deployment, anything multi-tenant.
+1. **Migrate one writer off `JobStore`.** Pick discovery; swap the in-memory upsert path onto `JobsRepo.upsert`. Goal: remove the JSON store on the discovery path.
+2. **Auth flow.** Pick the frontend shape (Next.js + Supabase SSR is path-of-least-resistance) and stand up signup → triggers auto-populate profile + subscription. Verify with a real user, not the service-key smoke test.
+3. **Per-user repos.** `ApplicationsRepo` + `TailoredResumesRepo` first — they unblock migrating the tailor CLI to write per-(user, job) rows instead of `Job.resume_pdf_path`.
+4. **Master resume into `user_resumes`.** One row per user; UI uploads or pastes the .tex.
+5. **Adapt the direct apply runner for multi-tenant.** Add `user_id`, swap `JobStore`/`mark_apply` for `ApplicationsRepo` + `ApplyAttemptsRepo`, read profile from `user_profiles.profile_answers` instead of a file. Decide Bright Data CDP vs Browserbase for the SaaS-scale browser layer.
 
 ---
 
@@ -51,20 +41,18 @@ Holding off until later: daily digest, Telegram skip pings, cloud deployment, an
 ```bash
 applyd discover              # aggregators + broad search + targets.json companies
 applyd enrich                # fetch full JD descriptions (threaded, --workers 8 default)
-applyd tailor <job_id>       # LLM-tailored resume.tex + PDF + metadata.json; sets resume_pdf_path
+applyd tailor <job_id>       # LLM-tailored resume.tex + PDF + metadata.json
 applyd jobs --level new_grad --specialty ml --remote   # query store
 applyd resolve "Stripe"      # debug: company name → (ATS, slug)
-applyd callback              # run HTTP server the OpenClaw skill POSTs results to (port 9000)
-applyd apply-one             # dispatch the next pending job to OpenClaw
 ```
 
-Store: `data/jobs.json` (plain JSON dict keyed by stable job id). Each Job carries its own lifecycle fields: `resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`.
+Store today: `data/jobs.json` (plain JSON dict keyed by stable job id). Each Job carries its own lifecycle fields (`resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`). Slated to move to Supabase as the writers migrate.
 
 ---
 
 ## Architecture
 
-Single-process Python. Pydantic `Job` model. JSON file store.
+Single-process Python today; the data layer is mid-migration to Supabase (Postgres + Auth + Storage + RLS).
 
 ### Layers
 
@@ -92,14 +80,23 @@ Single-process Python. Pydantic `Job` model. JSON file store.
 - `validate.py` — structural diff: no invented companies, education preserved, brace balance, header intact
 - `compile.py` — tectonic wrapper → PDF
 
+**4. DB / Supabase** (`db/`) — the new data access layer.
+- `client.py` — worker-side singleton using `SUPABASE_SECRET_KEY` (bypasses RLS). Frontends build their own with the publishable key + a user JWT.
+- `jobs_repo.py` — shared-catalog reads/writes. Resolves company via `CompaniesRepo` internally; `upsert`, `get`, `mark_enriched`, `iter_pending_enrichment`.
+- `companies_repo.py` — case-insensitive upsert by `canonical_name`.
+
 ---
 
 ## Key design decisions (and why)
 
 ### Data
-- **JSON file (`data/jobs.json`), not SQLite/Postgres.** Single writer, no network, zero ops. JSON is enough at current scale. When second writer appears: upgrade.
-- **Opportunistic cache seeding.** Aggregator/broad-search URLs on ATS domains are parsed for `(company, ats, slug)` and pre-populate the resolver cache for free. See `_seed_cache_from_jobs` in `cli.py`.
-- **Master resume is the sole source of truth.** No separate fact bank file. User is expected to include everything they've ever done in `resume_base.tex`; tailoring reorders/rephrases/drops but never adds experiences/metrics/tech not in master.
+- **Supabase (Postgres + Auth + RLS + Storage) is the multi-tenant backbone.** Picked over a Railway PG-only setup because auth, RLS, and resume blob storage come bundled — ~80% of the SaaS plumbing we'd otherwise build. Migrating off later is real but doable since the DB is just Postgres.
+- **Jobs are a shared global pool, not per-user copies.** Same posting at Stripe is the same row for everyone. Discovery enriches once; all tenants benefit. Per-user state lives in `applications`.
+- **Companies are normalized into their own table.** Same company gets discovered via aggregator + Brave dork + direct ATS scan; normalizing dedups and makes future company-level state (block lists, applied counts) easy.
+- **Master resume is the sole source of truth.** No separate fact bank. Tailoring reorders/rephrases/drops but never invents.
+- **Profile Q&A bank** = a single freeform `profile_answers text` column on `user_profiles`. UI structures the questions; DB stores raw text. No separate Q&A table.
+- **`applications.job_id` is `ON DELETE SET NULL`**, not CASCADE. If we ever purge stale jobs, application history survives. Same for `tailored_resumes.job_id`.
+- **Auto-provision on signup.** Trigger `on insert on auth.users` calls `internal.handle_new_auth_user()` (SECURITY DEFINER, locked search_path, lives in `internal` schema per Supabase security guidance) — creates `user_profiles` + `user_subscriptions` stub rows.
 
 ### Discovery
 - **Three-layer discovery:** aggregator (free, broad) + broad-search (Brave dorks, finds companies not in user list) + user-specified company names (`targets.json`).
@@ -108,14 +105,14 @@ Single-process Python. Pydantic `Job` model. JSON file store.
 
 ### Enrichment
 - **Try cheapest first.** Tier 1 (ATS API) handles ~40% of non-ATS-described jobs for free. Tier 2 (httpx+trafilatura) handles another ~10%. Only ~50% need paid spider.cloud.
-- **Threaded, not async.** ThreadPoolExecutor at 8 workers. httpx.Client is thread-safe. async would be a bigger refactor for marginal gain; revisit only if we scale to a second use case.
-- **Session-scoped `board_cache`.** When many jobs share a board (e.g. 15 SimplifyJobs URLs to `jobs.ashbyhq.com/runway-ml/*`), fetch that board once per run.
+- **Threaded, not async.** ThreadPoolExecutor at 8 workers. httpx.Client is thread-safe. async would be a bigger refactor for marginal gain.
+- **Session-scoped `board_cache`.** When many jobs share a board, fetch that board once per run.
 
 ### Tailoring
-- **Claude Sonnet 4.6 default.** Prompt caching is mature; cached reads ~10× cheaper. Writing quality on constrained rewrites is strong. Model is swappable via `TailorClient` abstraction.
-- **LaTeX over DOCX.** Text-native (LLM reads/writes directly), diffable, one-binary compile (tectonic), no docxtpl fragility. ATS-parse risk mitigated by using single-column Jake's Resume template (not fancy two-column variants).
-- **Dual output format: JSON metadata + ```latex fenced block.** Avoids JSON-escape hell for LaTeX's pervasive backslashes. Model emits `keywords_covered/missing`, `decisions_log`, `confidence`, `risk_flags` as JSON, then the resume in a fenced block.
-- **Strict no-invention.** Reorder + rephrase + drop. The prompt explicitly forbids fabricating metrics, technologies, projects, scope. Prompt B–style "invention with judgment" rejected (risk: can't defend fabricated metric in interview; anchors the bullet in a way that makes real content feel thinner by contrast).
+- **Claude Sonnet 4.6 default.** Prompt caching is mature; cached reads ~10× cheaper. Writing quality on constrained rewrites is strong. Model swappable via `TailorClient`.
+- **LaTeX over DOCX.** Text-native, diffable, one-binary compile (tectonic), no docxtpl fragility. ATS-parse risk mitigated by single-column Jake's Resume template.
+- **Dual output format: JSON metadata + ```latex fenced block.** Avoids JSON-escape hell for LaTeX's pervasive backslashes.
+- **Strict no-invention.** Reorder + rephrase + drop. Prompt explicitly forbids fabricating metrics, technologies, projects, scope.
 
 ---
 
@@ -123,110 +120,76 @@ Single-process Python. Pydantic `Job` model. JSON file store.
 
 - **DOCX via `docxtpl`.** Binary-file manipulation, package flakiness, debugging pain.
 - **LinkedIn scraping.** Hard ToS violation; ~23% of automation accounts banned within 90 days (2026 data). Losing user's professional LinkedIn account costs more than any feature gain.
-- **Self-hosted Playwright for tier 3.** Spider.cloud handles CSR + anti-bot at ~$0.0005/page. Our own browser pool doesn't earn its keep at <10k/month.
+- **Self-hosted Playwright for tier 3 enrichment.** Spider.cloud handles CSR + anti-bot at ~$0.0005/page. Our own browser pool doesn't earn its keep at <10k/month. (The apply layer is a separate question — Playwright/Browserbase is on the table there.)
 - **"Invention allowed" LLM prompts.** Even with guardrails, fabricated metrics fail in interviews and anchor the whole resume as untrustworthy.
-- **Fact bank file separate from resume.** Redundant; master resume is sole source. User maintains one file.
-- **Hardcoded per-ATS company lists.** Contradicts "general SWE agent" goal. targets.json is names only; resolver does the work.
-- **State-machine library (`transitions`, `python-statemachine`).** At 8 states + 1 author, a plain enum column + audit table is enough. Revisit at second-engineer scale.
+- **Fact bank file separate from resume.** Redundant; master resume is sole source.
+- **Hardcoded per-ATS company lists.** Contradicts "general SWE agent" goal. `targets.json` is names only.
+- **State-machine library (`transitions`, `python-statemachine`).** Plain enum column + audit table is enough.
 - **Celery / Redis Queue / Dagster / Prefect.** Enrichment at 50–3000 jobs/run is a for-loop + ThreadPoolExecutor.
-- **SQLite right now.** JSON file scales fine at <50k jobs. Upgrade to SQLite or Postgres when we add a second writer (web UI, scheduled cron) — the JobStore interface is abstract enough to swap.
+- **SQLite or self-managed Postgres.** Supabase was chosen instead — auth/RLS/storage bundled.
+- **A daemon-style agent runtime for the apply step.** Single-process daemons designed for one human's use don't fit multi-tenant SaaS. Stateless library-shape (`python -m applyd.apply.runner`) is what we have, and what scales.
 
 ---
 
 ## Gotchas — things that burned us and the fixes
 
 ### Jake's Resume LaTeX template
-- **`\input{glyphtounicode}` + `\pdfgentounicode=1` break tectonic.** pdflatex-specific primitives not in tectonic's default engine. Strip those two lines from the base resume. Quality impact on PDF Unicode copy-paste is negligible for ATS parsing.
-- **Original Jake's template paste often missing `\resumeSubHeadingListEnd` after Experience section.** A long-standing copy-paste bug across many resumes. LaTeX doesn't fail until the end of the document. Add one before `\section{Projects}`.
+- **`\input{glyphtounicode}` + `\pdfgentounicode=1` break tectonic.** pdflatex-specific primitives not in tectonic's default engine. Strip those two lines.
+- **Original template often missing `\resumeSubHeadingListEnd` after Experience section.** LaTeX doesn't fail until end-of-document. Add one before `\section{Projects}`.
 
 ### ATS API quirks
-- **SmartRecruiters bulk list omits descriptions.** Hit `/v1/companies/{company}/postings/{internal_id}` per-job. The internal ID differs from the URL-path `refNumber` — match via bulk list, then use the matched job's `external_id` for the per-job call. Handled in `fetcher._fetch_smartrecruiters_description`.
-- **Workable API changed.** Old `GET /api/v1/widget/accounts/{slug}?details=true` now returns `{jobs: []}` for every account. Live endpoint: `POST /api/v3/accounts/{slug}/jobs` with JSON body `{}`. Our `ats/workable.py` uses the new one.
+- **SmartRecruiters bulk list omits descriptions.** Hit `/v1/companies/{company}/postings/{internal_id}` per-job. The internal ID differs from the URL-path `refNumber` — match via bulk list. Handled in `fetcher._fetch_smartrecruiters_description`.
+- **Workable API changed.** Old `GET /api/v1/widget/accounts/{slug}?details=true` now returns `{jobs: []}` for every account. Live endpoint: `POST /api/v3/accounts/{slug}/jobs` with body `{}`.
 - **Ashby has no public per-job endpoint.** Fetching `/posting-api/job-board/{company}` returns all jobs; filter by UUID client-side.
-- **Ashby URLs ending in `/application` point to the form, not the JD.** Tier-1 ATS lookup handles this correctly via bulk-list-and-filter, as long as the job UUID is still live in the board.
-- **SimplifyJobs URLs go stale.** A posting may still appear in `listings.json` after the ATS removes it. We re-hydrate via ATS API in tier 1 — stale postings legitimately return None from enrichment.
+- **Ashby URLs ending in `/application` point to the form, not the JD.** Tier-1 ATS lookup handles this via bulk-list-and-filter as long as the UUID is still live.
+- **SimplifyJobs URLs go stale.** A posting may still appear in `listings.json` after the ATS removes it. Tier 1 re-hydration filters these.
 
 ### Search APIs
 - **SerpAPI is in an active DMCA lawsuit (Google, Dec 19 2025).** Don't build on it long-term. Brave is safer.
-- **Serper's site-restricted dorks misidentify big brands.** Stripe → `embed`, Anthropic → `fullstackacademy`. Dealbreaker bug. Brave gets them right. Keep Brave default.
+- **Serper's site-restricted dorks misidentify big brands.** Stripe → `embed`, Anthropic → `fullstackacademy`. Brave gets them right.
 
 ### Spider.cloud
-- **"smart" mode sometimes picks HTTP for an SPA and returns the app shell (~25 chars).** Our cascade retries with explicit `request: "chrome"` as tier 3b.
+- **"smart" mode sometimes picks HTTP for an SPA and returns the app shell (~25 chars).** Cascade retries with explicit `request: "chrome"` as tier 3b.
 - **Response shape varies** (dict vs list-of-one-dict). Normalized in `SpiderClient.scrape`.
 
-### OpenClaw
-- **Symlinks outside `~/.openclaw/workspace/` are rejected** (`reason=symlink-escape` in skill loader). You can't symlink `profile.md` → `USER.md` or a skill dir from elsewhere. Workarounds: for skills, use `skills.load.extraDirs` config; for USER.md and other bootstrap files, write the actual file into the workspace.
-- **`/v1/chat/completions` is off by default.** Must set `gateway.http.endpoints.chatCompletions.enabled=true`.
-- **`gateway.mode` is not set by the onboarding wizard in all paths.** If the daemon refuses to start with "missing gateway.mode," run `openclaw config set gateway.mode local`.
-- **Onboarding wizard crashes at the Feishu plugin step** (`Cannot find module '@larksuiteoapi/node-sdk'`) on Node 24. The crash happens after model + auth setup, so the core config is usually fine — proceed with `openclaw config set` for anything else.
-- **Prompt tokens per call are large** (~10–30k before your question is even processed). Baseline context injection is heavy. Worth watching during apply runs; consider Haiku swap if apply-step tokens get expensive.
+### Supabase
+- **New tables in `public` are not auto-exposed to the Data API** (breaking change 2026-04-28). Migrations must `GRANT` explicitly to `anon`/`authenticated`. Initial schema migration handles this; future tables must follow suit.
+- **`SECURITY DEFINER` functions don't go in `public`.** Put them in `internal` and `set search_path = ''`. The signup trigger function is in `internal.handle_new_auth_user()`.
+- **Python 3.9 `datetime.fromisoformat`** rejects 5-digit microseconds (Supabase emits them). `db/jobs_repo.py` uses `dateutil.isoparse` to be tolerant. Worth bumping `requires-python` to `>=3.11` and dropping the workaround.
 
 ---
 
-## Apply layer / OpenClaw integration
+## Apply layer
 
-### Architecture
+Direct runner at `src/applyd/apply/`. Library-shape, single-process: call it, it returns.
 
 ```
-cron (or manual) ──► applyd apply-one
+python -m applyd.apply.runner <job_id> [--model <slug>] [--profile <path>] [--test-mode true|false]
                          │
-                         │ POST /v1/chat/completions (model: openclaw/default)
+                         │ OpenAI SDK ──► OpenRouter (default: anthropic/claude-sonnet-4-6)
                          ▼
-                   OpenClaw gateway (127.0.0.1:18789)
-                         │ loads workspace context:
-                         │   USER.md           (user profile)
-                         │   skills/applyd_apply/SKILL.md  (via skills.load.extraDirs)
-                         ▼
-                   Claude Sonnet 4.6
-                         │ tool-use loop:
-                         ▼
-                   OpenClaw browser tool ──CDP──► Bright Data ──► apply form
+                   tool-use loop (TOOL_DEFS in apply/tools.py)
                          │
-                         │ at end, skill POSTs via curl:
+                         │ CDP
                          ▼
-                   applyd callback (127.0.0.1:9000/apply-result)
-                         │ writes apply_status to jobs.json
+                   Playwright ──► Bright Data Chrome ──► apply form
+                         │
+                         ▼
+                   JobStore.mark_apply(status, note)  [today]
+                   ApplicationsRepo / ApplyAttemptsRepo  [once auth lands]
 ```
 
-### File layout
+- **OpenRouter, not direct Anthropic SDK**, so the model is swappable per run (`--model deepseek/...`, `meta-llama/...`, etc.). Anthropic API key is for tailoring only.
+- **`APPLYD_TEST_MODE=true`** keeps the agent from clicking submit — fills the form, screenshots optional, returns "would have submitted." Flip to `false` only after you've eyeballed test-mode runs.
+- **Profile**: `--profile <path>`, defaults to `./profile.md`. SaaS migration moves this to a row in `user_profiles.profile_answers`.
+- **Failures/skips only**: no screenshots or transcripts on success. ATS confirmation emails are the receipt of record.
 
-- **In repo (version controlled):**
-  - `openclaw/skills/applyd-apply/SKILL.md` — apply agent instructions. Loaded by OpenClaw via `skills.load.extraDirs` pointing at `openclaw/skills`. Hot-reloads on edit.
-  - `profile.example.md` — template for USER.md. Copy to workspace on new machine install.
-  - `src/applyd/callback.py` — FastAPI callback server.
-  - `src/applyd/apply/browser.py` — Bright Data CDP URL builder (legacy from pre-OpenClaw plan, kept in case we need it; the OpenClaw browser tool reads `BRIGHTDATA_CDP_URL` env directly).
-- **Outside repo (on the user's machine, not in git):**
-  - `~/.openclaw/openclaw.json` — OpenClaw config (gateway mode, token, extraDirs).
-  - `~/.openclaw/workspace/USER.md` — actual user profile. Edit here directly. Not symlinked.
-
-### What's tested vs what's not
-
-Tested in isolation:
-- Callback `/health`, `/apply-result` (200/401/404 paths all return correct codes and update jobs.json).
-- OpenClaw gateway responds to `/v1/chat/completions`.
-- Agent reads USER.md from workspace.
-- Agent reports `applyd_apply` skill as available.
-
-Not yet tested (priority for next session):
-- A full live apply-one → agent runs → agent drives Bright Data → agent POSTs callback → jobs.json updates. End-to-end.
-- Whether the agent actually follows SKILL.md's skip conditions correctly.
-- Real per-form token count and cost.
-
-### How to run (once USER.md is filled in)
-
-```bash
-# terminal 1 — keep running
-source .venv/bin/activate && applyd callback
-
-# terminal 2 — one dispatch
-source .venv/bin/activate && applyd apply-one
-```
-
-`APPLYD_TEST_MODE=true` in `.env` keeps the agent from clicking submit. Flip to `false` only after you've eyeballed a few test-mode runs.
-
-### Multi-tenant is off the table for v1
-
-Discussed and rejected for the personal-tool phase. If the product ever grows beyond one user: **do not try to make OpenClaw multi-tenant** — it's designed for personal use. Rebuild the apply step as a focused Claude API + Playwright/Browserbase service; discovery/enrich/tailor pipelines already multi-tenant-ready (stateless, just add user_id).
+Multi-tenant work the runner needs:
+- Thread a `user_id` parameter through `runner.py`'s entry.
+- Replace `JobStore` reads with `JobsRepo.get(job_id)` + auth context.
+- Replace `JobStore.mark_apply` with `ApplicationsRepo.update_status` + `ApplyAttemptsRepo.insert`.
+- Replace profile-file reads with `user_profiles.profile_answers` from DB.
+- Decide on browser provider for SaaS scale: Bright Data CDP per-tenant (current) vs Browserbase (managed).
 
 ---
 
@@ -234,28 +197,27 @@ Discussed and rejected for the personal-tool phase. If the product ever grows be
 
 Required env vars (`.env` at repo root, auto-loaded by `applyd.config.load_env`):
 - `BRAVE_SEARCH_API_KEY` — primary search provider
-- `SPIDER_API_KEY` — tier 3 fetcher
+- `SPIDER_API_KEY` — tier 3 enrichment fetcher
 - `ANTHROPIC_API_KEY` — tailoring
-- `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_ZONE`, `BRIGHTDATA_ZONE_PASSWORD` — Scraping Browser
-- `OPENCLAW_TOKEN` — bearer token for the OpenClaw gateway; auto-generated by their onboarding wizard, lives in `~/.openclaw/openclaw.json` under `gateway.auth.token`
-- `APPLYD_CALLBACK_TOKEN` — shared secret for the callback server; any random string
-- `APPLYD_TEST_MODE=true` — keep during testing so the agent fills but never submits
+- `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_ZONE`, `BRIGHTDATA_ZONE_PASSWORD`, `BRIGHTDATA_HOST`, `BRIGHTDATA_CDP_PORT` — Bright Data Scraping Browser; will be used by the rebuilt apply layer if we pick the self-hosted Playwright path
+- `SUPABASE_URL` — project HTTPS gateway (`https://<ref>.supabase.co`)
+- `SUPABASE_PUBLISHABLE_KEY` — replaces legacy `anon`; safe to expose in frontends
+- `SUPABASE_SECRET_KEY` — replaces legacy `service_role`; server/workers only, bypasses RLS
+- `OPENROUTER_API_KEY` — direct apply runner's LLM gateway (default model: `anthropic/claude-sonnet-4-6`)
+- `APPLYD_TEST_MODE=true|false` — when `true`, the apply runner stops short of submitting. Default to `true` during scale-up
 
 Optional:
 - `SERPER_API_KEY` — fallback search
 - `SEARCH_PROVIDER=brave|serper` — override default
 - `BROAD_SEARCH_TTL_HOURS=6` — dork-result cache TTL
-- `OPENCLAW_URL` — defaults to `http://127.0.0.1:18789/v1/chat/completions`
-- `APPLYD_CALLBACK_URL` — defaults to `http://127.0.0.1:9000/apply-result`
-- `APPLYD_DISPATCH_TIMEOUT` — seconds to wait for the agent to finish (default 600)
 
 External tools:
 - `tectonic` — LaTeX → PDF (`brew install tectonic`)
-- `openclaw` — agent runtime (`curl -fsSL https://openclaw.ai/install.sh | bash -s -- --no-onboard`)
+- `supabase` CLI — migrations + project link (`brew install supabase/tap/supabase`)
 
 ---
 
-## Current store stats (as of last run)
+## Current store stats (as of last single-tenant run)
 
 - ~7,714 unique jobs discovered
 - ~5,000 with descriptions from ATS bulk fetches (during `discover`)
@@ -265,9 +227,12 @@ External tools:
 
 ## Open questions
 
-- **Contact discovery: Sema vs Apollo?** Sema pending scope confirmation with user's friend. Apollo's 2026 free tier turned out to be a 50-credit trial (not the 10k/month claimed by third-party blogs) — real Apollo usage requires the $49/mo Basic plan.
-- **HITL review UI shape.** Current plan: FastAPI + HTMX + Jinja dashboard for resume review, Telegram bot for outreach approval. Not started.
-- **Structured JD extraction.** Planned lazy (on first tailor per job), cached on Job record. Currently the tailor prompt does extraction inline — works, but means re-tailoring same job re-extracts.
+- **Contact discovery: Sema vs Apollo?** Sema pending scope confirmation with user's friend. Apollo's 2026 free tier is a 50-credit trial; real usage needs the $49/mo Basic plan.
+- **BYO-API-keys vs platform-pays-and-meters.** SaaS direction usually pushes platform-pays + Stripe metered billing on `usage_events`. Not decided.
+- **Frontend stack.** Next.js + Supabase SSR is the path-of-least-resistance; not committed.
+- **Apply runtime: Browserbase vs Playwright + Bright Data.** TBD when we start the apply rebuild.
+- **HITL review UI.** Likely Next.js dashboard. Not started.
+- **Structured JD extraction.** Planned lazy (on first tailor per job), cached on the job row. Currently inline in the tailor prompt — works but re-extracts on re-tailor.
 
 ---
 
@@ -276,16 +241,16 @@ External tools:
 When working in this repo with this user:
 - Be direct and honest. User explicitly asked for "unbiased pair programmer" feedback.
 - When the user pushes back, concede cleanly if they're right. Don't defend bad code.
-- Keep responses tight. User gets overwhelmed by walls of text. Short bullets > long prose. Analogies or small tables > sprawling explanations.
+- Keep responses tight. User gets overwhelmed by walls of text. Short bullets > long prose. Small tables > sprawling explanations.
 - Disclose bias: when recommending Anthropic products (Claude, Claude Code, Claude Agent SDK), explicitly note you're made by Anthropic.
-- Prefer "ship default + make it swappable" over "pick the best and commit forever." User values swap-ability.
-- Don't add features, abstractions, or tests beyond what's asked. User tolerates sharp edges in v1.
+- Prefer "ship default + make it swappable" over "pick the best and commit forever."
+- Don't add features, abstractions, or tests beyond what's asked. Sharp edges in v1 are fine.
 - Ask one clarifying question if scope is ambiguous, then proceed. Don't ask two or three.
 
 ---
 
 ## Important context about the user
 
-Divine Jojolola — Carleton University Bachelor of CS, graduates April 2027. Currently Shopify ML Infra intern (Sep 2025–present); heading to Lyft summer 2026. Targets applied ML at AI labs (Runway, Stability, Anthropic, Adobe Firefly) + general new-grad SWE as backup. Nigerian national on a Canadian study/work permit — eligible to work in Canada; needs sponsorship for US/Europe/elsewhere.
+Divine Jojolola — Carleton University Bachelor of CS, graduates April 2027. Currently Shopify ML Infra intern (Jan 2026 – Apr 2026), prior Shopify SWE intern (Sep 2025 – Dec 2025); heading to Lyft summer 2026. Targets applied ML at AI labs (Runway, Stability, Anthropic, Adobe Firefly) + general new-grad SWE as backup. Nigerian national on a Canadian study/work permit — eligible to work in Canada; needs sponsorship for US/Europe/elsewhere.
 
-**Apply strategy is volume-first.** No grad-year filter, no location filter, no on-site/remote filter. Skip only on dedupe (already applied) or dead link. Work-auth questions on forms get answered truthfully (needs sponsorship outside Canada); if a US posting refuses sponsorship, rejection is the cost of being in the funnel — that's fine. Goal is maximum applications, not precision targeting.
+**Apply strategy is volume-first.** No grad-year filter, no location filter, no on-site/remote filter. Skip only on dedupe (already applied) or dead link. Work-auth questions answered truthfully (needs sponsorship outside Canada); US postings refusing sponsorship will reject — that's the cost of being in the funnel. Goal is maximum applications, not precision targeting.

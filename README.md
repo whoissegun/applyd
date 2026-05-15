@@ -2,7 +2,7 @@
 
 Autonomous job-application engine for SWE/ML roles. Discovers openings, enriches them with full job descriptions, tailors your LaTeX resume per posting, and has a browser agent fill out the apply form for you. Self-hosted today; multi-tenant SaaS is the next step.
 
-> **Status (v0.1):** discovery + enrichment + tailor + apply all run end-to-end against real boards. The apply step migrated off OpenClaw to a stateless, library-shape direct runner — `Anthropic SDK + Playwright + Bright Data CDP` — so the same code can scale from one user on a laptop to a multi-tenant service. See [CLAUDE.md](CLAUDE.md) for deeper architecture notes and rejected paths.
+> **Status (v0.1):** discovery + enrichment + tailor + apply all run end-to-end against real boards. The apply step is a stateless, library-shape direct runner — OpenAI SDK → OpenRouter + Playwright + Bright Data CDP — so the same code can scale from one user on a laptop to a multi-tenant service. See [CLAUDE.md](CLAUDE.md) for deeper architecture notes and rejected paths.
 
 ---
 
@@ -74,7 +74,7 @@ Tracked as issues — see [the issue tracker](https://github.com/whoissegun/appl
 - [#2 Daily digest of applied/skipped/failed](https://github.com/whoissegun/applyd/issues/2)
 - [#3 Real-time skip pings (Telegram/Discord)](https://github.com/whoissegun/applyd/issues/3)
 - [#4 Cloud deployment (Docker + Hetzner/Fly/Railway)](https://github.com/whoissegun/applyd/issues/4)
-- Multi-tenant migration — Postgres-backed job store, per-tenant profiles, chat UI for end-users (the single biggest in-flight piece; replaces `data/jobs.json` and the local `~/.openclaw/workspace/USER.md` dance with rows in a DB)
+- Multi-tenant migration — Supabase-backed job store, per-tenant profiles, chat UI for end-users (the single biggest in-flight piece; replaces `data/jobs.json` and the local profile file with rows in a DB)
 - [#5 Contact discovery: Sema vs Apollo](https://github.com/whoissegun/applyd/issues/5)
 - [#6 Cold outreach email pipeline](https://github.com/whoissegun/applyd/issues/6)
 - [#7 Structured JD extraction at enrichment time](https://github.com/whoissegun/applyd/issues/7)
@@ -87,10 +87,10 @@ The direct apply runner is library-shape — you call `python -m applyd.apply.ru
 
 Two things still tie applyd to a single user on a single machine:
 
-- **`data/jobs.json`** is one process's source of truth. The next major change is swapping `JobStore` for a Postgres-backed store keyed by `(tenant_id, job_id)`. The interface is already abstract enough to swap.
-- **Profile lives at `~/.openclaw/workspace/USER.md`** today (carried over from the legacy OpenClaw setup). Multi-tenant means profiles become DB rows passed into the runner per request, not a file on disk.
+- **`data/jobs.json`** is one process's source of truth. Supabase Postgres schema + `JobsRepo` already exist (`src/applyd/db/`), but writers haven't been migrated yet. Per-user repos (`ApplicationsRepo`, `TailoredResumesRepo`, etc.) are also pending.
+- **Profile is read from a file** (`--profile <path>`, defaults to a holdover location). Multi-tenant means profiles become rows in `user_profiles.profile_answers`, passed into the runner per request.
 
-Both are scoped, not built. If you're running applyd for yourself today, neither matters.
+Both are scoped and partially scaffolded. If you're running applyd for yourself today, neither matters.
 
 ---
 
@@ -110,8 +110,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
-
-> **Note on OpenClaw:** earlier versions of applyd ran the apply step through a local OpenClaw daemon. That path is deprecated and will be removed once the direct runner is fully proven. See [Apply step: legacy OpenClaw path](#apply-step-legacy-openclaw-path) at the bottom if you need it.
 
 ---
 
@@ -143,12 +141,10 @@ BROAD_SEARCH_TTL_HOURS=6
 BRIGHTDATA_HOST=brd.superproxy.io         # default
 BRIGHTDATA_CDP_PORT=9222                  # default
 
-# legacy (only needed if you're using the old OpenClaw apply path)
-OPENCLAW_TOKEN=...
-APPLYD_CALLBACK_TOKEN=...
-OPENCLAW_URL=http://127.0.0.1:18789/v1/chat/completions
-APPLYD_CALLBACK_URL=http://127.0.0.1:9000/apply-result
-APPLYD_DISPATCH_TIMEOUT=600
+# multi-tenant SaaS (in progress — only the data layer wires up so far)
+SUPABASE_URL=https://<ref>.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
 ```
 
 ### 2. Base resume — `resume_base.tex` at repo root
@@ -175,9 +171,9 @@ Two gotchas specific to tectonic:
 - `companies` — plain names. The resolver figures out the ATS + slug via a Brave dork and caches the mapping in `data/resolver_cache.json`.
 - `broad_dorks` (optional) — overrides the 6 default broad queries. Omit to use defaults.
 
-### 4. Profile — `~/.openclaw/workspace/USER.md` (today) or anywhere via `--profile`
+### 4. Profile — `--profile <path>`
 
-The apply runner reads a profile file as prose context for every invocation. The path defaults to `~/.openclaw/workspace/USER.md` (a carry-over from the legacy OpenClaw setup; in multi-tenant this becomes a DB row). Override per run with `--profile /path/to/your.md`.
+The apply runner reads a profile file as prose context for every invocation. Pass `--profile /path/to/your.md` or drop it at `./profile.md` (the default). In multi-tenant this becomes a DB row (`user_profiles.profile_answers`).
 
 The file should cover everything the agent needs to fill a form:
 
@@ -238,9 +234,7 @@ python -m applyd.apply.runner <job_id> --test-mode=false
 | `applyd tailor <job_id> [--no-compile] [--ignore-errors] [--model X] [--force]` | Generate tailored resume for a job (`--force` overrides gate check) |
 | `applyd jobs [--level] [--specialty] [--location] [--remote] [--source] [--company] [--gated] [--no-gated] [--limit] [--format]` | Query the job store |
 | `applyd resolve <company>` | Debug: company name → (ATS, slug) |
-| `python -m applyd.apply.runner <job_id> [--test-mode true\|false] [--profile PATH] [--model X]` | **The apply step.** Direct runner — drives the form via Anthropic SDK + Playwright + Bright Data CDP. |
-| `applyd callback` *(legacy)* | Run the HTTP callback server for the deprecated OpenClaw path |
-| `applyd apply-one` *(legacy)* | Dispatch the next pending job to OpenClaw |
+| `python -m applyd.apply.runner <job_id> [--test-mode true\|false] [--profile PATH] [--model X]` | **The apply step.** Direct runner — drives the form via OpenAI SDK → OpenRouter + Playwright + Bright Data CDP. |
 
 ---
 
@@ -293,27 +287,29 @@ applyd/
 ├── targets.json               # companies you specifically want tracked
 ├── profile.example.md         # starter template for the apply-runner profile
 ├── requirements.txt           # pinned snapshot (pyproject.toml is the contract)
-├── openclaw/                  # LEGACY — only used by the deprecated `apply-one` path
-│   └── skills/applyd-apply/SKILL.md
+├── supabase/                  # migrations + project link (CLI-managed)
+│   └── migrations/
 ├── src/applyd/
 │   ├── cli.py                 # argparse + main() (lean — dispatch only)
 │   ├── config.py              # .env loader
 │   ├── models.py              # Pydantic Job model
 │   ├── store.py               # JSON file store + pending_apply filter
 │   ├── filters.py             # --level / --specialty / --gated filters
-│   ├── callback.py            # LEGACY — FastAPI receiver for the OpenClaw skill
 │   ├── apply/                 # the apply step
 │   │   ├── browser.py         # Bright Data CDP URL builder + Playwright context
 │   │   ├── tools.py           # ref-based tools + TOOL_DEFS (OpenAI shape)
 │   │   ├── prompts.py         # system prompt + per-job user prompt builder
 │   │   └── runner.py          # OpenAI SDK → OpenRouter tool-use loop; entry
+│   ├── db/                    # Supabase data access layer (multi-tenant in flight)
+│   │   ├── client.py          # service-key singleton (workers bypass RLS)
+│   │   ├── companies_repo.py  # canonical_name upsert
+│   │   └── jobs_repo.py       # shared-catalog upsert/get/iter_pending_enrichment
 │   ├── commands/              # one CLI subcommand per file
 │   │   ├── discover.py
 │   │   ├── enrich.py
 │   │   ├── tailor.py
 │   │   ├── jobs.py
-│   │   ├── resolve.py
-│   │   └── apply.py           # LEGACY — apply-one + callback runner (OpenClaw)
+│   │   └── resolve.py
 │   ├── discovery/
 │   │   ├── aggregators/       # simplifyjobs, broad_search
 │   │   ├── ats/               # greenhouse, lever, ashby, workable, smartrecruiters
@@ -348,28 +344,13 @@ Key files if you're reading the code cold:
 
 ## Known limitations
 
-- **`data/jobs.json` is single-process.** Fine for one user. Multi-tenant requires swapping `JobStore` for a Postgres-backed store; the interface is already abstract.
-- **Profile lives at `~/.openclaw/workspace/USER.md` by default** (legacy holdover; override with `--profile`). Multi-tenant means profiles become DB rows passed in per request.
+- **`data/jobs.json` is single-process.** Fine for one user. Multi-tenant requires switching writers to `JobsRepo` (Supabase-backed). The interface is already abstract; migration is in flight, not complete.
+- **Profile is a file** (pass `--profile <path>`). Multi-tenant means profiles become rows in `user_profiles.profile_answers`.
 - **Apply step proven on Ashby; other ATS coverage unverified.** Greenhouse / Lever / Workable forms haven't been driven live yet — tools are generic but per-ATS quirks (react-select comboboxes, custom file inputs, multi-step Workday wizards) only surface on first contact.
 - **Ambiguous company names** (e.g. "Mercury" the bank vs "Mercury Logistics Group") can resolve to the wrong ATS. Inspect `data/resolver_cache.json` after first run; edit by hand.
 - **Stale aggregator URLs** (posting removed from the ATS between crawls) land in `fetch_tier="failed"`. Expected, not a bug.
 - **Gated domains pre-filtered, not smart.** Workday / Oracle / Taleo / LinkedIn / Wellfound / etc. are skipped before tailor spend. Occasionally miscategorizes a direct-apply Workday; we leave money on the table for ~17% of discovered jobs.
 - **SerpAPI deliberately unsupported** as default search provider (active Google DMCA lawsuit, Dec 2025). Brave is default; Serper kept only as a swappable fallback.
-- **OpenClaw apply path is deprecated** but still in the tree (`commands/apply.py`, `callback.py`, `openclaw/skills/`). Will be deleted once the direct runner is fully validated across more ATSes.
-
----
-
-## Apply step: legacy OpenClaw path
-
-The original apply step ran through a local [OpenClaw](https://openclaw.ai/) daemon: `applyd apply-one` POSTed to the gateway, the `applyd_apply` skill drove an OpenClaw browser tool, and a separate `applyd callback` HTTP server received the result. That path still works but is deprecated — OpenClaw is designed for a single human, which is the wrong shape for a service that applies on behalf of many users.
-
-If you specifically need the legacy path (e.g. for comparison / debugging):
-
-- `applyd callback` — start the callback server (`:9000`)
-- `applyd apply-one` — dispatch the next pending job to OpenClaw
-- Requires `OPENCLAW_TOKEN` + `APPLYD_CALLBACK_TOKEN` in `.env`, an OpenClaw install with `skills.load.extraDirs` pointing at this repo's `openclaw/skills/`, and `playwright-core` installed inside the OpenClaw package.
-
-Will be removed in a future release.
 
 ---
 
