@@ -5,8 +5,6 @@ import sys
 from typing import Optional
 
 from .commands import (
-    cmd_apply_one,
-    cmd_callback,
     cmd_discover,
     cmd_enrich,
     cmd_jobs,
@@ -96,24 +94,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_res.add_argument("company", help="company name to resolve, e.g. 'Stripe'")
     p_res.add_argument("--search-provider", choices=["brave", "serper"])
     p_res.set_defaults(func=cmd_resolve)
-
-    p_cb = sub.add_parser(
-        "callback",
-        help="run the HTTP callback server OpenClaw's apply skill POSTs to",
-    )
-    p_cb.add_argument("--host", default="127.0.0.1",
-                      help="bind address (default 127.0.0.1 — loopback only)")
-    p_cb.add_argument("--port", type=int, default=9000,
-                      help="port (default 9000)")
-    p_cb.set_defaults(func=cmd_callback)
-
-    p_ao = sub.add_parser(
-        "apply-one",
-        help="dispatch the next pending job to OpenClaw's applyd_apply skill",
-    )
-    p_ao.add_argument("--model", default="openclaw/default",
-                      help="OpenClaw agent target (default: openclaw/default)")
-    p_ao.set_defaults(func=cmd_apply_one)
 
     args = parser.parse_args(argv)
     return args.func(args)

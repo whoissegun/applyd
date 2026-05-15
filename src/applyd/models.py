@@ -27,12 +27,12 @@ class Job(BaseModel):
     fetch_error: Optional[str] = None
     # tailoring output (populated by `applyd tailor`)
     resume_pdf_path: Optional[str] = None
-    # apply state (populated by OpenClaw apply agent)
-    # status: None = not attempted, "applied" = submitted, "skipped" = custom challenge / user handles,
-    #         "failed" = unexpected error
+    # apply state — legacy per-user fields, slated to move to public.applications
+    # once the auth-aware apply layer rewrite lands. Keep here so the existing
+    # JSON JobStore continues to work during the Supabase migration.
     apply_status: Optional[str] = None
     apply_attempted_at: Optional[datetime] = None
-    apply_note: Optional[str] = None  # free-form: skip reason, error msg, agent notes
+    apply_note: Optional[str] = None
     # URL-time: "portal" (known gated domain) or None (direct-apply).
     # Runtime agent may overwrite with specific reasons: "signup_required",
     # "login_required", "captcha", "cover_letter_required", "work_auth_block",

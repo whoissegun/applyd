@@ -48,41 +48,38 @@ def _make_client() -> OpenAI:
     return OpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
 
 
-def run(
-    job_id: str,
+def run_apply(
     *,
-    store_path: str = "data/jobs.json",
+    job_id: str,
+    company: str,
+    title: str,
+    job_url: str,
+    resume_pdf_path: str,
+    profile_md: str,
+    resume_tex: str = "",
+    tailor_metadata_json: str = "",
     model: str = DEFAULT_MODEL,
     test_mode: bool | None = None,
-    profile_path: str = "~/.openclaw/workspace/USER.md",
-) -> tuple[str, str, dict[str, int]]:
-    """Run one apply. Returns (status, note, token_usage). Always writes back to store."""
+) -> dict[str, Any]:
+    """Programmatic apply entry — no JobStore, no filesystem profile reads.
+
+    Returns a dict with keys: status, note, tokens, browser_mb. The caller is
+    responsible for persisting results (single-tenant: JobStore; multi-tenant:
+    Supabase repos in applyd.apply.saas).
+    """
     load_env()
     if test_mode is None:
         test_mode = os.environ.get("APPLYD_TEST_MODE", "true").lower() == "true"
 
-    store = JobStore(Path(store_path))
-    store.load()
-    job = store.get(job_id)
-    if not job:
-        raise SystemExit(f"job {job_id} not found in {store_path}")
-    if not job.resume_pdf_path:
-        raise SystemExit(f"job {job_id} has no resume_pdf_path; run `applyd tailor {job_id}` first")
-
-    resume_dir = Path(job.resume_pdf_path).parent
-    profile_md = load_profile(profile_path)
-    resume_tex = _read_or_blank(resume_dir / "resume.tex")
-    metadata_json = _read_or_blank(resume_dir / "metadata.json")
-
     user_blocks = build_user_blocks(
-        job_id=job.id,
-        company=job.company,
-        title=job.title,
-        job_url=job.url,
-        resume_pdf_path=job.resume_pdf_path,
+        job_id=job_id,
+        company=company,
+        title=title,
+        job_url=job_url,
+        resume_pdf_path=resume_pdf_path,
         profile_md=profile_md,
         resume_tex=resume_tex,
-        tailor_metadata_json=metadata_json,
+        tailor_metadata_json=tailor_metadata_json,
         test_mode=test_mode,
     )
 
@@ -104,9 +101,11 @@ def run(
 
     final_status: str | None = None
     final_note: str = ""
+    turns_done: int = 0
+    tool_call_counts: dict[str, int] = {}
 
     print(
-        f"→ direct-apply [{job.company}] {job.title} ({job.id})\n"
+        f"→ direct-apply [{company}] {title} ({job_id})\n"
         f"  test_mode={test_mode} model={model}",
         file=sys.stderr,
     )
@@ -135,6 +134,7 @@ def run(
                 )
 
                 _accumulate_tokens(tokens, resp.usage)
+                turns_done = turn + 1
 
                 asst = resp.choices[0].message
                 # Append the assistant turn back to history. Some upstreams
@@ -158,6 +158,7 @@ def run(
                         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                         continue
 
+                    tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
                     print(f"  [turn {turn}] {name}({_summarize_args(args)})", file=sys.stderr)
 
                     if name == "report_done":
@@ -180,17 +181,69 @@ def run(
         final_note = f"runner exception: {type(e).__name__}: {str(e)[:200]}"
         print(f"✗ runner exception: {type(e).__name__}: {e}", file=sys.stderr)
 
-    store.load()
-    store.mark_apply(job.id, final_status or "failed", final_note)
-    store.save()
-
     print(
         f"✓ direct-apply done: status={final_status} note={final_note!r}\n"
         f"  tokens: input={tokens['input']} output={tokens['output']} "
         f"cache_read={tokens['cache_read']} cache_write={tokens['cache_write']}",
         file=sys.stderr,
     )
-    return final_status or "failed", final_note, tokens
+    # browser_mb: we don't currently meter Bright Data bandwidth per-call.
+    # 1.5 MB is the observed average on Greenhouse/Lever forms — see pricing.py.
+    return {
+        "status": final_status or "failed",
+        "note": final_note,
+        "tokens": tokens,
+        "browser_mb": 1.5,
+        "turn_count": turns_done,
+        "tool_call_counts": tool_call_counts,
+    }
+
+
+def run(
+    job_id: str,
+    *,
+    store_path: str = "data/jobs.json",
+    model: str = DEFAULT_MODEL,
+    test_mode: bool | None = None,
+    profile_path: str = "./profile.md",
+) -> tuple[str, str, dict[str, int]]:
+    """Single-tenant apply: reads from local JobStore + profile.md, writes back.
+
+    Kept for the `python -m applyd.apply.runner <job_id>` entrypoint. New
+    multi-tenant code paths should call `run_apply` directly with their own
+    job/profile/resume context.
+    """
+    load_env()
+    store = JobStore(Path(store_path))
+    store.load()
+    job = store.get(job_id)
+    if not job:
+        raise SystemExit(f"job {job_id} not found in {store_path}")
+    if not job.resume_pdf_path:
+        raise SystemExit(f"job {job_id} has no resume_pdf_path; run `applyd tailor {job_id}` first")
+
+    resume_dir = Path(job.resume_pdf_path).parent
+    profile_md = load_profile(profile_path)
+    resume_tex = _read_or_blank(resume_dir / "resume.tex")
+    metadata_json = _read_or_blank(resume_dir / "metadata.json")
+
+    result = run_apply(
+        job_id=job.id,
+        company=job.company,
+        title=job.title,
+        job_url=job.url,
+        resume_pdf_path=job.resume_pdf_path,
+        profile_md=profile_md,
+        resume_tex=resume_tex,
+        tailor_metadata_json=metadata_json,
+        model=model,
+        test_mode=test_mode,
+    )
+
+    store.load()
+    store.mark_apply(job.id, result["status"], result["note"])
+    store.save()
+    return result["status"], result["note"], result["tokens"]
 
 
 def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:
@@ -240,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="override APPLYD_TEST_MODE from env",
     )
-    p.add_argument("--profile", default="~/.openclaw/workspace/USER.md")
+    p.add_argument("--profile", default="./profile.md")
     args = p.parse_args(argv)
 
     test_mode = (

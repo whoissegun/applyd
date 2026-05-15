@@ -160,7 +160,7 @@ def build_user_blocks(
     ]
 
 
-def load_profile(path: str | Path = "~/.openclaw/workspace/USER.md") -> str:
+def load_profile(path: str | Path = "./profile.md") -> str:
     p = Path(path).expanduser()
     if not p.exists():
         raise FileNotFoundError(
