@@ -110,7 +110,7 @@ def match_for_user(user_id: str, batch_limit: int = 50) -> dict[str, int]:
         return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
 
     resume = resumes.get(user_id)
-    if not resume or not (resume.get("latex_source") or "").strip():
+    if not resume or not (resume.get("resume_text") or "").strip():
         logger.info("matchmaker: user %s has no master resume, skipping", user_id)
         return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
 
@@ -126,7 +126,7 @@ def match_for_user(user_id: str, batch_limit: int = 50) -> dict[str, int]:
         try:
             decision_obj = match_user_to_job(
                 profile_answers=profile["profile_answers"],
-                resume_latex=resume["latex_source"],
+                resume_text=resume["resume_text"],
                 classification=job["classification"],
             )
         except Exception:

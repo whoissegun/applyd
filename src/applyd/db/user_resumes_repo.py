@@ -6,8 +6,11 @@ from supabase import Client
 
 
 class UserResumesRepo:
-    """Master resume per user. One row per user is enforced by the
-    user_resumes_one_per_user unique index, so set_latex() can upsert on user_id.
+    """Master resume per user. One row per user (unique index on user_id).
+
+    Schema:
+      - resume_text:               extracted plain text the tailor reads
+      - master_pdf_storage_path:   pointer to original PDF in the `resumes` bucket
     """
 
     def __init__(self, client: Client) -> None:
@@ -23,14 +26,22 @@ class UserResumesRepo:
         )
         return res.data[0] if res.data else None
 
-    def set_latex(self, user_id: str, latex_source: str) -> dict:
-        """Insert or update the user's resume in one call. Idempotent on user_id."""
+    def set_master(
+        self,
+        user_id: str,
+        resume_text: str,
+        *,
+        pdf_storage_path: Optional[str] = None,
+    ) -> dict:
+        payload: dict = {
+            "user_id": user_id,
+            "resume_text": resume_text,
+        }
+        if pdf_storage_path is not None:
+            payload["master_pdf_storage_path"] = pdf_storage_path
         res = (
             self.client.table("user_resumes")
-            .upsert(
-                {"user_id": user_id, "latex_source": latex_source},
-                on_conflict="user_id",
-            )
+            .upsert(payload, on_conflict="user_id")
             .execute()
         )
         return res.data[0]

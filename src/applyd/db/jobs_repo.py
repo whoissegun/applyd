@@ -90,7 +90,7 @@ def _row_to_job(row: dict, company_name: str) -> Job:
 class JobsRepo:
     """Read/write access to the shared public.jobs catalog.
 
-    Per-user state (apply_status, resume_pdf_path, tailor outputs) lives in
+    Per-user state (application status, tailored resume) lives in
     applications / tailored_resumes — handled by other repos, not here.
     """
 
@@ -198,20 +198,70 @@ class JobsRepo:
         company_name = (row.get("companies") or {}).get("canonical_name", "")
         return _row_to_job(row, company_name)
 
-    def iter_pending_enrichment(self, batch: int = 500) -> Iterator[Job]:
-        """Active jobs without a description yet. Yields in batches."""
+    def iter_all(
+        self,
+        batch: int = 1000,
+        max_rows: Optional[int] = None,
+        active_only: bool = True,
+    ) -> Iterator[Job]:
+        """Iterate the shared catalog. Use sparingly — at scale, prefer
+        filtering server-side. `max_rows` is a hard ceiling so a dev-CLI call
+        can't accidentally pull millions of rows.
+        """
+        offset = 0
+        cols = ", ".join(_COLUMNS) + ", companies(canonical_name)"
+        yielded = 0
+        while True:
+            q = (
+                self.client.table("jobs")
+                .select(cols)
+                .order("discovered_at", desc=True)
+                .range(offset, offset + batch - 1)
+            )
+            if active_only:
+                q = q.eq("active", True)
+            res = q.execute()
+            if not res.data:
+                return
+            for row in res.data:
+                company_name = (row.get("companies") or {}).get("canonical_name", "")
+                yield _row_to_job(row, company_name)
+                yielded += 1
+                if max_rows is not None and yielded >= max_rows:
+                    return
+            if len(res.data) < batch:
+                return
+            offset += batch
+
+    def iter_pending_enrichment(
+        self,
+        batch: int = 500,
+        include_failed: bool = False,
+        source: Optional[str] = None,
+    ) -> Iterator[Job]:
+        """Active jobs needing enrichment. Yields in batches.
+
+        By default: rows where enriched_at is null. With include_failed=True,
+        also yields rows previously marked fetch_tier='failed' so callers can
+        retry the cheapest/highest-success paths.
+        """
         offset = 0
         cols = ", ".join(_COLUMNS) + ", companies(canonical_name)"
         while True:
-            res = (
+            q = (
                 self.client.table("jobs")
                 .select(cols)
-                .is_("enriched_at", "null")
                 .eq("active", True)
                 .order("discovered_at", desc=False)
                 .range(offset, offset + batch - 1)
-                .execute()
             )
+            if include_failed:
+                q = q.or_("enriched_at.is.null,fetch_tier.eq.failed")
+            else:
+                q = q.is_("enriched_at", "null")
+            if source:
+                q = q.eq("ats", source)
+            res = q.execute()
             if not res.data:
                 return
             for row in res.data:

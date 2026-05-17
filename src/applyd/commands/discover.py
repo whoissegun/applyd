@@ -10,12 +10,12 @@ from typing import Iterable, Optional
 import httpx
 
 from ..config import load_env
+from ..db import JobsRepo, get_client
 from ..discovery import ATS_MODULES, ResolverCache, aggregators, resolve
 from ..discovery.cache import BroadSearchCache
 from ..discovery.routing import detect_ats, extract_company_slug
 from ..discovery.search import SearchProvider, make_provider
 from ..models import Job
-from ..store import JobStore
 
 
 def _seed_cache_from_jobs(cache: ResolverCache, jobs: Iterable[Job]) -> int:
@@ -45,8 +45,7 @@ def _seed_cache_from_jobs(cache: ResolverCache, jobs: Iterable[Job]) -> int:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     load_env()
-    store = JobStore(Path(args.store))
-    store.load()
+    repo = JobsRepo(get_client())
 
     cache = ResolverCache(Path(args.cache))
     cache.load()
@@ -55,7 +54,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
     total_new = 0
     total_updated = 0
 
-    # figure out what the user is asking for from targets.json
     targets_path = Path(args.targets)
     companies: list[str] = []
     broad_dorks: Optional[list[str]] = None  # None = use defaults, [] = disabled
@@ -68,7 +66,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"  ✗ failed to parse {targets_path}: {e}", file=sys.stderr)
 
-    # skip broad search entirely if --no-broad or broad_dorks == []
     run_broad = not args.no_broad and broad_dorks != []
     need_provider = bool(companies) or run_broad
 
@@ -89,11 +86,10 @@ def cmd_discover(args: argparse.Namespace) -> int:
         else:
             provider_name = "none"
 
-        # 1. aggregator: SimplifyJobs (always runs, no user input, no credits)
         print("→ aggregator: SimplifyJobs...", file=sys.stderr)
         try:
             jobs = aggregators.simplifyjobs.fetch(client)
-            new, updated = store.upsert(jobs)
+            new, updated = repo.upsert(jobs)
             total_new += new
             total_updated += updated
             seeded = _seed_cache_from_jobs(cache, jobs)
@@ -107,7 +103,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
             errors.append(msg)
             print(f"  ✗ {msg}", file=sys.stderr)
 
-        # 2. aggregator: broad search (Brave dorks → discovered ATS companies)
         if run_broad:
             ttl_hours = float(os.environ.get("BROAD_SEARCH_TTL_HOURS", "6"))
             broad_cache = BroadSearchCache(Path(args.broad_cache), ttl_hours=ttl_hours)
@@ -121,7 +116,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
                     client=client,
                     cache=broad_cache,
                 )
-                new, updated = store.upsert(jobs)
+                new, updated = repo.upsert(jobs)
                 total_new += new
                 total_updated += updated
                 per_ats = ", ".join(
@@ -150,7 +145,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 errors.append(msg)
                 print(f"  ✗ {msg}", file=sys.stderr)
 
-        # 3. user-specified companies (targets.json → resolver → ATS)
         if companies:
             print(
                 f"\n→ {len(companies)} user-specified companies "
@@ -191,7 +185,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 print(f"→ {ats}:{slug} ({company})...", file=sys.stderr)
                 try:
                     jobs = module.fetch(slug, client)
-                    new, updated = store.upsert(jobs)
+                    new, updated = repo.upsert(jobs)
                     total_new += new
                     total_updated += updated
                     print(
@@ -204,11 +198,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
                     print(f"  ✗ {msg}", file=sys.stderr)
 
     cache.save()
-    store.save()
-    total = len(store.all())
     print(
-        f"\n✓ discover complete: +{total_new} new, {total_updated} updated, "
-        f"{total} total in store",
+        f"\n✓ discover complete: +{total_new} new, {total_updated} updated",
         file=sys.stderr,
     )
     if errors:

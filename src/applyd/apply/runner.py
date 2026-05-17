@@ -3,12 +3,12 @@
 All LLM calls go through OpenRouter (OpenAI-compatible API). The default model
 is `anthropic/claude-sonnet-4-6` but any OpenRouter slug works via --model.
 
-Usage as a script (spike):
-    python -m applyd.apply.runner <job_id>
-    python -m applyd.apply.runner <job_id> --model deepseek/deepseek-chat
-    python -m applyd.apply.runner <job_id> --model meta-llama/llama-3.3-70b-instruct
+`run_apply(...)` is the programmatic, stateless entry point used by the
+multi-tenant orchestration in `applyd.apply.saas`. The CLI in `main()` is a
+dev/admin shim that resolves a (user, job) pair into an application row and
+dispatches through `apply_for_user`.
 
-Returns 0 on applied, 1 on skipped, 2 on failed, 3 on infra error.
+CLI exit codes: 0 applied, 1 skipped, 2 failed, 3 infra error.
 """
 from __future__ import annotations
 
@@ -16,26 +16,19 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
 
 from ..config import load_env
-from ..store import JobStore
 from .browser import brightdata_page
-from .prompts import SYSTEM_PROMPT, build_user_blocks, load_profile
+from .prompts import SYSTEM_PROMPT, build_user_blocks
 from .tools import TOOL_DEFS, dispatch
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
 MAX_TURNS = 40  # safety net; a normal apply is 12-20 tool calls
-
-
-def _read_or_blank(path: str | Path) -> str:
-    p = Path(path)
-    return p.read_text() if p.exists() else ""
 
 
 def _make_client() -> OpenAI:
@@ -61,11 +54,11 @@ def run_apply(
     model: str = DEFAULT_MODEL,
     test_mode: bool | None = None,
 ) -> dict[str, Any]:
-    """Programmatic apply entry — no JobStore, no filesystem profile reads.
+    """Programmatic apply entry — stateless, no I/O outside the browser+LLM.
 
-    Returns a dict with keys: status, note, tokens, browser_mb. The caller is
-    responsible for persisting results (single-tenant: JobStore; multi-tenant:
-    Supabase repos in applyd.apply.saas).
+    Returns a dict with keys: status, note, tokens, browser_mb. The caller
+    persists results (`applyd.apply.saas.apply_for_user` handles this for the
+    multi-tenant flow).
     """
     load_env()
     if test_mode is None:
@@ -199,53 +192,6 @@ def run_apply(
     }
 
 
-def run(
-    job_id: str,
-    *,
-    store_path: str = "data/jobs.json",
-    model: str = DEFAULT_MODEL,
-    test_mode: bool | None = None,
-    profile_path: str = "./profile.md",
-) -> tuple[str, str, dict[str, int]]:
-    """Single-tenant apply: reads from local JobStore + profile.md, writes back.
-
-    Kept for the `python -m applyd.apply.runner <job_id>` entrypoint. New
-    multi-tenant code paths should call `run_apply` directly with their own
-    job/profile/resume context.
-    """
-    load_env()
-    store = JobStore(Path(store_path))
-    store.load()
-    job = store.get(job_id)
-    if not job:
-        raise SystemExit(f"job {job_id} not found in {store_path}")
-    if not job.resume_pdf_path:
-        raise SystemExit(f"job {job_id} has no resume_pdf_path; run `applyd tailor {job_id}` first")
-
-    resume_dir = Path(job.resume_pdf_path).parent
-    profile_md = load_profile(profile_path)
-    resume_tex = _read_or_blank(resume_dir / "resume.tex")
-    metadata_json = _read_or_blank(resume_dir / "metadata.json")
-
-    result = run_apply(
-        job_id=job.id,
-        company=job.company,
-        title=job.title,
-        job_url=job.url,
-        resume_pdf_path=job.resume_pdf_path,
-        profile_md=profile_md,
-        resume_tex=resume_tex,
-        tailor_metadata_json=metadata_json,
-        model=model,
-        test_mode=test_mode,
-    )
-
-    store.load()
-    store.mark_apply(job.id, result["status"], result["note"])
-    store.save()
-    return result["status"], result["note"], result["tokens"]
-
-
 def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:
     """Best-effort token accumulation across providers. Field names vary."""
     if usage is None:
@@ -275,39 +221,75 @@ def _summarize_args(args: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dev/admin CLI: dispatch one apply for a (user, job) pair.
+
+    Resolves the application row by (user_id, job_id) and hands off to
+    `apply_for_user`. The `APPLYD_TEST_MODE` env var controls submit vs.
+    fill-only; the model is set via `APPLYD_APPLY_MODEL`.
+    """
+    load_env()
+
     p = argparse.ArgumentParser(prog="python -m applyd.apply.runner")
-    p.add_argument("job_id")
-    p.add_argument("--store", default="data/jobs.json")
+    p.add_argument("job_id", help="job id (from `applyd jobs`)")
     p.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
+        "--user",
+        help="user UUID. Falls back to APPLYD_DEV_USER_ID if unset.",
+    )
+    p.add_argument(
+        "--app",
         help=(
-            "OpenRouter model slug. Default: anthropic/claude-sonnet-4-6. "
-            "Other examples: deepseek/deepseek-chat, meta-llama/llama-3.3-70b-instruct, "
-            "qwen/qwen-2.5-72b-instruct."
+            "application UUID. If passed, --user and job_id are ignored — "
+            "we go straight to apply_for_user."
         ),
     )
-    p.add_argument(
-        "--test-mode",
-        choices=["true", "false"],
-        default=None,
-        help="override APPLYD_TEST_MODE from env",
-    )
-    p.add_argument("--profile", default="./profile.md")
     args = p.parse_args(argv)
 
-    test_mode = (
-        None if args.test_mode is None else args.test_mode == "true"
-    )
+    # Lazy imports: keep `from .runner import run_apply` (used by saas.py)
+    # free of Supabase deps so the worker module can import it cheaply.
+    from ..db import ApplicationsRepo, get_client
+    from .saas import apply_for_user
 
-    status, _note, _tokens = run(
-        args.job_id,
-        store_path=args.store,
-        model=args.model,
-        test_mode=test_mode,
-        profile_path=args.profile,
+    sb = get_client()
+    apps = ApplicationsRepo(sb)
+
+    if args.app:
+        application = apps.get(args.app)
+        if application is None:
+            print(f"✗ application {args.app!r} not found", file=sys.stderr)
+            return 3
+        user_id = application["user_id"]
+        application_id = application["id"]
+    else:
+        user_id = args.user or os.environ.get("APPLYD_DEV_USER_ID")
+        if not user_id:
+            print(
+                "✗ pass --user <uuid>, --app <uuid>, or set APPLYD_DEV_USER_ID.",
+                file=sys.stderr,
+            )
+            return 3
+        application = apps.get_by_user_job(user_id, args.job_id)
+        if application is None:
+            print(
+                f"✗ no application for user={user_id} job={args.job_id}. "
+                "Run `applyd tailor` first to create one.",
+                file=sys.stderr,
+            )
+            return 3
+        application_id = application["id"]
+
+    result = apply_for_user(user_id=user_id, application_id=application_id)
+    print(
+        f"✓ apply done: status={result.get('status')} "
+        f"reason={result.get('reason')} "
+        f"cost_cents={result.get('cost_cents')}",
+        file=sys.stderr,
     )
-    return {"applied": 0, "skipped": 1, "failed": 2}.get(status, 3)
+    return {
+        "applied": 0,
+        "skipped": 1,
+        "failed": 2,
+        "lost_race": 5,
+    }.get(result.get("status", "failed"), 3)
 
 
 if __name__ == "__main__":

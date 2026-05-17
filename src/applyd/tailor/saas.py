@@ -123,9 +123,9 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
     try:
         # 3. Master resume.
         master = resumes.get(user_id)
-        if master is None or not master.get("latex_source"):
+        if master is None or not master.get("resume_text"):
             return _fail("no_master_resume")
-        base_tex: str = master["latex_source"]
+        master_text: str = master["resume_text"]
         source_resume_id: str | None = master.get("id")
 
         # 4. Job + description.
@@ -141,7 +141,7 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
 
         try:
             tailored_tex, metadata, llm_usage = client.tailor(
-                base_resume_tex=base_tex,
+                master_text=master_text,
                 jd_text=job.description,
                 company=job.company,
                 role=job.title,
@@ -163,7 +163,7 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
         completion_tokens = int(llm_usage.get("output_tokens") or 0)
 
         # 7. Validate, then compile to PDF.
-        validation = validate_tailored(base_tex, tailored_tex)
+        validation = validate_tailored(master_text, tailored_tex)
         if not tectonic_available():
             return _fail("compile_error: tectonic_not_installed")
 

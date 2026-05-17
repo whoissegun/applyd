@@ -65,7 +65,7 @@ class TailorClient:
 
     def tailor(
         self,
-        base_resume_tex: str,
+        master_text: str,
         jd_text: str,
         company: str,
         role: str,
@@ -75,8 +75,8 @@ class TailorClient:
             {
                 "type": "text",
                 "text": (
-                    "Master resume (Jake's Resume LaTeX template):\n\n"
-                    + base_resume_tex
+                    "Master resume (plain text, kitchen-sink version):\n\n"
+                    + master_text
                 ),
                 "cache_control": {"type": "ephemeral"},
             },

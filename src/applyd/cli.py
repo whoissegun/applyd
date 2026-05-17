@@ -12,7 +12,6 @@ from .commands import (
     cmd_tailor,
 )
 from .discovery import ATS_MODULES
-from .tailor import DEFAULT_MODEL as TAILOR_DEFAULT_MODEL
 
 
 SOURCES_AGGREGATORS = ["simplifyjobs", "broad_search"]
@@ -23,12 +22,7 @@ ALL_SOURCES = SOURCES_AGGREGATORS + SOURCES_ATS
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="applyd",
-        description="Autonomous job application engine — discovery layer",
-    )
-    parser.add_argument(
-        "--store",
-        default="data/jobs.json",
-        help="path to jobs.json store (default: data/jobs.json)",
+        description="Autonomous job application engine (Supabase-backed)",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -45,7 +39,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="skip the broad-search aggregator this run")
     p_disc.set_defaults(func=cmd_discover)
 
-    p_jobs = sub.add_parser("jobs", help="query jobs from the store")
+    p_jobs = sub.add_parser("jobs", help="query the shared jobs catalog")
     p_jobs.add_argument("--level", choices=["intern", "new_grad", "mid", "senior"])
     p_jobs.add_argument("--specialty",
                         help="ml | backend | frontend | fullstack | mobile | infra | data | security")
@@ -71,23 +65,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_enr.add_argument("--dry-run", action="store_true",
                        help="print counts and exit without fetching")
     p_enr.add_argument("--save-every", type=int, default=25,
-                       help="incremental save cadence (default 25)")
+                       help="progress-print cadence (default 25)")
     p_enr.add_argument("--workers", type=int, default=8,
                        help="parallel fetch workers (default 8)")
     p_enr.set_defaults(func=cmd_enrich)
 
-    p_tail = sub.add_parser("tailor", help="generate a tailored resume for a job")
+    p_tail = sub.add_parser(
+        "tailor",
+        help="tailor a resume for one (user, job). Dev/admin shim over tailor_for_user.",
+    )
     p_tail.add_argument("job_id", help="job id (from `applyd jobs`)")
-    p_tail.add_argument("--base", default="resume_base.tex",
-                        help="path to base resume .tex (default: resume_base.tex)")
-    p_tail.add_argument("--model", default=TAILOR_DEFAULT_MODEL,
-                        help=f"Claude model (default: {TAILOR_DEFAULT_MODEL})")
-    p_tail.add_argument("--no-compile", action="store_true",
-                        help="skip tectonic PDF compile, just write .tex")
-    p_tail.add_argument("--ignore-errors", action="store_true",
-                        help="compile PDF even if validator reports errors")
-    p_tail.add_argument("--force", action="store_true",
-                        help="tailor even if job is gated (apply agent can't submit anyway)")
+    p_tail.add_argument(
+        "--user",
+        help="user UUID. Falls back to APPLYD_DEV_USER_ID if unset.",
+    )
     p_tail.set_defaults(func=cmd_tailor)
 
     p_res = sub.add_parser("resolve", help="debug: resolve a company name to (ATS, slug)")

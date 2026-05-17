@@ -3,16 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Optional
 
+from ..config import load_env
+from ..db import JobsRepo, get_client
 from ..filters import filter_jobs
-from ..store import JobStore
 
 
 def cmd_jobs(args: argparse.Namespace) -> int:
-    store = JobStore(Path(args.store))
-    store.load()
+    load_env()
+    repo = JobsRepo(get_client())
+
+    # Filtering is local (regex/keyword matchers in filters.py); pull a
+    # working window from the shared catalog. Hard ceiling prevents a
+    # devbox call from accidentally dumping the whole table.
+    all_jobs = list(repo.iter_all(batch=1000, max_rows=20_000))
 
     remote_filter: Optional[bool] = True if args.remote else None
     gated_filter: Optional[bool] = None
@@ -22,7 +27,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         gated_filter = False
 
     jobs = filter_jobs(
-        store.all(),
+        all_jobs,
         level=args.level,
         specialty=args.specialty,
         location=args.location,

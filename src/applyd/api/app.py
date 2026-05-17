@@ -9,8 +9,9 @@ them.
 
 from __future__ import annotations
 
+import base64
 import logging
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -43,17 +44,12 @@ class ProfileUpdate(BaseModel):
     linkedin_url: Optional[str] = None
     github_url: Optional[str] = None
     portfolio_url: Optional[str] = None
-    work_auth_summary: Optional[str] = None
-    sponsorship_needed_countries: Optional[List[str]] = None
-    target_levels: Optional[List[str]] = None
-    target_specialties: Optional[List[str]] = None
-    target_locations: Optional[List[str]] = None
-    strategy: Optional[str] = None
     profile_answers: Optional[Any] = None
 
 
-class ResumePut(BaseModel):
-    latex_source: str = Field(..., min_length=1)
+class ResumeExtractBody(BaseModel):
+    # base64-encoded PDF bytes
+    pdf_base64: str = Field(..., min_length=1)
 
 
 class TailorQueueBody(BaseModel):
@@ -115,16 +111,124 @@ def get_resume(user_id: str = Depends(get_current_user_id)) -> dict:
     row = _resumes().get(user_id)
     if row is None:
         # Unlike profile, a missing resume is normal for a fresh user.
-        return {"user_id": user_id, "latex_source": None}
+        return {"user_id": user_id, "resume_text": None}
     return row
 
 
-@app.put("/resume")
-def put_resume(
-    body: ResumePut,
+STORAGE_BUCKET = "resumes"
+
+
+def _master_pdf_storage_path(user_id: str) -> str:
+    return f"{user_id}/master.pdf"
+
+
+def _upload_master_pdf(user_id: str, pdf_bytes: bytes) -> str:
+    """Upsert the user's master PDF in Storage. Returns the storage path."""
+    path = _master_pdf_storage_path(user_id)
+    sb = get_client()
+    storage = sb.storage.from_(STORAGE_BUCKET)
+    try:
+        storage.upload(
+            path=path,
+            file=pdf_bytes,
+            file_options={
+                "content-type": "application/pdf",
+                "upsert": "true",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "exists" in msg or "duplicate" in msg or "409" in msg:
+            storage.update(
+                path=path,
+                file=pdf_bytes,
+                file_options={"content-type": "application/pdf"},
+            )
+        else:
+            raise
+    return path
+
+
+@app.post("/resume/extract")
+def post_resume_extract(
+    body: ResumeExtractBody,
     user_id: str = Depends(get_current_user_id),
 ) -> dict:
-    return _resumes().set_latex(user_id, body.latex_source)
+    """One-shot resume onboarding: decode PDF → extract text + contact + work-auth
+    via Claude, upload the original PDF to Storage, persist text on
+    user_resumes, prefill user_profiles. Returns the extracted shape.
+    """
+    from applyd.onboarding import extract_from_pdf
+
+    try:
+        pdf_bytes = base64.b64decode(body.pdf_base64, validate=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid base64 PDF payload: {exc}",
+        )
+
+    try:
+        extracted = extract_from_pdf(pdf_bytes)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
+    pdf_path = _upload_master_pdf(user_id, pdf_bytes)
+
+    _resumes().set_master(
+        user_id,
+        extracted.text,
+        pdf_storage_path=pdf_path,
+    )
+
+    contact = extracted.contact
+    prefill: dict[str, Any] = {}
+    for k_in, k_out in (
+        ("name", "full_name"),
+        ("phone", "phone"),
+        ("linkedin_url", "linkedin_url"),
+        ("github_url", "github_url"),
+        ("portfolio_url", "portfolio_url"),
+    ):
+        if contact.get(k_in):
+            prefill[k_out] = contact[k_in]
+
+    # Everything narrative (target roles, work auth, sponsorship) → one
+    # labeled markdown blob written to profile_answers. The agent reads this
+    # at apply time; the matcher reads it at match time.
+    answer_parts: list[str] = []
+    if extracted.target_roles:
+        answer_parts.append(f"## Target roles\n{extracted.target_roles}")
+    wa_bits: list[str] = []
+    if extracted.work_auth.get("summary"):
+        wa_bits.append(str(extracted.work_auth["summary"]))
+    sponsorship = extracted.work_auth.get("sponsorship_needed_countries") or []
+    if sponsorship:
+        wa_bits.append(f"Need sponsorship to work in: {', '.join(sponsorship)}")
+    if wa_bits:
+        answer_parts.append("## Work authorization\n" + "\n".join(wa_bits))
+    if answer_parts:
+        prefill["profile_answers"] = "\n\n".join(answer_parts)
+
+    if prefill:
+        _profiles().update(user_id, **prefill)
+
+    return {
+        "text_chars": len(extracted.text),
+        "contact": extracted.contact,
+        "work_auth": extracted.work_auth,
+        "target_roles": extracted.target_roles,
+        "master_pdf_storage_path": pdf_path,
+        "profile_prefill": prefill,
+    }
 
 
 @app.post("/tailor/queue")

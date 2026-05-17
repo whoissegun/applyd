@@ -2,47 +2,36 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from ..config import load_env
+from ..db import JobsRepo, get_client
 from ..enrichment import MIN_USEFUL_CHARS, SpiderClient, fetch_text
 from ..models import Job
-from ..store import JobStore
 
 
 def cmd_enrich(args: argparse.Namespace) -> int:
     """Fetch full descriptions for jobs that lack them.
     Cascade: plain httpx+trafilatura → spider.cloud smart → spider.cloud chrome."""
     load_env()
-    store = JobStore(Path(args.store))
-    store.load()
+    repo = JobsRepo(get_client())
 
-    def needs_enrichment(j: Job) -> bool:
-        if not j.url:
-            return False
-        if j.description and len(j.description) >= MIN_USEFUL_CHARS:
-            return False
-        if j.fetch_tier == "failed" and not args.retry_failed:
-            return False
-        return True
+    candidates: list[Job] = []
+    for job in repo.iter_pending_enrichment(
+        include_failed=args.retry_failed,
+        source=args.source,
+    ):
+        if not job.url:
+            continue
+        if job.description and len(job.description) >= MIN_USEFUL_CHARS:
+            continue
+        candidates.append(job)
+        if args.limit and len(candidates) >= args.limit:
+            break
 
-    candidates = [j for j in store.all() if needs_enrichment(j)]
-
-    if args.source:
-        candidates = [j for j in candidates if j.source == args.source]
-
-    if args.limit:
-        candidates = candidates[: args.limit]
-
-    print(
-        f"→ {len(candidates)} jobs to enrich "
-        f"(store has {len(store.all())} total)",
-        file=sys.stderr,
-    )
+    print(f"→ {len(candidates)} jobs to enrich", file=sys.stderr)
     if args.dry_run:
         by_source: dict[str, int] = {}
         for j in candidates:
@@ -59,7 +48,6 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         print(f"  (tier 3 disabled: {e})", file=sys.stderr)
 
     stats = {"ats": 0, "http": 0, "spider": 0, "spider-chrome": 0, "failed": 0}
-    save_every = max(1, args.save_every)
     board_cache: dict = {}  # (ats, company) -> list[Job]; tier-1 session cache
     workers = max(1, args.workers)
 
@@ -91,28 +79,28 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             try:
                 for fut in as_completed(futures):
                     job, text, tier, err = fut.result()
-                    if text:
-                        job.description = text
-                    job.description_fetched_at = datetime.now(timezone.utc)
-                    job.fetch_tier = tier
-                    job.fetch_error = err
+                    description = text or job.description
+                    repo.mark_enriched(
+                        job.id,
+                        description=description,
+                        tier=tier,
+                        error=err,
+                    )
                     stats[tier] = stats.get(tier, 0) + 1
 
                     processed += 1
-                    if processed % save_every == 0:
-                        store.save()
+                    if processed % args.save_every == 0:
                         running = " ".join(f"{k}={v}" for k, v in stats.items())
                         print(
                             f"  {processed}/{len(candidates)}  {running}",
                             file=sys.stderr,
                         )
             except KeyboardInterrupt:
-                print("\n  interrupted; saving partial progress...", file=sys.stderr)
+                print("\n  interrupted; partial progress already persisted", file=sys.stderr)
                 for f in futures:
                     f.cancel()
                 raise
 
-    store.save()
     running = " ".join(f"{k}={v}" for k, v in stats.items())
     print(f"\n✓ enrichment complete: {running}", file=sys.stderr)
     return 0

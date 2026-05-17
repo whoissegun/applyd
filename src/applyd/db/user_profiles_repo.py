@@ -10,17 +10,14 @@ from supabase import Client
 # 400s on typos / FE-bug-introduced keys.
 _ALLOWED_UPDATE_FIELDS = frozenset(
     {
+        # Literal form-fill values — kept as typed columns.
         "full_name",
         "phone",
         "linkedin_url",
         "github_url",
         "portfolio_url",
-        "work_auth_summary",
-        "sponsorship_needed_countries",
-        "target_levels",
-        "target_specialties",
-        "target_locations",
-        "strategy",
+        # Single narrative bank — everything else (target roles, work auth,
+        # sponsorship, anything-else) lives here as labeled markdown sections.
         "profile_answers",
     }
 )

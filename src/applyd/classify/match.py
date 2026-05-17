@@ -64,7 +64,7 @@ def _strip_fences(text: str) -> str:
 
 def match_user_to_job(
     profile_answers: str,
-    resume_latex: str,
+    resume_text: str,
     classification: dict[str, Any],
 ) -> dict[str, Any]:
     """One match decision. Returns the parsed JSON dict with an extra `_usage` key."""
@@ -76,8 +76,8 @@ def match_user_to_job(
     user_content = (
         "## profile_answers (candidate's own description and preferences)\n"
         f"{(profile_answers or '').strip()}\n\n"
-        "## master_resume (LaTeX — extract content, ignore markup)\n"
-        f"{(resume_latex or '').strip()[:MAX_RESUME_CHARS]}\n\n"
+        "## master_resume (plain text)\n"
+        f"{(resume_text or '').strip()[:MAX_RESUME_CHARS]}\n\n"
         "## job_classification\n"
         f"{json.dumps(classification_for_prompt, ensure_ascii=False, indent=2)}\n"
     )

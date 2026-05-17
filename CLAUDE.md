@@ -9,30 +9,31 @@ Direction as of 2026-05-14: pivoting from personal-tool / single-tenant to **mul
 ## Status
 
 **Shipped:**
-- Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches.
-- Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor).
-- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output.
-- Direct apply runner (`src/applyd/apply/`) — library-shape `python -m applyd.apply.runner <job_id>`. OpenRouter (OpenAI-compatible API) → tool-use loop → Playwright over Bright Data CDP. Reads `./profile.md` (or `--profile <path>`) as prose. Writes status inline to the job store. No daemon, no callback HTTP.
-- Supabase schema (3 migrations in `supabase/migrations/`): users/profiles/resumes/subscriptions, shared `companies`+`jobs` catalog, applications, tailored_resumes, apply_attempts, usage_events, `internal.*` worker caches. RLS on every public table; explicit grants (handles the 2026-04-28 Data API exposure breaking change); auto-create-profile + auto-create-subscription on signup via trigger on `auth.users`.
-- Supabase-backed shared-catalog repos: `src/applyd/db/{client,jobs_repo,companies_repo}.py`. Smoke-tested live: upsert with company resolution, idempotency, get, mark_enriched, iter_pending_enrichment.
+- Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches. Writer migrated to `JobsRepo`.
+- Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor). Writer migrated to `JobsRepo`.
+- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output. Multi-tenant entry point: `tailor_for_user(user_id, job_id)` in `tailor/saas.py`. CLI routed through this path.
+- Direct apply runner (`src/applyd/apply/`) — OpenRouter (OpenAI-compatible API) → tool-use loop → Playwright over Bright Data CDP. Multi-tenant entry: `apply_for_user(user_id, application_id)` in `apply/saas.py`; reads profile from `user_profiles.profile_answers`, pulls tailored PDF from Supabase Storage.
+- FastAPI surface (`src/applyd/api/`) — JWT-auth'd endpoints over the SaaS paths.
+- Apply worker (`src/applyd/worker/`) — `runner.py` polls `applications` for claimable rows and dispatches `apply_for_user`. `tailor_runner.py` and `matchmaker.py` cover the other two pools.
+- LLM classify + match (`src/applyd/classify/`) — `job.py` infers `level`/`specialty` per job; `match.py` is the user-vs-job matcher.
+- Per-user Supabase repos: `ApplicationsRepo`, `TailoredResumesRepo`, `ApplyAttemptsRepo`, `UserProfilesRepo`, `UserResumesRepo`, `UsageEventsRepo`, plus `pricing.py`.
+- Supabase schema (10 migrations in `supabase/migrations/`): users/profiles/resumes/subscriptions, shared `companies`+`jobs` catalog, applications, tailored_resumes, apply_attempts, usage_events, `internal.*` worker caches, classification columns, race-handling/staleness. RLS on every public table; explicit grants (handles the 2026-04-28 Data API exposure breaking change); auto-create-profile + auto-create-subscription on signup via trigger on `auth.users`.
 
 **In flight / not yet built:**
-- Auth flow (signup/login/session — frontend choice not made yet).
-- Per-user repos: `ApplicationsRepo`, `TailoredResumesRepo`, `ApplyAttemptsRepo`, `UsageEventsRepo`.
-- Migrating callers (discovery / enrichment / tailor CLI + apply runner) off `data/jobs.json` + `JobStore` onto the Supabase repos. Right now both coexist; the SDK-backed repos exist but nothing calls them yet.
-- Splitting per-user fields off the `Job` Pydantic model (`resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`) once the per-user repos land.
-- Adapting the direct apply runner to take `user_id` and write outcomes into `applications` + `apply_attempts` rows; replacing the `profile.md`-file path with a DB read of `user_profiles.profile_answers`.
+- Auth flow end-to-end (signup/login UI; backend trigger is wired). Frontend not chosen.
+- Splitting per-user fields off the `Job` Pydantic model (`resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`) — no remaining writers after JobStore deletion, safe to remove next.
 - Frontend dashboard — likely Next.js + Supabase SSR; not started.
 - Stripe billing / metered usage on `usage_events`.
+- Cached structured JD extraction (Open question below — not started; requires prompt redesign).
 - Daily digest, skip-pings channel, cloud deployment, contact discovery, outreach pipeline.
 
 ### Next session — priority order
 
-1. **Migrate one writer off `JobStore`.** Pick discovery; swap the in-memory upsert path onto `JobsRepo.upsert`. Goal: remove the JSON store on the discovery path.
-2. **Auth flow.** Pick the frontend shape (Next.js + Supabase SSR is path-of-least-resistance) and stand up signup → triggers auto-populate profile + subscription. Verify with a real user, not the service-key smoke test.
-3. **Per-user repos.** `ApplicationsRepo` + `TailoredResumesRepo` first — they unblock migrating the tailor CLI to write per-(user, job) rows instead of `Job.resume_pdf_path`.
-4. **Master resume into `user_resumes`.** One row per user; UI uploads or pastes the .tex.
-5. **Adapt the direct apply runner for multi-tenant.** Add `user_id`, swap `JobStore`/`mark_apply` for `ApplicationsRepo` + `ApplyAttemptsRepo`, read profile from `user_profiles.profile_answers` instead of a file. Decide Bright Data CDP vs Browserbase for the SaaS-scale browser layer.
+1. **Frontend.** Next.js + Supabase SSR. Signup/login → profile editor → master resume upload → applications dashboard.
+2. **Stripe billing.** Metered usage on `usage_events`; webhook → `user_subscriptions`.
+3. **Drop the `Job` per-user fields.** `resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note` — already unused after the JobStore deletion; remove from the Pydantic model.
+4. **Cached structured JD extraction.** Add `jobs.structured_jd jsonb`; on first tailor per job, write the JD analysis; rework the tailor prompt to accept pre-extracted analysis. Requires careful prompt diff to avoid regression.
+5. **Cloud deployment.** API host + workers; secret management.
 
 ---
 
@@ -46,7 +47,7 @@ applyd jobs --level new_grad --specialty ml --remote   # query store
 applyd resolve "Stripe"      # debug: company name → (ATS, slug)
 ```
 
-Store today: `data/jobs.json` (plain JSON dict keyed by stable job id). Each Job carries its own lifecycle fields (`resume_pdf_path`, `apply_status`, `apply_attempted_at`, `apply_note`). Slated to move to Supabase as the writers migrate.
+Store today: Supabase Postgres. Shared `public.jobs` for the global catalog (writes via `JobsRepo`); per-user state in `applications` / `tailored_resumes` / `apply_attempts`. The legacy `data/jobs.json` + `JobStore` are gone.
 
 ---
 
@@ -120,7 +121,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 
 - **DOCX via `docxtpl`.** Binary-file manipulation, package flakiness, debugging pain.
 - **LinkedIn scraping.** Hard ToS violation; ~23% of automation accounts banned within 90 days (2026 data). Losing user's professional LinkedIn account costs more than any feature gain.
-- **Self-hosted Playwright for tier 3 enrichment.** Spider.cloud handles CSR + anti-bot at ~$0.0005/page. Our own browser pool doesn't earn its keep at <10k/month. (The apply layer is a separate question — Playwright/Browserbase is on the table there.)
+- **Self-hosted Playwright for tier 3 enrichment.** Spider.cloud handles CSR + anti-bot at ~$0.0005/page. Our own browser pool doesn't earn its keep at <10k/month. (Apply layer uses Bright Data CDP — separate question.)
 - **"Invention allowed" LLM prompts.** Even with guardrails, fabricated metrics fail in interviews and anchor the whole resume as untrustworthy.
 - **Fact bank file separate from resume.** Redundant; master resume is sole source.
 - **Hardcoded per-ATS company lists.** Contradicts "general SWE agent" goal. `targets.json` is names only.
@@ -155,7 +156,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 ### Supabase
 - **New tables in `public` are not auto-exposed to the Data API** (breaking change 2026-04-28). Migrations must `GRANT` explicitly to `anon`/`authenticated`. Initial schema migration handles this; future tables must follow suit.
 - **`SECURITY DEFINER` functions don't go in `public`.** Put them in `internal` and `set search_path = ''`. The signup trigger function is in `internal.handle_new_auth_user()`.
-- **Python 3.9 `datetime.fromisoformat`** rejects 5-digit microseconds (Supabase emits them). `db/jobs_repo.py` uses `dateutil.isoparse` to be tolerant. Worth bumping `requires-python` to `>=3.11` and dropping the workaround.
+- **Supabase emits 5-digit microseconds.** `datetime.fromisoformat` only handles these on Python 3.11+; the project pins `requires-python = ">=3.11"` so we use the stdlib parser directly. Don't add `python-dateutil` back.
 
 ---
 
@@ -189,7 +190,7 @@ Multi-tenant work the runner needs:
 - Replace `JobStore` reads with `JobsRepo.get(job_id)` + auth context.
 - Replace `JobStore.mark_apply` with `ApplicationsRepo.update_status` + `ApplyAttemptsRepo.insert`.
 - Replace profile-file reads with `user_profiles.profile_answers` from DB.
-- Decide on browser provider for SaaS scale: Bright Data CDP per-tenant (current) vs Browserbase (managed).
+- Browser provider: Bright Data CDP per-tenant. Decision documented; not revisiting without new info.
 
 ---
 
@@ -230,7 +231,6 @@ External tools:
 - **Contact discovery: Sema vs Apollo?** Sema pending scope confirmation with user's friend. Apollo's 2026 free tier is a 50-credit trial; real usage needs the $49/mo Basic plan.
 - **BYO-API-keys vs platform-pays-and-meters.** SaaS direction usually pushes platform-pays + Stripe metered billing on `usage_events`. Not decided.
 - **Frontend stack.** Next.js + Supabase SSR is the path-of-least-resistance; not committed.
-- **Apply runtime: Browserbase vs Playwright + Bright Data.** TBD when we start the apply rebuild.
 - **HITL review UI.** Likely Next.js dashboard. Not started.
 - **Structured JD extraction.** Planned lazy (on first tailor per job), cached on the job row. Currently inline in the tailor prompt — works but re-extracts on re-tailor.
 

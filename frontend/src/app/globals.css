@@ -1,0 +1,584 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────
+   applyd — adapted from the Giga reference (DESIGN.md).
+   Dark canvas. Pill buttons. Restrained type. Transparent cards.
+   Substituted trial fonts with Geist (already loaded by Next).
+   ──────────────────────────────────────────────────────────── */
+
+@theme {
+  /* Colors — Giga palette */
+  --color-obsidian: #000000;
+  --color-ghost: #ffffff;
+  --color-graphite: #cccccc;
+  --color-shadow: #4d4d4d;
+  --color-pebble: #969696;
+  --color-night: #161717;
+  --color-steel: #808080;
+  --color-cosmic: #8a8f98;
+  --color-ember: #fe2c02;
+  --color-growth: #49de80;
+  --color-amber: #f5a524;
+  --color-sky: #88bbf5;
+
+  /* Surfaces — transparent-on-black, no harsh borders */
+  --color-whisper: rgba(255, 255, 255, 0.03);
+  --color-whisper-strong: rgba(255, 255, 255, 0.06);
+  --color-hairline: rgba(255, 255, 255, 0.08);
+  --color-hairline-strong: rgba(255, 255, 255, 0.14);
+
+  /* Fonts — Inter is Giga's primary; Geist Mono carries IDs/timestamps */
+  --font-display: var(--font-inter);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-geist-mono);
+
+  /* Type scale — Giga spec (DESIGN.md). Compact, 14px body. */
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 22px;
+  --text-2xl: 30px;
+  --text-display: 48px;
+  --leading-display: 1.2;
+  --tracking-display: -1.44px;
+
+  /* Spacing (Giga compact density) */
+  --spacing-element: 10px;
+  --spacing-card: 24px;
+  --spacing-section: 48px;
+
+  /* Radii */
+  --radius-card: 16px;
+  --radius-input: 10px;
+  --radius-pill: 1000px;
+
+  /* Shadows */
+  --shadow-card:
+    rgba(0, 0, 0, 0.7) 0px 12px 32px -16px,
+    rgba(0, 0, 0, 0.7) 0px 12px 60px 0px,
+    rgba(255, 255, 255, 0.08) 0px 0px 0px 1px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background: var(--color-obsidian);
+  color: var(--color-ghost);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Selection ─── */
+::selection {
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+}
+
+/* ─── Spinner ─── */
+@keyframes applyd-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Atmospheric hero — Giga's "deep night, mountain vista" via CSS only.
+   Bigger, brighter gradients so the hero doesn't read as flat black. ──── */
+.hero-atmos {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    /* Sky-blue rising from the horizon (the "vista") */
+    radial-gradient(140% 90% at 50% 115%, rgba(136, 187, 245, 0.45) 0%, rgba(136, 187, 245, 0.12) 40%, transparent 70%),
+    /* Violet glow on the upper right */
+    radial-gradient(70% 55% at 88% -10%, rgba(255, 154, 234, 0.22) 0%, transparent 65%),
+    /* Mint glow on the upper left */
+    radial-gradient(75% 60% at 10% 5%, rgba(73, 222, 128, 0.14) 0%, transparent 60%),
+    /* Deepening obsidian core */
+    radial-gradient(100% 100% at 50% 30%, #0a0c10 0%, #000 70%),
+    var(--color-obsidian);
+}
+.hero-atmos::before {
+  /* Horizon ridge — slightly brighter so it actually reads */
+  content: "";
+  position: absolute;
+  inset: auto 0 25% 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.08) 18%,
+    rgba(255, 255, 255, 0.35) 50%,
+    rgba(255, 255, 255, 0.08) 82%,
+    transparent 100%);
+  z-index: 0;
+}
+.hero-atmos::after {
+  /* Sky-blue glow rising from the horizon line */
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 25%;
+  background: linear-gradient(180deg,
+    rgba(136, 187, 245, 0.0) 0%,
+    rgba(136, 187, 245, 0.18) 35%,
+    rgba(0, 0, 0, 0.55) 100%);
+  z-index: 0;
+  pointer-events: none;
+}
+.hero-atmos > * { position: relative; z-index: 1; }
+
+/* Giga decorative gradient sections — exact values from their tokens.
+   Used as full-width section backgrounds with Obsidian (black) text on top. */
+.gradient-violet { background: linear-gradient(90deg, rgb(255, 154, 234) -10%, rgb(255, 255, 255) 28%); }
+.gradient-mint   { background: linear-gradient(90deg, rgb(195, 234, 202) 0%, rgb(255, 255, 255) 74.8733%); }
+.gradient-sky    { background: linear-gradient(90deg, rgb(136, 187, 245) 0%, rgb(255, 255, 255) 30%); }
+
+/* Variants where the dominant color hugs the right edge — Giga uses both
+   directions across the site to keep sections visually rhythmed. */
+.gradient-violet-r { background: linear-gradient(270deg, rgb(255, 154, 234) -10%, rgb(255, 255, 255) 28%); }
+.gradient-mint-r   { background: linear-gradient(270deg, rgb(195, 234, 202) 0%, rgb(255, 255, 255) 74.8733%); }
+.gradient-sky-r    { background: linear-gradient(270deg, rgb(136, 187, 245) 0%, rgb(255, 255, 255) 30%); }
+
+/* ─────────────────────────────────────────────────────────────
+   .theme-eleven — ElevenLabs design system, scoped.
+   Eggshell ground, Cormorant 300 serif headlines, 0-radius inputs,
+   pure-black pill buttons. Auth pages only.
+   ──────────────────────────────────────────────────────────── */
+.theme-eleven {
+  background: #fdfcfc;       /* Eggshell */
+  color: #000;               /* Obsidian */
+  color-scheme: light;
+  font-family: var(--font-inter);
+
+  /* Remap Giga's named variables to Eleven values inside this scope.
+     This means every inline style that says `var(--color-pebble)` (etc.)
+     across the existing pages picks up the right light-mode value
+     without per-file edits. */
+  --color-ghost: #000;            /* primary text — was white on dark */
+  --color-obsidian: #000;
+  --color-pebble: #777169;        /* Gravel */
+  --color-cosmic: #a59f97;        /* Slate */
+  --color-steel: #a59f97;         /* Slate */
+  --color-shadow: #b1b0b0;        /* Fog */
+  --color-night: #000;
+  --color-hairline: #e5e5e5;      /* Chalk */
+  --color-hairline-strong: #c8c5c1;
+  --color-whisper: #ffffff;
+  --color-whisper-strong: #f5f3f1;
+}
+
+.theme-eleven .h-eleven {
+  font-family: var(--font-cormorant);
+  font-weight: 300;
+  font-size: clamp(36px, 5vw, 48px);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  color: #000;
+}
+
+.theme-eleven .eyebrow {
+  font-family: var(--font-inter);
+  font-size: 14px;
+  font-weight: 400;
+  color: #777169;            /* Gravel */
+  letter-spacing: 0.005em;
+}
+
+.theme-eleven .muted {
+  color: #777169;
+}
+
+/* Card → white on eggshell with hairline shadow (no border outline). */
+.theme-eleven .card {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 36px;
+  box-shadow:
+    rgba(0, 0, 0, 0.4) 0px 0px 1.143px 0px,
+    rgba(0, 0, 0, 0.04) 0px 2px 4px 0px;
+}
+
+/* Label → no uppercase, Gravel text, comfortable margin. */
+.theme-eleven .label {
+  font-size: 12px;
+  font-weight: 400;
+  color: #777169;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  margin-bottom: 8px;
+}
+
+/* Input → 0px radius (the signature move), chalk border, inset hairline. */
+.theme-eleven .input {
+  width: 100%;
+  height: 44px;
+  padding: 12px 16px;
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 0;
+  color: #000;
+  font-size: 14px;
+  line-height: 1.2;
+  outline: none;
+  box-shadow: rgba(0, 0, 0, 0.075) 0px 0px 0px 0.5px inset;
+  transition: border-color 120ms ease;
+}
+.theme-eleven .input::placeholder { color: #a59f97; }
+.theme-eleven .input:focus {
+  border-color: #000;
+  background: #fff;
+}
+
+/* Pills → primary is pure black on eggshell, ghost is white. */
+.theme-eleven .pill {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 9999px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  font-family: var(--font-inter);
+}
+.theme-eleven .pill-primary {
+  background: #000;
+  color: #fdfcfc;
+  border-color: #e5e5e5;
+  box-shadow:
+    rgba(0, 0, 0, 0.06) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.04) 0px 1px 2px 0px,
+    rgba(0, 0, 0, 0.04) 0px 2px 4px 0px;
+}
+.theme-eleven .pill-primary:hover:not(:disabled) { background: #1a1a1a; }
+
+.theme-eleven .pill-ghost {
+  background: #ffffff;
+  color: #000;
+  border-color: #e5e5e5;
+  box-shadow:
+    rgba(0, 0, 0, 0.06) 0px 0px 0px 1px,
+    rgba(0, 0, 0, 0.04) 0px 1px 2px 0px;
+}
+.theme-eleven .pill-ghost:hover:not(:disabled) { background: #f5f3f1; }
+
+/* Mono — used for tiny technical inline markers. */
+.theme-eleven .mono { color: #777169; font-size: 13px; }
+
+/* Hairline divider in eggshell tone. */
+.theme-eleven .hairline-eleven {
+  height: 1px;
+  background: #e5e5e5;
+}
+
+/* Table — light-mode variant. */
+.theme-eleven .table thead th {
+  color: #777169;
+  border-bottom-color: #e5e5e5;
+}
+.theme-eleven .table tbody td {
+  color: #000;
+  border-bottom-color: #e5e5e5;
+}
+.theme-eleven .table tbody tr:hover td { background: #f5f3f1; }
+
+/* Card on eggshell — replace dark whisper bg with white + hairline shadow. */
+.theme-eleven .card-flush {
+  background: #ffffff;
+  box-shadow:
+    rgba(0, 0, 0, 0.4) 0px 0px 1.143px 0px,
+    rgba(0, 0, 0, 0.04) 0px 2px 4px 0px;
+  border-radius: 16px;
+}
+
+/* Mono — gravel on eggshell. */
+.theme-eleven .mono { color: #777169; }
+
+/* Chip — light variant. */
+.theme-eleven .chip {
+  color: #777169;
+  border-color: #e5e5e5;
+  background: #fff;
+}
+.theme-eleven .chip:hover { color: #000; border-color: #b1b0b0; }
+.theme-eleven .chip[data-active="true"] {
+  background: #000;
+  color: #fdfcfc;
+  border-color: #000;
+}
+
+/* Status pills — re-tuned for light backgrounds. */
+.theme-eleven .status-applied    { color: #1a6a3a; background: rgba(73, 222, 128, 0.18); box-shadow: inset 0 0 0 1px rgba(73, 222, 128, 0.45); }
+.theme-eleven .status-tailored   { color: #1a4ea8; background: rgba(136, 187, 245, 0.22); box-shadow: inset 0 0 0 1px rgba(136, 187, 245, 0.5); }
+.theme-eleven .status-pending    { color: #8a5a09; background: rgba(245, 165, 36, 0.18); box-shadow: inset 0 0 0 1px rgba(245, 165, 36, 0.5); }
+.theme-eleven .status-skipped    { color: #777169; background: #f5f3f1;                  box-shadow: inset 0 0 0 1px #e5e5e5; }
+.theme-eleven .status-failed     { color: #b32400; background: rgba(255, 71, 4, 0.12);   box-shadow: inset 0 0 0 1px rgba(255, 71, 4, 0.4); }
+.theme-eleven .status-inprogress { color: #000;    background: #f5f3f1;                  box-shadow: inset 0 0 0 1px #c8c5c1; }
+
+/* When a section is light, swap card + text tokens to Obsidian. */
+.on-light {
+  color: var(--color-obsidian);
+}
+.on-light .card,
+.on-light .card-flush {
+  background: rgba(0, 0, 0, 0.04);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.on-light .mono { color: rgba(0, 0, 0, 0.55); }
+.on-light .label { color: rgba(0, 0, 0, 0.55); }
+.on-light .chip {
+  color: rgba(0, 0, 0, 0.65);
+  border-color: rgba(0, 0, 0, 0.15);
+}
+.on-light .chip[data-active="true"] {
+  color: var(--color-ghost);
+  background: var(--color-obsidian);
+  border-color: var(--color-obsidian);
+}
+.on-light .pill-primary {
+  /* Giga's Primary Filled Pill: Ghost bg, Obsidian text, Obsidian border. */
+  background: var(--color-ghost);
+  color: var(--color-obsidian);
+  border-color: var(--color-obsidian);
+}
+.on-light .pill-dark {
+  background: var(--color-night);
+  color: var(--color-ghost);
+  border-color: var(--color-obsidian);
+}
+.on-light .pill-ghost {
+  background: rgba(255, 255, 255, 0.4);
+  color: var(--color-obsidian);
+  border-color: var(--color-obsidian);
+}
+
+/* ─── Component classes ─────────────────────────────────────── */
+
+@layer components {
+  /* PILL — the signature button shape */
+  /* Giga: primary pill 9px vertical / 20px horizontal padding. */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 20px;
+    border-radius: var(--radius-pill);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    line-height: 1;
+    border: 1px solid transparent;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      transform 120ms ease,
+      opacity 120ms ease;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pill:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .pill-primary {
+    background: var(--color-ghost);
+    color: var(--color-obsidian);
+    border-color: var(--color-ghost);
+  }
+  .pill-primary:hover:not(:disabled) { background: #ededed; }
+
+  .pill-dark {
+    background: var(--color-night);
+    color: var(--color-ghost);
+    border-color: var(--color-hairline-strong);
+  }
+  .pill-dark:hover:not(:disabled) {
+    background: #1f2020;
+    border-color: var(--color-hairline-strong);
+  }
+
+  .pill-ghost {
+    background: var(--color-whisper);
+    color: var(--color-ghost);
+    border-color: var(--color-hairline);
+  }
+  .pill-ghost:hover:not(:disabled) {
+    background: var(--color-whisper-strong);
+    border-color: var(--color-hairline-strong);
+  }
+
+  .pill-sm {
+    height: 28px;
+    padding: 0 14px;
+    font-size: var(--text-xs);
+  }
+
+  /* CARD — transparent black with hairline ring */
+  .card {
+    background: var(--color-whisper);
+    border-radius: var(--radius-card);
+    box-shadow: 0 0 0 1px var(--color-hairline);
+    padding: var(--spacing-card);
+  }
+  .card-elevated {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+    padding: var(--spacing-card);
+  }
+  .card-flush {
+    background: var(--color-whisper);
+    border-radius: var(--radius-card);
+    box-shadow: 0 0 0 1px var(--color-hairline);
+  }
+
+  /* INPUT */
+  .input {
+    width: 100%;
+    height: 40px;
+    padding: 0 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-input);
+    color: var(--color-ghost);
+    font-size: var(--text-sm);
+    line-height: 1;
+    outline: none;
+    transition: border-color 120ms ease, background-color 120ms ease;
+  }
+  .input::placeholder { color: var(--color-cosmic); }
+  .input:focus {
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .input-textarea { height: auto; padding: 10px 12px; line-height: 1.5; }
+
+  /* LABEL */
+  .label {
+    display: block;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-pebble);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  /* HEADINGS — Geist Light stand-in for Emilio */
+  .h-display {
+    font-family: var(--font-display);
+    font-weight: 300;
+    font-size: var(--text-display);
+    line-height: var(--leading-display);
+    letter-spacing: var(--tracking-display);
+  }
+  .h-section {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: var(--text-2xl);
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+  }
+  .h-card {
+    font-family: var(--font-display);
+    font-weight: 500;
+    font-size: var(--text-xl);
+    line-height: 1.1;
+    letter-spacing: -0.015em;
+  }
+
+  /* MONO — for IDs, timestamps, telemetry */
+  .mono {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.009em;
+    color: var(--color-cosmic);
+  }
+
+  /* STATUS PILL — table row state */
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 20px;
+    padding: 0 8px 0 6px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .status::before {
+    content: "";
+    width: 6px; height: 6px;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.9;
+  }
+  .status-applied  { color: var(--color-growth);  background: rgba(73, 222, 128, 0.08); box-shadow: inset 0 0 0 1px rgba(73, 222, 128, 0.22); }
+  .status-tailored { color: var(--color-sky);     background: rgba(136, 187, 245, 0.08); box-shadow: inset 0 0 0 1px rgba(136, 187, 245, 0.22); }
+  .status-pending  { color: var(--color-amber);   background: rgba(245, 165, 36, 0.08); box-shadow: inset 0 0 0 1px rgba(245, 165, 36, 0.22); }
+  .status-skipped  { color: var(--color-cosmic);  background: rgba(138, 143, 152, 0.08); box-shadow: inset 0 0 0 1px rgba(138, 143, 152, 0.22); }
+  .status-failed   { color: var(--color-ember);   background: rgba(254, 44, 2, 0.08);   box-shadow: inset 0 0 0 1px rgba(254, 44, 2, 0.28); }
+  .status-inprogress { color: var(--color-ghost); background: rgba(255, 255, 255, 0.08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18); }
+
+  /* TABLE — dense, monolike, hairline rows */
+  .table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: var(--text-sm);
+  }
+  .table thead th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-pebble);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--color-hairline);
+    background: transparent;
+  }
+  .table tbody td {
+    padding: 12px;
+    border-bottom: 1px solid var(--color-hairline);
+    color: var(--color-ghost);
+    vertical-align: middle;
+  }
+  .table tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+  .table tbody tr:last-child td { border-bottom: none; }
+
+  /* DIVIDER */
+  .hairline { height: 1px; background: var(--color-hairline); }
+
+  /* CHIP — filter / segmented */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: var(--radius-pill);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-pebble);
+    background: transparent;
+    border: 1px solid var(--color-hairline);
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .chip:hover { color: var(--color-ghost); border-color: var(--color-hairline-strong); }
+  .chip[data-active="true"] {
+    color: var(--color-obsidian);
+    background: var(--color-ghost);
+    border-color: var(--color-ghost);
+  }
+}

@@ -6,8 +6,6 @@ the per-job context.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 
 SYSTEM_PROMPT = """\
 You are applyd's apply agent. You handle ONE job per invocation.
@@ -166,13 +164,3 @@ def build_user_blocks(
         {"type": "text", "text": static, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": dynamic},
     ]
-
-
-def load_profile(path: str | Path = "./profile.md") -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        raise FileNotFoundError(
-            f"profile not found at {p}. For the spike, copy your USER.md "
-            f"there or pass --profile."
-        )
-    return p.read_text()
