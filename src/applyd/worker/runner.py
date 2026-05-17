@@ -31,8 +31,10 @@ from applyd.db import get_client  # noqa: E402
 
 logger = logging.getLogger("applyd.worker")
 
-# Statuses we'll try to grab. Tailored = freshly ready; failed = retryable.
-CLAIMABLE = ("tailored", "failed")
+# Only freshly-tailored rows are claimable. 'failed' is terminal — a previous
+# attempt already burned cost and wrote an apply_attempts audit row. To retry
+# manually, flip the row back to 'tailored' in the DB.
+CLAIMABLE = ("tailored",)
 
 
 def _find_one_claimable() -> Optional[dict]:
