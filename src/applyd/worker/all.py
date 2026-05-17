@@ -92,13 +92,16 @@ def run_forever(
         idle_sleep_seconds,
     )
 
-    # Force a match on the first cycle so the queue isn't dry until the
-    # interval elapses.
-    last_match_at = 0.0
+    # `None` forces a match on the very first cycle. Don't use 0.0 here:
+    # time.monotonic()'s reference point is platform-dependent, so the first
+    # delta is not guaranteed to exceed the interval.
+    last_match_at: float | None = None
 
     while not _stop:
         matched = 0
-        if time.monotonic() - last_match_at >= match_interval_seconds:
+        now = time.monotonic()
+        if last_match_at is None or (now - last_match_at) >= match_interval_seconds:
+            logger.info("[worker-all] match sweep starting (batch=%d workers=%d)", match_batch, match_workers)
             try:
                 matched = matchmaker.tick_once(
                     batch_limit=match_batch,
