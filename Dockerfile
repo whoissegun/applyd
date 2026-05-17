@@ -9,6 +9,7 @@
 FROM python:3.11-slim-bookworm
 
 ARG TECTONIC_VERSION=0.16.9
+ARG TARGETARCH
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -29,8 +30,13 @@ RUN apt-get update \
         libssl3 \
         zlib1g \
  && mkdir -p /tmp/tectonic \
+ && case "$TARGETARCH" in \
+        amd64) tectonic_target="x86_64-unknown-linux-gnu" ;; \
+        arm64) tectonic_target="aarch64-unknown-linux-musl" ;; \
+        *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac \
  && curl -fsSL \
-        "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+        "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-${tectonic_target}.tar.gz" \
         -o /tmp/tectonic.tar.gz \
  && tar -xzf /tmp/tectonic.tar.gz -C /tmp/tectonic \
  && cp "$(find /tmp/tectonic -type f -name tectonic | head -n 1)" /usr/local/bin/tectonic \
