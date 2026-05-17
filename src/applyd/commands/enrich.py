@@ -6,6 +6,7 @@ from typing import Optional
 
 import httpx
 
+from ..classify import classify_job
 from ..config import load_env
 from ..db import JobsRepo, get_client
 from ..enrichment import MIN_USEFUL_CHARS, SpiderClient, fetch_text
@@ -48,6 +49,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         print(f"  (tier 3 disabled: {e})", file=sys.stderr)
 
     stats = {"ats": 0, "http": 0, "spider": 0, "spider-chrome": 0, "failed": 0}
+    classify_stats = {"ok": 0, "skipped": 0, "errored": 0}
     board_cache: dict = {}  # (ats, company) -> list[Job]; tier-1 session cache
     workers = max(1, args.workers)
 
@@ -62,14 +64,25 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         if spider is not None:
             spider._client = client
 
-        def work(job: Job) -> tuple[Job, str, str, Optional[str]]:
+        def work(job: Job) -> tuple[Job, str, str, Optional[str], Optional[dict], Optional[str]]:
             try:
                 text, tier, err = fetch_text(
                     job.url, spider=spider, client=client, board_cache=board_cache,
                 )
             except Exception as e:
                 text, tier, err = "", "failed", f"{type(e).__name__}: {e}"
-            return job, text, tier, err
+
+            classification: Optional[dict] = None
+            classify_err: Optional[str] = None
+            description = text or job.description
+            if description and len(description) >= MIN_USEFUL_CHARS:
+                try:
+                    raw = classify_job(job.title or "", description)
+                    raw.pop("_usage", None)
+                    classification = raw
+                except Exception as e:
+                    classify_err = f"{type(e).__name__}: {e}"
+            return job, text, tier, err, classification, classify_err
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -78,21 +91,30 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             futures = [pool.submit(work, j) for j in candidates]
             try:
                 for fut in as_completed(futures):
-                    job, text, tier, err = fut.result()
+                    job, text, tier, err, classification, classify_err = fut.result()
                     description = text or job.description
                     repo.mark_enriched(
                         job.id,
                         description=description,
                         tier=tier,
                         error=err,
+                        classification=classification,
                     )
                     stats[tier] = stats.get(tier, 0) + 1
+                    if classification is not None:
+                        classify_stats["ok"] += 1
+                    elif classify_err is not None:
+                        classify_stats["errored"] += 1
+                        print(f"  ⚠ classify {job.id}: {classify_err}", file=sys.stderr)
+                    else:
+                        classify_stats["skipped"] += 1
 
                     processed += 1
                     if processed % args.save_every == 0:
                         running = " ".join(f"{k}={v}" for k, v in stats.items())
+                        cls = " ".join(f"cls-{k}={v}" for k, v in classify_stats.items())
                         print(
-                            f"  {processed}/{len(candidates)}  {running}",
+                            f"  {processed}/{len(candidates)}  {running}  {cls}",
                             file=sys.stderr,
                         )
             except KeyboardInterrupt:
@@ -102,5 +124,6 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                 raise
 
     running = " ".join(f"{k}={v}" for k, v in stats.items())
-    print(f"\n✓ enrichment complete: {running}", file=sys.stderr)
+    cls = " ".join(f"cls-{k}={v}" for k, v in classify_stats.items())
+    print(f"\n✓ enrichment complete: {running}  {cls}", file=sys.stderr)
     return 0

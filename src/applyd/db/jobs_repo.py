@@ -133,15 +133,17 @@ class JobsRepo:
         description: Optional[str],
         tier: str,
         error: Optional[str] = None,
+        classification: Optional[dict] = None,
     ) -> None:
-        self.client.table("jobs").update(
-            {
-                "description": description,
-                "enriched_at": datetime.now(timezone.utc).isoformat(),
-                "fetch_tier": tier,
-                "fetch_error": error,
-            }
-        ).eq("id", job_id).execute()
+        payload: dict = {
+            "description": description,
+            "enriched_at": datetime.now(timezone.utc).isoformat(),
+            "fetch_tier": tier,
+            "fetch_error": error,
+        }
+        if classification is not None:
+            payload["classification"] = classification
+        self.client.table("jobs").update(payload).eq("id", job_id).execute()
 
     def mark_inactive(self, job_id: str, reason: str) -> None:
         """Flip a job to inactive on a strong dead-link signal.

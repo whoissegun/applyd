@@ -1,14 +1,14 @@
 """Combined worker for early-stage deployments.
 
-Runs the two user-facing background stages in one process:
+Runs the three user-facing background stages in one process:
 
-  1. tailor up to N pending applications
-  2. apply to up to N tailored applications
+  1. matchmake: score new (user, job) pairs into applications.status='pending'
+  2. tailor up to N pending applications
+  3. apply to up to N tailored applications
 
-Discovery, enrichment, and matchmaker are intentionally left manual for now.
-The underlying stages still use Supabase status transitions and atomic claims,
-so this can be split back into separate Railway services later without a data
-migration.
+Match runs on its own cadence (default every 300s) because it's a per-user
+sweep, not a per-application tick. Discovery + enrichment + classification
+stay on their own crons.
 
 Entry: python -m applyd.worker.all
 """
@@ -27,6 +27,7 @@ from applyd.config import load_env
 
 load_env()
 
+from applyd.worker import matchmaker  # noqa: E402
 from applyd.worker import runner as apply_runner  # noqa: E402
 from applyd.worker import tailor_runner  # noqa: E402
 
@@ -72,20 +73,41 @@ def run_forever(
     *,
     tailor_batch: int = 10,
     apply_batch: int = 10,
+    match_batch: int = 15,
+    match_workers: int = 8,
+    match_interval_seconds: float = 300.0,
     idle_sleep_seconds: float = 30.0,
 ) -> None:
-    """Alternate between bounded tailor and apply batches forever."""
+    """Alternate bounded match, tailor, and apply batches forever."""
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
     logger.info(
-        "[worker-all] starting tailor_batch=%d apply_batch=%d idle_sleep=%.1fs",
+        "[worker-all] starting tailor_batch=%d apply_batch=%d match_batch=%d match_workers=%d match_interval=%.0fs idle_sleep=%.1fs",
         tailor_batch,
         apply_batch,
+        match_batch,
+        match_workers,
+        match_interval_seconds,
         idle_sleep_seconds,
     )
 
+    # Force a match on the first cycle so the queue isn't dry until the
+    # interval elapses.
+    last_match_at = 0.0
+
     while not _stop:
+        matched = 0
+        if time.monotonic() - last_match_at >= match_interval_seconds:
+            try:
+                matched = matchmaker.tick_once(
+                    batch_limit=match_batch,
+                    workers=match_workers,
+                )
+            except Exception:
+                logger.exception("[worker-all] match tick crashed")
+            last_match_at = time.monotonic()
+
         tailored = _run_batch(
             name="tailor",
             tick=tailor_runner.tick_once,
@@ -98,12 +120,13 @@ def run_forever(
         )
 
         logger.info(
-            "[worker-all] cycle complete: tailored=%d applied_or_terminal=%d",
+            "[worker-all] cycle complete: matched=%d tailored=%d applied_or_terminal=%d",
+            matched,
             tailored,
             applied,
         )
 
-        if tailored == 0 and applied == 0 and not _stop:
+        if matched == 0 and tailored == 0 and applied == 0 and not _stop:
             slept = 0.0
             while slept < idle_sleep_seconds and not _stop:
                 step = min(0.5, idle_sleep_seconds - slept)
@@ -128,10 +151,28 @@ def main() -> None:
         help="max tailored applications to apply per cycle",
     )
     parser.add_argument(
+        "--match-batch",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCH_BATCH", "15")),
+        help="max jobs to score per user per match sweep",
+    )
+    parser.add_argument(
+        "--match-workers",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCH_WORKERS", "8")),
+        help="thread pool size for per-user Haiku match calls",
+    )
+    parser.add_argument(
+        "--match-interval-seconds",
+        type=float,
+        default=float(os.environ.get("APPLYD_MATCH_INTERVAL_SECONDS", "300")),
+        help="minimum seconds between matchmaker sweeps",
+    )
+    parser.add_argument(
         "--idle-sleep-seconds",
         type=float,
         default=float(os.environ.get("APPLYD_WORKER_IDLE_SLEEP_SECONDS", "30")),
-        help="sleep duration when both queues are empty",
+        help="sleep duration when all queues are empty",
     )
     parser.add_argument(
         "--log-level",
@@ -147,6 +188,9 @@ def main() -> None:
     run_forever(
         tailor_batch=max(1, args.tailor_batch),
         apply_batch=max(1, args.apply_batch),
+        match_batch=max(1, args.match_batch),
+        match_workers=max(1, args.match_workers),
+        match_interval_seconds=max(1.0, args.match_interval_seconds),
         idle_sleep_seconds=max(1.0, args.idle_sleep_seconds),
     )
 

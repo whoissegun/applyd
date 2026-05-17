@@ -8,9 +8,12 @@ two Railway services:
 | `api`        | web    | `railway/api.toml`          |
 | `worker-all` | worker | `railway/worker-all.toml`   |
 
-`discover`, `enrich`, and `matchmaker` are manual commands for now. Run them
-from a developer machine or one-off Railway jobs when you want to refresh and
-score the catalog.
+`worker-all` runs three stages in one process: matchmake → tailor → apply.
+Match runs on its own cadence (default every 300s, env `APPLYD_MATCH_INTERVAL_SECONDS`),
+so the queue stays primed without re-sweeping users every 30s. `discover` and
+`enrich` are still manual or cron-only — run them when you want to refresh
+the catalog. `enrich` now classifies inline, so newly-enriched jobs become
+matchmaker-eligible immediately.
 
 Historical split-service configs still exist under `railway/<service>.toml`.
 Point each Railway service's
@@ -51,13 +54,16 @@ BRIGHTDATA_CDP_PORT=
 APPLYD_TEST_MODE=true
 APPLYD_TAILOR_BATCH=10
 APPLYD_APPLY_BATCH=10
+APPLYD_MATCH_BATCH=15
+APPLYD_MATCH_WORKERS=8
+APPLYD_MATCH_INTERVAL_SECONDS=300
 APPLYD_WORKER_IDLE_SLEEP_SECONDS=30
 ```
 
-Only `worker-apply` strictly needs the `BRIGHTDATA_*` set; only the cron jobs
-+ matchmaker need `BRAVE_SEARCH_API_KEY` / `SPIDER_API_KEY`. Setting them
-everywhere is cheaper than tracking which service needs what — they're cheap
-secrets, not per-service state.
+Only `worker-apply` / `worker-all` (apply stage) strictly needs `BRIGHTDATA_*`;
+only the discover/enrich crons need `BRAVE_SEARCH_API_KEY` / `SPIDER_API_KEY`.
+Setting them everywhere is cheaper than tracking which service needs what —
+they're cheap secrets, not per-service state.
 
 Keep `APPLYD_TEST_MODE=true` until you've watched the apply worker fill a few
 forms in production. Flip to `false` once confident; submissions are irrevocable.
@@ -96,6 +102,8 @@ apply to tailored applications.
   until applications/min outpaces it.
 - `cron-discover` and `cron-enrich` are idempotent; safe to re-run if a cron
   fires late or doubles up.
-- `worker-all` is intentionally sequential: up to 10 tailors, then up to 10
-  apply attempts, then repeat. Split apply back out first if browser sessions
-  start starving tailoring.
+- `worker-all` is intentionally sequential: match sweep (if interval elapsed),
+  then up to 10 tailors, then up to 10 apply attempts, then repeat. Split apply
+  back out first if browser sessions start starving tailoring; pull matchmaker
+  back into its own service if scoring starts dominating cycle time at higher
+  user counts.

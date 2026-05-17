@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from ..classify import match_user_to_job
@@ -96,8 +97,16 @@ def _record_usage(usage: UsageEventsRepo, user_id: str, match: dict[str, Any], j
     return cost
 
 
-def match_for_user(user_id: str, batch_limit: int = 50) -> dict[str, int]:
-    """Run one pass of matching for one user. Returns counts."""
+def match_for_user(
+    user_id: str,
+    batch_limit: int = 15,
+    workers: int = 8,
+) -> dict[str, int]:
+    """Run one pass of matching for one user. Returns counts.
+
+    Match calls fan out across `workers` threads — Haiku latency dominates per
+    call (~1–2s) so serial scoring stalls the whole worker-all loop.
+    """
     sb = get_client()
     profiles = UserProfilesRepo(sb)
     resumes = UserResumesRepo(sb)
@@ -119,44 +128,65 @@ def match_for_user(user_id: str, batch_limit: int = 50) -> dict[str, int]:
         return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
 
     counts = {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
+    profile_answers = profile["profile_answers"]
+    resume_text = resume["resume_text"]
 
-    for job in candidates:
-        if _stop:
-            break
+    def score(job: dict) -> tuple[dict, dict[str, Any] | None, Exception | None]:
         try:
             decision_obj = match_user_to_job(
-                profile_answers=profile["profile_answers"],
-                resume_text=resume["resume_text"],
+                profile_answers=profile_answers,
+                resume_text=resume_text,
                 classification=job["classification"],
             )
-        except Exception:
-            logger.exception("matchmaker: match call failed for job %s", job["id"])
-            continue
+            return job, decision_obj, None
+        except Exception as exc:
+            return job, None, exc
 
-        cost = _record_usage(usage, user_id, decision_obj, job["id"])
-        counts["matcher_cost_cents"] += cost
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = [pool.submit(score, j) for j in candidates]
+        try:
+            for fut in as_completed(futures):
+                if _stop:
+                    for f in futures:
+                        f.cancel()
+                    break
 
-        decision = decision_obj["decision"]
-        reason = "matcher:" + (decision_obj.get("reason") or "")[:300]
+                job, decision_obj, err = fut.result()
+                if err is not None or decision_obj is None:
+                    logger.exception(
+                        "matchmaker: match call failed for job %s: %r",
+                        job["id"],
+                        err,
+                    )
+                    continue
 
-        if decision == "reject":
-            # Create the application row as skipped — audit trail.
-            sb.table("applications").upsert(
-                {
-                    "user_id": user_id,
-                    "job_id": job["id"],
-                    "status": "skipped",
-                    "reason": reason,
-                },
-                on_conflict="user_id,job_id",
-            ).execute()
-            counts["rejected"] += 1
-        else:
-            apps.upsert_pending(user_id, job["id"])
-            if decision == "borderline":
-                counts["borderline"] += 1
-            else:
-                counts["accepted"] += 1
+                cost = _record_usage(usage, user_id, decision_obj, job["id"])
+                counts["matcher_cost_cents"] += cost
+
+                decision = decision_obj["decision"]
+                reason = "matcher:" + (decision_obj.get("reason") or "")[:300]
+
+                if decision == "reject":
+                    sb.table("applications").upsert(
+                        {
+                            "user_id": user_id,
+                            "job_id": job["id"],
+                            "status": "skipped",
+                            "reason": reason,
+                        },
+                        on_conflict="user_id,job_id",
+                    ).execute()
+                    counts["rejected"] += 1
+                else:
+                    apps.upsert_pending(user_id, job["id"])
+                    if decision == "borderline":
+                        counts["borderline"] += 1
+                    else:
+                        counts["accepted"] += 1
+        except KeyboardInterrupt:
+            for f in futures:
+                f.cancel()
+            raise
 
     logger.info(
         "matchmaker: user=%s accepted=%d rejected=%d borderline=%d cost=%d¢",
@@ -165,10 +195,10 @@ def match_for_user(user_id: str, batch_limit: int = 50) -> dict[str, int]:
     return counts
 
 
-def tick_once(batch_limit: int = 50) -> int:
-    """One sweep: find all users with profile+resume, run match for each. Returns total counts."""
+def tick_once(batch_limit: int = 15, workers: int = 8) -> int:
+    """One sweep: find all users with profile+resume, run match for each.
+    Returns total scored pairs."""
     sb = get_client()
-    # Find candidate users: those with non-empty profile_answers.
     users = (
         sb.table("user_profiles").select("id, profile_answers")
         .not_.is_("profile_answers", "null").execute().data
@@ -178,22 +208,29 @@ def tick_once(batch_limit: int = 50) -> int:
     for u in users:
         if _stop:
             break
-        counts = match_for_user(u["id"], batch_limit=batch_limit)
+        counts = match_for_user(u["id"], batch_limit=batch_limit, workers=workers)
         total += counts["accepted"] + counts["rejected"] + counts["borderline"]
     return total
 
 
-def run_forever(poll_seconds: int = 300, batch_limit: int = 50) -> None:
+def run_forever(
+    poll_seconds: int = 300,
+    batch_limit: int = 15,
+    workers: int = 8,
+) -> None:
     """Long-running matchmaker. Polls every N seconds."""
     load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    logger.info("matchmaker: starting, poll=%ds batch=%d", poll_seconds, batch_limit)
+    logger.info(
+        "matchmaker: starting, poll=%ds batch=%d workers=%d",
+        poll_seconds, batch_limit, workers,
+    )
     while not _stop:
         try:
-            tick_once(batch_limit=batch_limit)
+            tick_once(batch_limit=batch_limit, workers=workers)
         except Exception:
             logger.exception("matchmaker: tick failed")
         for _ in range(poll_seconds):
@@ -223,8 +260,14 @@ def main() -> None:
     parser.add_argument(
         "--batch-limit",
         type=int,
-        default=int(os.environ.get("APPLYD_MATCHMAKER_BATCH", "50")),
+        default=int(os.environ.get("APPLYD_MATCHMAKER_BATCH", "15")),
         help="max jobs to score per user per sweep",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCHMAKER_WORKERS", "8")),
+        help="thread pool size for Haiku match calls",
     )
     parser.add_argument(
         "--log-level",
@@ -240,14 +283,20 @@ def main() -> None:
 
     if args.once:
         if args.user:
-            counts = match_for_user(args.user, batch_limit=args.batch_limit)
+            counts = match_for_user(
+                args.user, batch_limit=args.batch_limit, workers=args.workers,
+            )
             total = counts["accepted"] + counts["rejected"] + counts["borderline"]
         else:
-            total = tick_once(batch_limit=args.batch_limit)
+            total = tick_once(batch_limit=args.batch_limit, workers=args.workers)
         logger.info("matchmaker: one-shot complete, scored=%d", total)
         return
 
-    run_forever(poll_seconds=args.poll_seconds, batch_limit=args.batch_limit)
+    run_forever(
+        poll_seconds=args.poll_seconds,
+        batch_limit=args.batch_limit,
+        workers=args.workers,
+    )
 
 
 if __name__ == "__main__":
