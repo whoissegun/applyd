@@ -31,7 +31,7 @@ RUN apt-get update \
         zlib1g \
  && mkdir -p /tmp/tectonic \
  && case "$TARGETARCH" in \
-        amd64) tectonic_target="x86_64-unknown-linux-gnu" ;; \
+        amd64) tectonic_target="x86_64-unknown-linux-musl" ;; \
         arm64) tectonic_target="aarch64-unknown-linux-musl" ;; \
         *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
     esac \
