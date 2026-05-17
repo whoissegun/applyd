@@ -1,0 +1,16 @@
+# Apply worker. Polls applications.status='tailored', drives the tool-use loop
+# over Bright Data Chrome via CDP. One replica ≈ one concurrent Bright Data
+# session — add replicas to parallelize, not bigger instances.
+#
+# REQUIRED env: BRIGHTDATA_CUSTOMER_ID, BRIGHTDATA_ZONE,
+# BRIGHTDATA_ZONE_PASSWORD, BRIGHTDATA_HOST, BRIGHTDATA_CDP_PORT,
+# OPENROUTER_API_KEY, APPLYD_TEST_MODE.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m applyd.worker.runner"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

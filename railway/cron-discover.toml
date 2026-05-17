@@ -1,0 +1,13 @@
+# Discovery cron. Pulls SimplifyJobs, Brave dorks, and targets.json companies
+# into public.jobs + public.companies. Idempotent — safe to fire late or twice.
+#
+# Schedule: every 6 hours. Adjust in Railway UI if you want a different cadence.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "applyd discover"
+cronSchedule = "0 */6 * * *"
+restartPolicyType = "NEVER"

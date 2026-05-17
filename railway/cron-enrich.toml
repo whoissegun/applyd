@@ -1,0 +1,14 @@
+# Enrichment cron. Fills missing JD descriptions for jobs in public.jobs via
+# the 4-tier cascade (ATS bulk → httpx+trafilatura → spider smart → spider chrome).
+#
+# Schedule: every 6 hours, offset 15 min from discover so the new rows are
+# already there to enrich.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "applyd enrich"
+cronSchedule = "15 */6 * * *"
+restartPolicyType = "NEVER"

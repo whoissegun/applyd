@@ -1,0 +1,34 @@
+.git
+.gitignore
+.github
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local-only state — never ship into the image.
+data
+out
+profile.json
+profile.example.md
+profile.md
+.env
+.env.*
+
+# Tooling / IDE
+.vscode
+.idea
+.claude
+CLAUDE.md
+DEPLOY.md
+README.md
+
+# Frontend lives next door; it ships on Vercel/Railway as a separate service.
+frontend
+node_modules
+
+# Supabase migrations are applied via the supabase CLI, not at runtime.
+supabase

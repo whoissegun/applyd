@@ -1,0 +1,12 @@
+# Tailor worker. Polls applications.status='pending', runs the Claude tailor
+# call, compiles PDF with tectonic, uploads to Storage. LLM-bound — one
+# replica handles many concurrent tailors.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m applyd.worker.tailor_runner"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

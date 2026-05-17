@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import time
+import argparse
 from typing import Any
 
 from ..classify import match_user_to_job
@@ -202,7 +203,52 @@ def run_forever(poll_seconds: int = 300, batch_limit: int = 50) -> None:
     logger.info("matchmaker: stopped")
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="applyd matchmaker")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="run one scoring sweep and exit",
+    )
+    parser.add_argument(
+        "--user",
+        help="score one user UUID instead of sweeping every user",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCHMAKER_POLL", "300")),
+        help="poll interval for long-running mode",
+    )
+    parser.add_argument(
+        "--batch-limit",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCHMAKER_BATCH", "50")),
+        help="max jobs to score per user per sweep",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("APPLYD_MATCHMAKER_LOG_LEVEL", "INFO"),
+        help="python logging level (DEBUG/INFO/WARNING)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=args.log_level.upper(),
+        format="%(asctime)s %(name)s %(message)s",
+    )
+
+    if args.once:
+        if args.user:
+            counts = match_for_user(args.user, batch_limit=args.batch_limit)
+            total = counts["accepted"] + counts["rejected"] + counts["borderline"]
+        else:
+            total = tick_once(batch_limit=args.batch_limit)
+        logger.info("matchmaker: one-shot complete, scored=%d", total)
+        return
+
+    run_forever(poll_seconds=args.poll_seconds, batch_limit=args.batch_limit)
+
+
 if __name__ == "__main__":
-    poll = int(os.environ.get("APPLYD_MATCHMAKER_POLL", "300"))
-    batch = int(os.environ.get("APPLYD_MATCHMAKER_BATCH", "50"))
-    run_forever(poll_seconds=poll, batch_limit=batch)
+    main()

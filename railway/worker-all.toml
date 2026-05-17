@@ -1,0 +1,14 @@
+# Combined early-stage worker. Alternates:
+#   1. tailor up to APPLYD_TAILOR_BATCH pending applications
+#   2. apply to up to APPLYD_APPLY_BATCH tailored applications
+#
+# Discovery, enrichment, and matchmaker are manual for now.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m applyd.worker.all"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
