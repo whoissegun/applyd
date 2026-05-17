@@ -1,11 +1,12 @@
 # One image, six Railway services. Each service overrides startCommand;
 # see DEPLOY.md for the table.
 #
-# tectonic comes from Debian bookworm (python:3.11-slim is bookworm-based).
+# tectonic comes from Debian bookworm. Pin bookworm explicitly because the
+# floating python:3.11-slim tag moved to trixie, whose apt repo lacks tectonic.
 # We do NOT install Playwright browsers — the apply worker talks to Bright
 # Data's hosted Chrome over CDP, so only the Python bindings ship.
 
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
