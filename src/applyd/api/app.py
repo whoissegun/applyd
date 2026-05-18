@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from applyd.config import load_env
@@ -32,6 +34,22 @@ from applyd.db import (  # noqa: E402
 logger = logging.getLogger("applyd.api")
 
 app = FastAPI(title="applyd", version="0.1.0")
+
+_default_origins = "http://localhost:3000,https://applyd-beryl.vercel.app"
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get("APPLYD_CORS_ORIGINS", _default_origins).split(",")
+    if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    # Match Vercel preview deploys (applyd-beryl-<hash>-<scope>.vercel.app).
+    allow_origin_regex=r"https://applyd-beryl-[\w-]+\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------- request models ----------
