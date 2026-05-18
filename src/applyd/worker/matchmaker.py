@@ -48,8 +48,10 @@ def _on_signal(signum: int, _frame: Any) -> None:
 def _candidate_jobs_for_user(sb, user_id: str, batch: int = 50) -> list[dict]:
     """Return classified, active, ungated jobs the user has no application row for.
 
-    Uses a NOT EXISTS via PostgREST: it's awkward but doable — we fetch a batch
-    of candidates, then filter out the ones the user already has an app row for.
+    Pages through `jobs` ordered by `posted_at desc`, dropping anything the user
+    already has an `applications` row for. Paging (rather than a single
+    over-fetched window) is what keeps the matchmaker progressing once the
+    user's seen set covers all the most-recent jobs.
     """
     already_app = (
         sb.table("applications").select("job_id")
@@ -57,18 +59,31 @@ def _candidate_jobs_for_user(sb, user_id: str, batch: int = 50) -> list[dict]:
     )
     seen_ids = {row["job_id"] for row in already_app if row["job_id"]}
 
-    # Pull a batch of classified, active, ungated jobs in deterministic order.
-    res = (
-        sb.table("jobs")
-        .select("id, title, classification")
-        .eq("active", True)
-        .is_("apply_gate", "null")
-        .not_.is_("classification", "null")
-        .order("posted_at", desc=True)
-        .limit(batch * 4)  # over-fetch to allow filtering out seen ones
-        .execute()
-    )
-    return [r for r in res.data if r["id"] not in seen_ids][:batch]
+    page_size = max(batch * 4, 100)
+    max_scan = max(batch * 50, 2000)  # cap so a fully-saturated user doesn't full-scan jobs
+    candidates: list[dict] = []
+    offset = 0
+    while len(candidates) < batch and offset < max_scan:
+        res = (
+            sb.table("jobs")
+            .select("id, title, classification")
+            .eq("active", True)
+            .is_("apply_gate", "null")
+            .not_.is_("classification", "null")
+            .order("posted_at", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            break
+        for r in rows:
+            if r["id"] not in seen_ids:
+                candidates.append(r)
+                if len(candidates) >= batch:
+                    break
+        offset += page_size
+    return candidates[:batch]
 
 
 def _record_usage(usage: UsageEventsRepo, user_id: str, match: dict[str, Any], job_id: str) -> int:
