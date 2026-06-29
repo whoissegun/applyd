@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Iterator, Optional
 
@@ -134,6 +135,7 @@ class JobsRepo:
         tier: str,
         error: Optional[str] = None,
         classification: Optional[dict] = None,
+        embedding: Optional[list[float]] = None,
     ) -> None:
         payload: dict = {
             "description": description,
@@ -143,6 +145,8 @@ class JobsRepo:
         }
         if classification is not None:
             payload["classification"] = classification
+        if embedding is not None:
+            payload["embedding"] = json.dumps(embedding)
         self.client.table("jobs").update(payload).eq("id", job_id).execute()
 
     def mark_inactive(self, job_id: str, reason: str) -> None:

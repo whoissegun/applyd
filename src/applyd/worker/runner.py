@@ -28,8 +28,11 @@ load_env()
 
 from applyd.apply.saas import apply_for_user  # noqa: E402
 from applyd.db import get_client  # noqa: E402
+from applyd.llm_errors import TransientInfraError  # noqa: E402
 
 logger = logging.getLogger("applyd.worker")
+
+INFRA_BACKOFF_SECONDS = 120.0  # back-off after a transient (no-credits/rate-limit) error
 
 # Only freshly-tailored rows are claimable. 'failed' is terminal — a previous
 # attempt already burned cost and wrote an apply_attempts audit row. To retry
@@ -67,6 +70,10 @@ def tick_once() -> Optional[dict]:
 
     try:
         result = apply_for_user(user_id=user_id, application_id=app_id)
+    except TransientInfraError:
+        # Account/provider-wide failure; the row was requeued (not failed).
+        # Propagate so the loop / worker-all backs off instead of hammering on.
+        raise
     except Exception as exc:  # noqa: BLE001
         # apply_for_user already releases the app on internal failures; this
         # only fires if something raises *before* the claim (e.g. ValueError
@@ -95,14 +102,20 @@ def run_forever(poll_seconds: float = 30.0) -> None:
 
     logger.info("[worker] starting poll loop (every %.1fs)", poll_seconds)
     while not stop["flag"]:
+        sleep_for = poll_seconds
         try:
             tick_once()
+        except TransientInfraError as exc:
+            # Requeued already; back off longer than the normal poll so we're not
+            # hammering an empty balance / rate limit.
+            logger.warning("[worker] infra backoff after transient error: %s", exc)
+            sleep_for = max(poll_seconds, INFRA_BACKOFF_SECONDS)
         except Exception:
             logger.exception("[worker] tick crashed; will retry next interval")
         # Sleep in small slices so SIGINT is responsive.
         slept = 0.0
-        while slept < poll_seconds and not stop["flag"]:
-            time.sleep(min(0.5, poll_seconds - slept))
+        while slept < sleep_for and not stop["flag"]:
+            time.sleep(min(0.5, sleep_for - slept))
             slept += 0.5
     logger.info("[worker] exited cleanly")
 

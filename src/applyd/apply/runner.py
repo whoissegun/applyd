@@ -21,6 +21,7 @@ from typing import Any
 from openai import OpenAI
 
 from ..config import load_env
+from ..llm_errors import is_transient_llm_error
 from .browser import brightdata_page
 from .prompts import SYSTEM_PROMPT, build_user_blocks
 from .tools import TOOL_DEFS, dispatch
@@ -170,7 +171,10 @@ def run_apply(
                 final_status = "failed"
                 final_note = f"hit MAX_TURNS={MAX_TURNS} without report_done"
     except Exception as e:
-        final_status = "failed"
+        # Transient infra (no credits, rate limit, provider outage) is not this
+        # job's fault — surface a distinct status so the caller requeues instead
+        # of burning the application to terminal 'failed'.
+        final_status = "infra_error" if is_transient_llm_error(e) else "failed"
         final_note = f"runner exception: {type(e).__name__}: {str(e)[:200]}"
         print(f"✗ runner exception: {type(e).__name__}: {e}", file=sys.stderr)
 

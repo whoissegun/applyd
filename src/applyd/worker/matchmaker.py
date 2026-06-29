@@ -23,7 +23,8 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from ..classify import match_user_to_job
+from ..classify import ensure_user_embedding, match_user_to_job
+from ..llm_errors import TransientInfraError, is_transient_llm_error
 from ..config import load_env
 from ..db import (
     ApplicationsRepo,
@@ -46,44 +47,18 @@ def _on_signal(signum: int, _frame: Any) -> None:
 
 
 def _candidate_jobs_for_user(sb, user_id: str, batch: int = 50) -> list[dict]:
-    """Return classified, active, ungated jobs the user has no application row for.
+    """Return the `batch` unseen jobs most similar to the user's embedding.
 
-    Pages through `jobs` ordered by `posted_at desc`, dropping anything the user
-    already has an `applications` row for. Paging (rather than a single
-    over-fetched window) is what keeps the matchmaker progressing once the
-    user's seen set covers all the most-recent jobs.
+    Ranking lives in SQL (`rank_jobs_for_user`, pgvector cosine distance over
+    job-classification embeddings). Each sweep the Haiku judge consumes the top
+    slice; judged jobs gain an `applications` row and drop out, so successive
+    sweeps walk down the ranked list — best fits get judged first, the tail of
+    sales/director roles may never burn a single LLM call.
     """
-    already_app = (
-        sb.table("applications").select("job_id")
-        .eq("user_id", user_id).execute().data
-    )
-    seen_ids = {row["job_id"] for row in already_app if row["job_id"]}
-
-    page_size = max(batch * 4, 100)
-    max_scan = max(batch * 50, 2000)  # cap so a fully-saturated user doesn't full-scan jobs
-    candidates: list[dict] = []
-    offset = 0
-    while len(candidates) < batch and offset < max_scan:
-        res = (
-            sb.table("jobs")
-            .select("id, title, classification")
-            .eq("active", True)
-            .is_("apply_gate", "null")
-            .not_.is_("classification", "null")
-            .order("posted_at", desc=True)
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        rows = res.data or []
-        if not rows:
-            break
-        for r in rows:
-            if r["id"] not in seen_ids:
-                candidates.append(r)
-                if len(candidates) >= batch:
-                    break
-        offset += page_size
-    return candidates[:batch]
+    res = sb.rpc(
+        "rank_jobs_for_user", {"p_user_id": user_id, "p_limit": batch}
+    ).execute()
+    return res.data or []
 
 
 def _record_usage(usage: UsageEventsRepo, user_id: str, match: dict[str, Any], job_id: str) -> int:
@@ -116,11 +91,18 @@ def match_for_user(
     user_id: str,
     batch_limit: int = 15,
     workers: int = 8,
+    target_backlog: int = 30,
 ) -> dict[str, int]:
     """Run one pass of matching for one user. Returns counts.
 
     Match calls fan out across `workers` threads — Haiku latency dominates per
     call (~1–2s) so serial scoring stalls the whole worker-all loop.
+
+    `target_backlog` is the stop rule: matching only spends Haiku to top a
+    user's accepted-but-unapplied queue back up to this size. A user whose
+    apply queue is already full costs nothing; one whose queue drained gets
+    refilled from the top of the similarity ranking. This is what keeps spend
+    proportional to applications instead of to catalog size.
     """
     sb = get_client()
     profiles = UserProfilesRepo(sb)
@@ -128,22 +110,41 @@ def match_for_user(
     apps = ApplicationsRepo(sb)
     usage = UsageEventsRepo(sb)
 
-    profile = profiles.get(user_id)
-    if not profile or not (profile.get("profile_answers") or "").strip():
-        logger.info("matchmaker: user %s has no profile_answers, skipping", user_id)
-        return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
-
+    # Resume is the only hard requirement — it carries enough signal to rank
+    # and judge against. profile_answers is optional enrichment: when present
+    # it sharpens the embedding (via positive-target extraction) and gives the
+    # judge stated preferences; when absent the resume stands on its own.
     resume = resumes.get(user_id)
     if not resume or not (resume.get("resume_text") or "").strip():
         logger.info("matchmaker: user %s has no master resume, skipping", user_id)
         return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
 
-    candidates = _candidate_jobs_for_user(sb, user_id, batch=batch_limit)
+    profile = profiles.get(user_id)
+    profile_answers = (profile.get("profile_answers") or "").strip() if profile else ""
+
+    if ensure_user_embedding(
+        sb, user_id, profile_answers, resume["resume_text"]
+    ):
+        logger.info("matchmaker: (re-)embedded user %s", user_id)
+
+    # Stop rule: don't spend Haiku if the apply queue is already primed. Only
+    # judge enough top-ranked jobs to refill the backlog to target — capped by
+    # batch_limit so one sweep can't judge the whole catalog after a big drain.
+    backlog = apps.count_unapplied_backlog(user_id)
+    need = target_backlog - backlog
+    if need <= 0:
+        logger.info(
+            "matchmaker: user %s queue full (%d/%d), skipping",
+            user_id, backlog, target_backlog,
+        )
+        return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
+
+    judge_n = min(need, batch_limit)
+    candidates = _candidate_jobs_for_user(sb, user_id, batch=judge_n)
     if not candidates:
         return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
 
     counts = {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
-    profile_answers = profile["profile_answers"]
     resume_text = resume["resume_text"]
 
     def score(job: dict) -> tuple[dict, dict[str, Any] | None, Exception | None]:
@@ -168,6 +169,13 @@ def match_for_user(
 
                 job, decision_obj, err = fut.result()
                 if err is not None or decision_obj is None:
+                    if err is not None and is_transient_llm_error(err):
+                        # Account/provider-wide failure: every remaining match
+                        # will fail too. Abort the sweep and back off rather than
+                        # burning retries against an empty balance / rate limit.
+                        for f in futures:
+                            f.cancel()
+                        raise TransientInfraError(f"match: {type(err).__name__}: {err}")
                     logger.exception(
                         "matchmaker: match call failed for job %s: %r",
                         job["id"],
@@ -210,7 +218,7 @@ def match_for_user(
     return counts
 
 
-def tick_once(batch_limit: int = 15, workers: int = 8) -> int:
+def tick_once(batch_limit: int = 15, workers: int = 8, target_backlog: int = 30) -> int:
     """One sweep: find all users with profile+resume, run match for each.
     Returns total scored pairs."""
     sb = get_client()
@@ -223,7 +231,10 @@ def tick_once(batch_limit: int = 15, workers: int = 8) -> int:
     for u in users:
         if _stop:
             break
-        counts = match_for_user(u["id"], batch_limit=batch_limit, workers=workers)
+        counts = match_for_user(
+            u["id"], batch_limit=batch_limit, workers=workers,
+            target_backlog=target_backlog,
+        )
         total += counts["accepted"] + counts["rejected"] + counts["borderline"]
     return total
 
@@ -232,6 +243,7 @@ def run_forever(
     poll_seconds: int = 300,
     batch_limit: int = 15,
     workers: int = 8,
+    target_backlog: int = 30,
 ) -> None:
     """Long-running matchmaker. Polls every N seconds."""
     load_env()
@@ -240,12 +252,15 @@ def run_forever(
     signal.signal(signal.SIGTERM, _on_signal)
 
     logger.info(
-        "matchmaker: starting, poll=%ds batch=%d workers=%d",
-        poll_seconds, batch_limit, workers,
+        "matchmaker: starting, poll=%ds batch=%d workers=%d target_backlog=%d",
+        poll_seconds, batch_limit, workers, target_backlog,
     )
     while not _stop:
         try:
-            tick_once(batch_limit=batch_limit, workers=workers)
+            tick_once(
+                batch_limit=batch_limit, workers=workers,
+                target_backlog=target_backlog,
+            )
         except Exception:
             logger.exception("matchmaker: tick failed")
         for _ in range(poll_seconds):
@@ -285,6 +300,12 @@ def main() -> None:
         help="thread pool size for Haiku match calls",
     )
     parser.add_argument(
+        "--target-backlog",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCHMAKER_TARGET_BACKLOG", "30")),
+        help="stop judging once a user has this many accepted-but-unapplied jobs queued",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("APPLYD_MATCHMAKER_LOG_LEVEL", "INFO"),
         help="python logging level (DEBUG/INFO/WARNING)",
@@ -300,10 +321,14 @@ def main() -> None:
         if args.user:
             counts = match_for_user(
                 args.user, batch_limit=args.batch_limit, workers=args.workers,
+                target_backlog=args.target_backlog,
             )
             total = counts["accepted"] + counts["rejected"] + counts["borderline"]
         else:
-            total = tick_once(batch_limit=args.batch_limit, workers=args.workers)
+            total = tick_once(
+                batch_limit=args.batch_limit, workers=args.workers,
+                target_backlog=args.target_backlog,
+            )
         logger.info("matchmaker: one-shot complete, scored=%d", total)
         return
 
@@ -311,6 +336,7 @@ def main() -> None:
         poll_seconds=args.poll_seconds,
         batch_limit=args.batch_limit,
         workers=args.workers,
+        target_backlog=args.target_backlog,
     )
 
 
