@@ -22,9 +22,12 @@ from applyd.config import load_env
 load_env()
 
 from applyd.db import get_client  # noqa: E402
+from applyd.llm_errors import TransientInfraError  # noqa: E402
 from applyd.tailor.saas import tailor_for_user  # noqa: E402
 
 logger = logging.getLogger("applyd.worker.tailor")
+
+INFRA_BACKOFF_SECONDS = 120.0  # back-off after a transient (no-credits/rate-limit) error
 
 
 def _find_one_pending() -> Optional[dict]:
@@ -59,6 +62,10 @@ def tick_once() -> Optional[dict]:
 
     try:
         result = tailor_for_user(user_id, job_id)
+    except TransientInfraError:
+        # Account/provider-wide failure; the row was requeued (not failed).
+        # Propagate so the loop / worker-all backs off instead of hammering on.
+        raise
     except Exception as exc:  # noqa: BLE001 — surfaced from saas.tailor_for_user
         logger.exception("[tailor-worker] tailor_for_user crashed: %s", exc)
         return {"status": "crashed", "application_id": app_id, "error": str(exc)}
@@ -81,15 +88,19 @@ def run_forever(poll_seconds: float = 30.0) -> None:
 
     logger.info("[tailor-worker] starting poll loop (every %.1fs)", poll_seconds)
     while not stop["flag"]:
+        sleep_for = poll_seconds
         try:
             tick_once()
+        except TransientInfraError as exc:
+            logger.warning("[tailor-worker] infra backoff after transient error: %s", exc)
+            sleep_for = max(poll_seconds, INFRA_BACKOFF_SECONDS)
         except Exception:
             logger.exception(
                 "[tailor-worker] tick crashed; will retry next interval"
             )
         slept = 0.0
-        while slept < poll_seconds and not stop["flag"]:
-            time.sleep(min(0.5, poll_seconds - slept))
+        while slept < sleep_for and not stop["flag"]:
+            time.sleep(min(0.5, sleep_for - slept))
             slept += 0.5
     logger.info("[tailor-worker] exited cleanly")
 

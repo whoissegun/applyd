@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_env
+from ..llm_errors import TransientInfraError
 from ..db import (
     ApplicationsRepo,
     ApplyAttemptsRepo,
@@ -221,6 +222,14 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         )
 
         status_raw = result.get("status", "failed")
+        if status_raw == "infra_error":
+            # Account/provider-wide failure inside the tool-use loop: requeue to
+            # 'tailored' (re-appliable) and signal the worker to back off rather
+            # than burn the application to terminal 'failed'.
+            note = result.get("note") or "apply infra error"
+            apps.requeue(application_id, "tailored", reason=f"infra: {note}")
+            logger.warning("[apply] infra error on app %s, requeued: %s", application_id, note)
+            raise TransientInfraError(f"apply: {note}")
         # The runner emits a couple of values not in our terminal set ("lost_race"
         # never originates here; "gated:*" notes come back on `status='skipped'`).
         status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
@@ -234,6 +243,10 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
             tool_call_counts=result.get("tool_call_counts") or None,
         )
 
+    except TransientInfraError:
+        # Already requeued above; propagate so the worker backs off globally
+        # instead of letting the broad handler mark this row terminal.
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("[apply] crashed for app %s: %s", application_id, exc)
         return _finish("failed", f"runner_crash: {type(exc).__name__}: {exc}")

@@ -7,15 +7,14 @@ typical but not strictly enforced — the matcher reads whatever is present.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
-from anthropic import Anthropic
-
 from ..db import cost_cents_for_tailor
+from ._openrouter import openrouter_client
 
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-4-5"          # pricing key (db.pricing.PRICING)
+OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"  # OpenRouter API slug
 MAX_DESCRIPTION_CHARS = 6000  # ~1500 tokens; plenty for classification
 
 SYSTEM = """You classify job postings into a structured JSON object so a matcher can decide whether a candidate is a fit.
@@ -38,23 +37,21 @@ def classify_job(title: str, description: str | None) -> dict[str, Any]:
     `cost_cents_for_tailor(MODEL, prompt_tokens, completion_tokens, cached_tokens)`
     — Haiku pricing is in PRICING).
     """
-    # max_retries=8 → SDK does exponential backoff on 429/5xx. The default of 2
-    # isn't enough for sustained backfill against Anthropic's per-minute tokens cap.
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=8)
-
     user_content = (
         f"TITLE: {title.strip()}\n\n"
         f"DESCRIPTION:\n{(description or '').strip()[:MAX_DESCRIPTION_CHARS]}"
     )
 
-    resp = client.messages.create(
-        model=MODEL,
+    resp = openrouter_client().chat.completions.create(
+        model=OPENROUTER_MODEL,
         max_tokens=1024,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
     )
 
-    text = "".join(block.text for block in resp.content if block.type == "text").strip()
+    text = (resp.choices[0].message.content or "").strip()
     # Strip accidental ``` fences if model adds them despite instructions.
     if text.startswith("```"):
         text = text.split("```", 2)[1].strip()
@@ -65,10 +62,11 @@ def classify_job(title: str, description: str | None) -> dict[str, Any]:
 
     # Attach usage so callers can compute cost without re-running.
     parsed["_usage"] = {
-        "input_tokens": resp.usage.input_tokens,
-        "output_tokens": resp.usage.output_tokens,
-        "cache_read_input_tokens": getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
-        "cache_creation_input_tokens": getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        "input_tokens": resp.usage.prompt_tokens,
+        "output_tokens": resp.usage.completion_tokens,
+        # OpenRouter doesn't surface Anthropic prompt-cache splits.
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
     }
     return parsed
 

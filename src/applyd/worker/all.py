@@ -27,6 +27,7 @@ from applyd.config import load_env
 
 load_env()
 
+from applyd.llm_errors import TransientInfraError  # noqa: E402
 from applyd.worker import matchmaker  # noqa: E402
 from applyd.worker import runner as apply_runner  # noqa: E402
 from applyd.worker import tailor_runner  # noqa: E402
@@ -41,19 +42,35 @@ def _on_signal(signum: int, _frame: Any) -> None:
     logger.info("[worker-all] caught signal %s, stopping after current job", signum)
 
 
+def _interruptible_sleep(seconds: float) -> None:
+    """Sleep up to `seconds`, waking early on SIGINT/SIGTERM."""
+    slept = 0.0
+    while slept < seconds and not _stop:
+        step = min(0.5, seconds - slept)
+        time.sleep(step)
+        slept += step
+
+
 def _run_batch(
     *,
     name: str,
     tick: Callable[[], dict | None],
     limit: int,
 ) -> int:
-    """Run one worker tick until there is no work or the batch limit is hit."""
+    """Run one worker tick until there is no work or the batch limit is hit.
+
+    Lets TransientInfraError propagate so the caller can circuit-break the whole
+    cycle — an account/provider-wide failure will hit every stage, so there's no
+    point grinding on.
+    """
     completed = 0
     for _ in range(limit):
         if _stop:
             break
         try:
             result = tick()
+        except TransientInfraError:
+            raise
         except Exception:
             logger.exception("[worker-all] %s tick crashed", name)
             break
@@ -75,8 +92,10 @@ def run_forever(
     apply_batch: int = 10,
     match_batch: int = 15,
     match_workers: int = 8,
+    match_target_backlog: int = 30,
     match_interval_seconds: float = 300.0,
     idle_sleep_seconds: float = 30.0,
+    infra_backoff_seconds: float = 120.0,
 ) -> None:
     """Alternate bounded match, tailor, and apply batches forever."""
     signal.signal(signal.SIGINT, _on_signal)
@@ -98,29 +117,43 @@ def run_forever(
     last_match_at: float | None = None
 
     while not _stop:
-        matched = 0
-        now = time.monotonic()
-        if last_match_at is None or (now - last_match_at) >= match_interval_seconds:
-            logger.info("[worker-all] match sweep starting (batch=%d workers=%d)", match_batch, match_workers)
-            try:
-                matched = matchmaker.tick_once(
-                    batch_limit=match_batch,
-                    workers=match_workers,
-                )
-            except Exception:
-                logger.exception("[worker-all] match tick crashed")
-            last_match_at = time.monotonic()
+        matched = tailored = applied = 0
+        try:
+            now = time.monotonic()
+            if last_match_at is None or (now - last_match_at) >= match_interval_seconds:
+                logger.info("[worker-all] match sweep starting (batch=%d workers=%d)", match_batch, match_workers)
+                try:
+                    matched = matchmaker.tick_once(
+                        batch_limit=match_batch,
+                        workers=match_workers,
+                        target_backlog=match_target_backlog,
+                    )
+                except TransientInfraError:
+                    raise
+                except Exception:
+                    logger.exception("[worker-all] match tick crashed")
+                last_match_at = time.monotonic()
 
-        tailored = _run_batch(
-            name="tailor",
-            tick=tailor_runner.tick_once,
-            limit=tailor_batch,
-        )
-        applied = _run_batch(
-            name="apply",
-            tick=apply_runner.tick_once,
-            limit=apply_batch,
-        )
+            tailored = _run_batch(
+                name="tailor",
+                tick=tailor_runner.tick_once,
+                limit=tailor_batch,
+            )
+            applied = _run_batch(
+                name="apply",
+                tick=apply_runner.tick_once,
+                limit=apply_batch,
+            )
+        except TransientInfraError as exc:
+            # Account/provider-wide failure (no credits, rate limit, outage).
+            # Rows touched this cycle were requeued, not failed. Back off the
+            # whole worker and retry when the condition clears.
+            logger.warning(
+                "[worker-all] infra backoff %.0fs after transient error: %s",
+                infra_backoff_seconds, exc,
+            )
+            _interruptible_sleep(infra_backoff_seconds)
+            continue
 
         logger.info(
             "[worker-all] cycle complete: matched=%d tailored=%d applied_or_terminal=%d",
@@ -130,11 +163,7 @@ def run_forever(
         )
 
         if matched == 0 and tailored == 0 and applied == 0 and not _stop:
-            slept = 0.0
-            while slept < idle_sleep_seconds and not _stop:
-                step = min(0.5, idle_sleep_seconds - slept)
-                time.sleep(step)
-                slept += step
+            _interruptible_sleep(idle_sleep_seconds)
 
     logger.info("[worker-all] exited cleanly")
 
@@ -166,6 +195,12 @@ def main() -> None:
         help="thread pool size for per-user Haiku match calls",
     )
     parser.add_argument(
+        "--match-target-backlog",
+        type=int,
+        default=int(os.environ.get("APPLYD_MATCH_TARGET_BACKLOG", "30")),
+        help="stop judging once a user has this many accepted-but-unapplied jobs queued",
+    )
+    parser.add_argument(
         "--match-interval-seconds",
         type=float,
         default=float(os.environ.get("APPLYD_MATCH_INTERVAL_SECONDS", "300")),
@@ -176,6 +211,12 @@ def main() -> None:
         type=float,
         default=float(os.environ.get("APPLYD_WORKER_IDLE_SLEEP_SECONDS", "30")),
         help="sleep duration when all queues are empty",
+    )
+    parser.add_argument(
+        "--infra-backoff-seconds",
+        type=float,
+        default=float(os.environ.get("APPLYD_WORKER_INFRA_BACKOFF_SECONDS", "120")),
+        help="back-off duration after a transient infra error (no credits, rate limit, outage)",
     )
     parser.add_argument(
         "--log-level",
@@ -193,8 +234,10 @@ def main() -> None:
         apply_batch=max(1, args.apply_batch),
         match_batch=max(1, args.match_batch),
         match_workers=max(1, args.match_workers),
+        match_target_backlog=max(1, args.match_target_backlog),
         match_interval_seconds=max(1.0, args.match_interval_seconds),
         idle_sleep_seconds=max(1.0, args.idle_sleep_seconds),
+        infra_backoff_seconds=max(1.0, args.infra_backoff_seconds),
     )
 
 

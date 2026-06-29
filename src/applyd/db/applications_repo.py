@@ -71,6 +71,34 @@ class ApplicationsRepo:
         )
         return res.data[0] if res.data else None
 
+    def requeue(
+        self,
+        application_id: str,
+        to_status: str,
+        reason: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Release a claimed row back to a *claimable* (non-terminal) status after
+        a transient infra failure, so it's retried once the condition clears.
+
+        Unlike `release`, this never lands on a terminal state — the job wasn't
+        at fault, the platform was. `to_status` is 'pending' (re-tailor) or
+        'tailored' (re-apply); `reason` is stashed in last_error for visibility.
+        """
+        if to_status not in {"pending", "tailored"}:
+            raise ValueError(f"requeue target must be claimable, got {to_status!r}")
+        now = datetime.now(timezone.utc).isoformat()
+        payload: dict = {"status": to_status, "last_attempt_at": now}
+        if reason is not None:
+            payload["last_error"] = reason[:300]
+        res = (
+            self.client.table("applications")
+            .update(payload)
+            .eq("id", application_id)
+            .eq("status", "in_progress")
+            .execute()
+        )
+        return res.data[0] if res.data else None
+
     def release(
         self,
         application_id: str,
@@ -117,3 +145,21 @@ class ApplicationsRepo:
             .execute()
         )
         return res.data[0] if res.data else None
+
+    def count_unapplied_backlog(self, user_id: str) -> int:
+        """Accepted-but-not-yet-applied rows for a user.
+
+        These are the matcher's accepts still waiting for tailor+apply
+        (status pending → tailored → in_progress). The matchmaker uses this to
+        stop spending Haiku once a user's apply queue is already primed —
+        rejects ('skipped') and terminal rows ('applied'/'failed') don't count.
+        """
+        res = (
+            self.client.table("applications")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .in_("status", ["pending", "tailored", "in_progress"])
+            .limit(0)
+            .execute()
+        )
+        return res.count or 0

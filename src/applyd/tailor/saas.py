@@ -28,6 +28,7 @@ from ..db import (
     cost_cents_for_tailor,
     get_client,
 )
+from ..llm_errors import TransientInfraError, is_transient_llm_error
 from .compile import compile_pdf, tectonic_available
 from .render import TailorClient
 from .validate import validate as validate_tailored
@@ -147,6 +148,16 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
                 role=job.title,
             )
         except Exception as exc:  # noqa: BLE001
+            if is_transient_llm_error(exc):
+                # Account/provider-wide (no credits, rate limit, outage): not this
+                # job's fault. Requeue to pending and signal the worker to back
+                # off rather than burn the row to terminal 'failed'.
+                apps.requeue(
+                    application_id, "pending",
+                    reason=f"infra: {type(exc).__name__}: {exc}",
+                )
+                logger.warning("tailor infra error on app %s, requeued: %s", application_id, exc)
+                raise TransientInfraError(f"tailor: {type(exc).__name__}: {exc}") from exc
             logger.exception("tailor call failed for app %s", application_id)
             return _fail(f"tailor_call_error: {type(exc).__name__}: {exc}")
 

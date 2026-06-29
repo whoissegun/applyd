@@ -6,7 +6,7 @@ from typing import Optional
 
 import httpx
 
-from ..classify import classify_job
+from ..classify import classify_job, embed_texts, job_embedding_text
 from ..config import load_env
 from ..db import JobsRepo, get_client
 from ..enrichment import MIN_USEFUL_CHARS, SpiderClient, fetch_text
@@ -64,7 +64,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         if spider is not None:
             spider._client = client
 
-        def work(job: Job) -> tuple[Job, str, str, Optional[str], Optional[dict], Optional[str]]:
+        def work(job: Job) -> tuple[Job, str, str, Optional[str], Optional[dict], Optional[list], Optional[str]]:
             try:
                 text, tier, err = fetch_text(
                     job.url, spider=spider, client=client, board_cache=board_cache,
@@ -73,6 +73,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                 text, tier, err = "", "failed", f"{type(e).__name__}: {e}"
 
             classification: Optional[dict] = None
+            embedding: Optional[list] = None
             classify_err: Optional[str] = None
             description = text or job.description
             if description and len(description) >= MIN_USEFUL_CHARS:
@@ -80,9 +81,12 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                     raw = classify_job(job.title or "", description)
                     raw.pop("_usage", None)
                     classification = raw
+                    embedding = embed_texts(
+                        [job_embedding_text(job.title or "", classification)]
+                    )[0]
                 except Exception as e:
                     classify_err = f"{type(e).__name__}: {e}"
-            return job, text, tier, err, classification, classify_err
+            return job, text, tier, err, classification, embedding, classify_err
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -91,7 +95,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             futures = [pool.submit(work, j) for j in candidates]
             try:
                 for fut in as_completed(futures):
-                    job, text, tier, err, classification, classify_err = fut.result()
+                    job, text, tier, err, classification, embedding, classify_err = fut.result()
                     description = text or job.description
                     repo.mark_enriched(
                         job.id,
@@ -99,6 +103,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                         tier=tier,
                         error=err,
                         classification=classification,
+                        embedding=embedding,
                     )
                     stats[tier] = stats.get(tier, 0) + 1
                     if classification is not None:

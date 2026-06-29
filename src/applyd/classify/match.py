@@ -18,13 +18,13 @@ pairs; the matchmaker worker handles batching and dedup.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
-from anthropic import Anthropic
+from ._openrouter import openrouter_client
 
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-4-5"          # pricing key (db.pricing.PRICING)
+OPENROUTER_MODEL = "anthropic/claude-haiku-4.5"  # OpenRouter API slug
 MAX_RESUME_CHARS = 8000  # ~2000 tokens of LaTeX — covers a full base resume
 
 SYSTEM = """You decide whether a candidate should apply to a job. We are aggressively volume-first: when in doubt, ACCEPT. The apply agent will do a second, deeper check at form-fill time and skip if the form reveals a hard mismatch. Your job is to filter out CLEAR mismatches only — do not gatekeep on stretches.
@@ -68,8 +68,6 @@ def match_user_to_job(
     classification: dict[str, Any],
 ) -> dict[str, Any]:
     """One match decision. Returns the parsed JSON dict with an extra `_usage` key."""
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=8)
-
     # Drop _usage from classification if present (we attach it on the classifier side).
     classification_for_prompt = {k: v for k, v in classification.items() if k != "_usage"}
 
@@ -82,14 +80,16 @@ def match_user_to_job(
         f"{json.dumps(classification_for_prompt, ensure_ascii=False, indent=2)}\n"
     )
 
-    resp = client.messages.create(
-        model=MODEL,
+    resp = openrouter_client().chat.completions.create(
+        model=OPENROUTER_MODEL,
         max_tokens=512,
-        system=SYSTEM,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
     )
 
-    text = _strip_fences("".join(b.text for b in resp.content if b.type == "text"))
+    text = _strip_fences(resp.choices[0].message.content or "")
     parsed = json.loads(text)
 
     decision = parsed.get("decision", "").lower()
@@ -101,9 +101,11 @@ def match_user_to_job(
         parsed["decision"] = decision
 
     parsed["_usage"] = {
-        "input_tokens": resp.usage.input_tokens,
-        "output_tokens": resp.usage.output_tokens,
-        "cache_read_input_tokens": getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
-        "cache_creation_input_tokens": getattr(resp.usage, "cache_creation_input_tokens", 0) or 0,
+        "input_tokens": resp.usage.prompt_tokens,
+        "output_tokens": resp.usage.completion_tokens,
+        # OpenRouter doesn't surface Anthropic prompt-cache splits; cost falls
+        # back to the uncached input rate, which is the safe over-estimate.
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
     }
     return parsed
