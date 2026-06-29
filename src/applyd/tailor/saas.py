@@ -184,9 +184,12 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
             try:
                 pdf_path = compile_pdf(tex_path, outdir=Path(tmp))
             except RuntimeError as exc:
-                # Trim the tectonic stderr blob to a short reason.
-                short = str(exc).splitlines()[0][:200]
-                return _fail(f"compile_error: {short}")
+                # Keep the tail of tectonic's stderr — the fatal error prints
+                # last, so the end of the blob is where the actual cause lives.
+                # (First line is just "compile failed (exit 1):", useless alone.)
+                detail = str(exc).strip()[-1500:]
+                logger.error("[tailor] compile failed for app %s:\n%s", application_id, detail)
+                return _fail(f"compile_error: {detail}")
             pdf_bytes = pdf_path.read_bytes()
 
         # 8. Upload to Storage.
