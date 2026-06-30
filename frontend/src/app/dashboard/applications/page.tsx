@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { isDevBypass, MOCK_APPLICATIONS } from "@/lib/devflags";
+import { LocalDateTime } from "@/components/LocalDateTime";
 import Link from "next/link";
 import {
   BACKEND_FOR_USER_STATUS,
@@ -153,7 +154,7 @@ export default async function ApplicationsPage({
                       )}
                     </td>
                     <td className="mono" style={{ color: "var(--color-cosmic)" }}>
-                      {r.last_attempt_at ? new Date(r.last_attempt_at).toLocaleString() : "—"}
+                      <LocalDateTime iso={r.last_attempt_at} />
                     </td>
                     <td className="mono" style={{ color: "var(--color-steel)" }}>{r.job_id}</td>
                   </tr>
