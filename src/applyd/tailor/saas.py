@@ -16,6 +16,7 @@ leaving it stuck in 'in_progress'.
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 from pathlib import Path
 
@@ -48,6 +49,20 @@ def _strip_fences(text: str) -> str:
     if text.endswith("```"):
         text = text[: text.rfind("```")].rstrip()
     return text.strip()
+
+
+# pdflatex-only primitives baked into the classic Jake's Resume preamble. The
+# model reproduces them from training, but tectonic's default engine doesn't
+# implement them and halts with "glyphtounicode: Undefined control sequence".
+# See CLAUDE.md gotchas. Strip them before compile, wherever they came from.
+_PDFLATEX_PRIMITIVE = re.compile(
+    r"^[ \t]*\\(?:input\s*\{?\s*glyphtounicode\s*\}?|pdfgentounicode\s*=.*)$",
+    re.MULTILINE,
+)
+
+
+def _strip_pdflatex_primitives(tex: str) -> str:
+    return _PDFLATEX_PRIMITIVE.sub("", tex)
 
 
 def _storage_path(user_id: str, job_id: str) -> str:
@@ -161,7 +176,7 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
             logger.exception("tailor call failed for app %s", application_id)
             return _fail(f"tailor_call_error: {type(exc).__name__}: {exc}")
 
-        tailored_tex = _strip_fences(tailored_tex)
+        tailored_tex = _strip_pdflatex_primitives(_strip_fences(tailored_tex))
 
         # 6. Token bookkeeping.
         model_used = client.model
