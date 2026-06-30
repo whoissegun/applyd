@@ -1,6 +1,8 @@
 # applyd
 
-Autonomous job-application engine for SWE/ML roles. Pipeline: **discover** jobs across aggregators + ATS APIs + search dorks → **enrich** with full descriptions via tiered cascade → **tailor** resume per job via Claude API → *(future)* apply via headless browser → *(future)* contact discovery → *(future)* cold outreach.
+Autonomous job-application engine for SWE/ML roles. Pipeline: **discover** jobs across aggregators + ATS APIs + search dorks → **enrich** with full descriptions via tiered cascade → **match** users to jobs (embeddings rank → LLM judges the top slice) → **tailor** resume per job → **apply** via headless browser → *(future)* contact discovery → *(future)* cold outreach.
+
+**All LLM calls go through OpenRouter** (one `OPENROUTER_API_KEY`): classify, match, tailor, apply. The Anthropic SDK is no longer used. See [Key design decisions → LLM provider](#data).
 
 Direction as of 2026-05-14: pivoting from personal-tool / single-tenant to **multi-tenant SaaS** on Supabase. Discovery/enrich/tailor pipelines are stateless and ready to thread `user_id` through; auth, per-user repos, apply layer, and frontend are the in-flight work.
 
@@ -11,7 +13,7 @@ Direction as of 2026-05-14: pivoting from personal-tool / single-tenant to **mul
 **Shipped:**
 - Discovery (`src/applyd/discovery/`) — aggregators, broad-search via Brave dorks, user targets, resolver + caches. Writer migrated to `JobsRepo`.
 - Enrichment (`src/applyd/enrichment/`) — 4-tier cascade, threaded (ThreadPoolExecutor). Writer migrated to `JobsRepo`.
-- Tailoring (`src/applyd/tailor/`) — Claude API with prompt caching, tectonic PDF compile, structural validator, structured JSON metadata output. Multi-tenant entry point: `tailor_for_user(user_id, job_id)` in `tailor/saas.py`. CLI routed through this path.
+- Tailoring (`src/applyd/tailor/`) — Sonnet via OpenRouter with prompt caching (cache_control passthrough), tectonic PDF compile, structural validator, structured JSON metadata output. Multi-tenant entry point: `tailor_for_user(user_id, job_id)` in `tailor/saas.py`. CLI routed through this path. pdflatex-only preamble primitives are stripped before compile (see gotchas).
 - Direct apply runner (`src/applyd/apply/`) — OpenRouter (OpenAI-compatible API) → tool-use loop → Playwright over Bright Data CDP. Multi-tenant entry: `apply_for_user(user_id, application_id)` in `apply/saas.py`; reads profile from `user_profiles.profile_answers`, pulls tailored PDF from Supabase Storage.
 - FastAPI surface (`src/applyd/api/`) — JWT-auth'd endpoints over the SaaS paths.
 - Apply worker (`src/applyd/worker/`) — `runner.py` polls `applications` for claimable rows and dispatches `apply_for_user`. `tailor_runner.py` and `matchmaker.py` cover the other two pools.
@@ -77,7 +79,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 
 **3. Tailor** (`tailor/`) — generates tailored resume.
 - `prompts.py` — system prompt (aggressive tailoring, strict no-invention, structured JSON+latex output)
-- `render.py` — Anthropic SDK call with prompt caching (system + base resume cached, JD fresh)
+- `render.py` — OpenRouter (OpenAI SDK) call with prompt caching via cache_control passthrough (system + base resume cached, JD fresh)
 - `validate.py` — structural diff: no invented companies, education preserved, brace balance, header intact
 - `compile.py` — tectonic wrapper → PDF
 
@@ -109,8 +111,14 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 - **Threaded, not async.** ThreadPoolExecutor at 8 workers. httpx.Client is thread-safe. async would be a bigger refactor for marginal gain.
 - **Session-scoped `board_cache`.** When many jobs share a board, fetch that board once per run.
 
+### LLM provider
+- **Everything runs through OpenRouter (OpenAI-compatible API), one `OPENROUTER_API_KEY`.** Tailor/apply use `anthropic/claude-sonnet-4-6`; classify/match use `anthropic/claude-haiku-4.5`; embeddings use `openai/text-embedding-3-small`. Per-call model swap is free (`--model deepseek/...` etc.). Prompt caching still works via `cache_control` passthrough. Pricing keys live in `db/pricing.py` (canonical Anthropic ids double as OpenRouter slugs). The Anthropic SDK was fully removed June 2026 — don't reintroduce direct `anthropic.Anthropic()` calls.
+
+### Matching (cost-critical)
+- **Two-stage funnel, not one-LLM-call-per-job.** pgvector embeddings on `jobs.embedding` (classification text) + `user_profiles.embedding` (resume + LLM-extracted *positive* targets — exclusions dropped so negation doesn't pull the vector wrong). `rank_jobs_for_user()` ranks unseen jobs by cosine; the Haiku judge runs only on the top slice. A backlog stop-rule (`target_backlog`, default 30) halts judging once a user's apply queue is primed — spend tracks applications, not catalog size. Resume is the only hard requirement; `profile_answers` is optional.
+
 ### Tailoring
-- **Claude Sonnet 4.6 default.** Prompt caching is mature; cached reads ~10× cheaper. Writing quality on constrained rewrites is strong. Model swappable via `TailorClient`.
+- **Sonnet 4.6 via OpenRouter default.** Prompt caching is mature; cached reads ~10× cheaper. Writing quality on constrained rewrites is strong. Model swappable via `TailorClient`.
 - **LaTeX over DOCX.** Text-native, diffable, one-binary compile (tectonic), no docxtpl fragility. ATS-parse risk mitigated by single-column Jake's Resume template.
 - **Dual output format: JSON metadata + ```latex fenced block.** Avoids JSON-escape hell for LaTeX's pervasive backslashes.
 - **Strict no-invention.** Reorder + rephrase + drop. Prompt explicitly forbids fabricating metrics, technologies, projects, scope.
@@ -135,7 +143,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 ## Gotchas — things that burned us and the fixes
 
 ### Jake's Resume LaTeX template
-- **`\input{glyphtounicode}` + `\pdfgentounicode=1` break tectonic.** pdflatex-specific primitives not in tectonic's default engine. Strip those two lines.
+- **`\input{glyphtounicode}` + `\pdfgentounicode=1` break tectonic.** pdflatex-specific primitives not in tectonic's default engine. The model reproduces them from the classic Jake's preamble, so `tailor/saas.py::_strip_pdflatex_primitives` strips them before every compile (don't remove this — it's what stops the `glyphtounicode: Undefined control sequence` compile burn).
 - **Original template often missing `\resumeSubHeadingListEnd` after Experience section.** LaTeX doesn't fail until end-of-document. Add one before `\section{Projects}`.
 
 ### ATS API quirks
@@ -180,7 +188,7 @@ python -m applyd.apply.runner <job_id> [--model <slug>] [--profile <path>] [--te
                    ApplicationsRepo / ApplyAttemptsRepo  [once auth lands]
 ```
 
-- **OpenRouter, not direct Anthropic SDK**, so the model is swappable per run (`--model deepseek/...`, `meta-llama/...`, etc.). Anthropic API key is for tailoring only.
+- **OpenRouter, not direct Anthropic SDK**, so the model is swappable per run (`--model deepseek/...`, `meta-llama/...`, etc.). Same `OPENROUTER_API_KEY` powers the whole pipeline.
 - **`APPLYD_TEST_MODE=true`** keeps the agent from clicking submit — fills the form, screenshots optional, returns "would have submitted." Flip to `false` only after you've eyeballed test-mode runs.
 - **Profile**: `--profile <path>`, defaults to `./profile.md`. SaaS migration moves this to a row in `user_profiles.profile_answers`.
 - **Failures/skips only**: no screenshots or transcripts on success. ATS confirmation emails are the receipt of record.
@@ -199,12 +207,12 @@ Multi-tenant work the runner needs:
 Required env vars (`.env` at repo root, auto-loaded by `applyd.config.load_env`):
 - `BRAVE_SEARCH_API_KEY` — primary search provider
 - `SPIDER_API_KEY` — tier 3 enrichment fetcher
-- `ANTHROPIC_API_KEY` — tailoring
+- `OPENROUTER_API_KEY` — **all** LLM calls: classify, match, tailor, apply (and embeddings). The single LLM gateway. (`ANTHROPIC_API_KEY` is no longer used.)
 - `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_ZONE`, `BRIGHTDATA_ZONE_PASSWORD`, `BRIGHTDATA_HOST`, `BRIGHTDATA_CDP_PORT` — Bright Data Scraping Browser; will be used by the rebuilt apply layer if we pick the self-hosted Playwright path
 - `SUPABASE_URL` — project HTTPS gateway (`https://<ref>.supabase.co`)
 - `SUPABASE_PUBLISHABLE_KEY` — replaces legacy `anon`; safe to expose in frontends
 - `SUPABASE_SECRET_KEY` — replaces legacy `service_role`; server/workers only, bypasses RLS
-- `OPENROUTER_API_KEY` — direct apply runner's LLM gateway (default model: `anthropic/claude-sonnet-4-6`)
+  - tailor/apply default `anthropic/claude-sonnet-4-6`; classify/match `anthropic/claude-haiku-4.5`; embeddings `openai/text-embedding-3-small`
 - `APPLYD_TEST_MODE=true|false` — when `true`, the apply runner stops short of submitting. Default to `true` during scale-up
 
 Optional:

@@ -27,7 +27,14 @@ from applyd.config import load_env
 
 load_env()
 
+from applyd.failures import (  # noqa: E402
+    SystemicFailureError,
+    SystemicFailureTracker,
+    categorize,
+    notify,
+)
 from applyd.llm_errors import TransientInfraError  # noqa: E402
+from applyd.tailor.saas import compile_self_check  # noqa: E402
 from applyd.worker import matchmaker  # noqa: E402
 from applyd.worker import runner as apply_runner  # noqa: E402
 from applyd.worker import tailor_runner  # noqa: E402
@@ -56,12 +63,13 @@ def _run_batch(
     name: str,
     tick: Callable[[], dict | None],
     limit: int,
+    tracker: SystemicFailureTracker,
 ) -> int:
     """Run one worker tick until there is no work or the batch limit is hit.
 
-    Lets TransientInfraError propagate so the caller can circuit-break the whole
-    cycle — an account/provider-wide failure will hit every stage, so there's no
-    point grinding on.
+    Feeds each result to the systemic-failure tracker. Lets TransientInfraError
+    and SystemicFailureError propagate so the caller can circuit-break the whole
+    cycle — both mean every job is affected, so there's no point grinding on.
     """
     completed = 0
     for _ in range(limit):
@@ -77,12 +85,16 @@ def _run_batch(
         if result is None:
             break
         completed += 1
+        status = result.get("status") or ""
+        reason = result.get("reason") or result.get("note") or result.get("last_error")
         logger.info(
             "[worker-all] %s result: status=%s application_id=%s",
             name,
-            result.get("status"),
+            status,
             result.get("application_id"),
         )
+        # Raises SystemicFailureError if N in a row share a systemic category.
+        tracker.record(status=status, category=categorize(reason))
     return completed
 
 
@@ -96,6 +108,7 @@ def run_forever(
     match_interval_seconds: float = 300.0,
     idle_sleep_seconds: float = 30.0,
     infra_backoff_seconds: float = 120.0,
+    systemic_threshold: int = 5,
 ) -> None:
     """Alternate bounded match, tailor, and apply batches forever."""
     signal.signal(signal.SIGINT, _on_signal)
@@ -110,6 +123,16 @@ def run_forever(
         match_interval_seconds,
         idle_sleep_seconds,
     )
+
+    # Startup self-check: if tectonic can't compile in this environment, every
+    # tailor will burn — surface it loudly now instead of one job at a time.
+    canary = compile_self_check()
+    if canary is not None:
+        notify("worker-all: compile self-check FAILED at startup", canary)
+    else:
+        logger.info("[worker-all] compile self-check passed")
+
+    tracker = SystemicFailureTracker(threshold=systemic_threshold)
 
     # `None` forces a match on the very first cycle. Don't use 0.0 here:
     # time.monotonic()'s reference point is platform-dependent, so the first
@@ -138,11 +161,13 @@ def run_forever(
                 name="tailor",
                 tick=tailor_runner.tick_once,
                 limit=tailor_batch,
+                tracker=tracker,
             )
             applied = _run_batch(
                 name="apply",
                 tick=apply_runner.tick_once,
                 limit=apply_batch,
+                tracker=tracker,
             )
         except TransientInfraError as exc:
             # Account/provider-wide failure (no credits, rate limit, outage).
@@ -153,6 +178,13 @@ def run_forever(
                 infra_backoff_seconds, exc,
             )
             _interruptible_sleep(infra_backoff_seconds)
+            continue
+        except SystemicFailureError as exc:
+            # Many jobs failing the same systemic way (broken compile/storage/
+            # validation env) — not per-job. Alert and back off hard rather than
+            # burning the whole queue, the way the May/June compile bug did.
+            notify("worker-all: systemic failure detected — pausing", str(exc))
+            _interruptible_sleep(max(infra_backoff_seconds, 300.0))
             continue
 
         logger.info(
@@ -219,6 +251,12 @@ def main() -> None:
         help="back-off duration after a transient infra error (no credits, rate limit, outage)",
     )
     parser.add_argument(
+        "--systemic-threshold",
+        type=int,
+        default=int(os.environ.get("APPLYD_SYSTEMIC_FAILURE_THRESHOLD", "5")),
+        help="pause + alert after this many consecutive systemic failures (compile/storage/validation)",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.environ.get("APPLYD_WORKER_LOG_LEVEL", "INFO"),
         help="python logging level (DEBUG/INFO/WARNING)",
@@ -238,6 +276,7 @@ def main() -> None:
         match_interval_seconds=max(1.0, args.match_interval_seconds),
         idle_sleep_seconds=max(1.0, args.idle_sleep_seconds),
         infra_backoff_seconds=max(1.0, args.infra_backoff_seconds),
+        systemic_threshold=max(2, args.systemic_threshold),
     )
 
 
