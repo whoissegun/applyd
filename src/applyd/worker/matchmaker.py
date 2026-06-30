@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from ..classify import ensure_user_embedding, match_user_to_job
+from ..failures import categorize
 from ..llm_errors import TransientInfraError, is_transient_llm_error
 from ..config import load_env
 from ..db import (
@@ -196,6 +197,7 @@ def match_for_user(
                             "job_id": job["id"],
                             "status": "skipped",
                             "reason": reason,
+                            "failure_category": categorize(reason),
                         },
                         on_conflict="user_id,job_id",
                     ).execute()

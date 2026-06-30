@@ -65,6 +65,34 @@ def _strip_pdflatex_primitives(tex: str) -> str:
     return _PDFLATEX_PRIMITIVE.sub("", tex)
 
 
+# Canary doc deliberately includes the pdflatex primitives, so the self-check
+# exercises BOTH the strip and a real tectonic compile in the live environment.
+_CANARY_TEX = r"""\documentclass[letterpaper,11pt]{article}
+\input{glyphtounicode}
+\pdfgentounicode=1
+\usepackage[empty]{fullpage}
+\begin{document}
+Compile canary --- tectonic + strip self-check.
+\end{document}"""
+
+
+def compile_self_check() -> str | None:
+    """Compile a canary resume in the current environment. Returns None on
+    success, or a short error string. Run at worker startup so a broken tectonic
+    (wrong binary, missing fonts, undownloadable bundle) surfaces immediately
+    instead of being discovered one burned job at a time."""
+    if not tectonic_available():
+        return "tectonic_not_installed"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "canary.tex"
+            p.write_text(_strip_pdflatex_primitives(_CANARY_TEX), encoding="utf-8")
+            compile_pdf(p, outdir=Path(tmp))
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {str(exc)[-300:]}"
+
+
 def _storage_path(user_id: str, job_id: str) -> str:
     return f"{user_id}/tailored/{job_id}.pdf"
 

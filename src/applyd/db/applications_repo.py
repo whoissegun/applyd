@@ -5,6 +5,8 @@ from typing import Iterable, Optional
 
 from supabase import Client
 
+from ..failures import categorize
+
 
 CLAIMABLE_DEFAULT: tuple[str, ...] = ("tailored", "failed")
 
@@ -90,6 +92,7 @@ class ApplicationsRepo:
         payload: dict = {"status": to_status, "last_attempt_at": now}
         if reason is not None:
             payload["last_error"] = reason[:300]
+            payload["failure_category"] = categorize(reason)
         res = (
             self.client.table("applications")
             .update(payload)
@@ -112,8 +115,10 @@ class ApplicationsRepo:
         payload: dict = {"status": status, "last_attempt_at": now}
         if status == "applied":
             payload["applied_at"] = now
+            payload["failure_category"] = None
         if reason is not None:
             payload["last_error"] = reason
+            payload["failure_category"] = categorize(reason)
         res = (
             self.client.table("applications")
             .update(payload)
