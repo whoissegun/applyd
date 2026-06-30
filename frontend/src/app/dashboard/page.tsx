@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { isDevBypass, MOCK_USER, MOCK_APPLICATIONS } from "@/lib/devflags";
+import { LocalDateTime } from "@/components/LocalDateTime";
 import {
   USER_STATUSES,
   USER_STATUS_LABEL,
@@ -108,9 +109,7 @@ export default async function DashboardOverview() {
                       </td>
                       <td className="mono" style={{ color: "var(--color-cosmic)" }}>{r.job_id}</td>
                       <td className="mono" style={{ color: "var(--color-cosmic)" }}>
-                        {r.last_attempt_at
-                          ? new Date(r.last_attempt_at).toLocaleString()
-                          : "—"}
+                        <LocalDateTime iso={r.last_attempt_at} />
                       </td>
                     </tr>
                   );
