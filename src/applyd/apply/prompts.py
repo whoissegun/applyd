@@ -102,7 +102,7 @@ environments", or anything that could appear verbatim on another application.
 |---|---|
 | Page is /login, /signin, "sign in to apply" wall | gated:login_required |
 | Page asks to create an account before form is visible | gated:signup_required |
-| reCAPTCHA / hCaptcha / Turnstile / Cloudflare challenge in DOM | gated:captcha |
+| Captcha challenge VISIBLY BLOCKING interaction (checkbox / image puzzle you must solve). A dormant/invisible captcha widget in the DOM is NOT a skip — every Lever form embeds one; proceed and submit, the browser solves it. Only report gated:captcha if a challenge actually interposes and submit fails. | gated:captcha |
 | 404 / empty / redirect to homepage (no job id in url) | gated:dead_link |
 | Mandatory cover letter | gated:cover_letter_required |
 | JD has hard requirements the candidate clearly can't meet (years of XP, citizenship, PhD, etc.) | skipped:jd_mismatch \| reason='<short>' |
