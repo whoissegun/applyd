@@ -6,9 +6,14 @@ applications rows:
   - decision='accept' or 'borderline' → applications.status='pending'
   - decision='reject'                  → applications.status='skipped'
                                           (reason prefixed 'matcher:')
+  - clearly-above-entry seniority      → applications.status='skipped'
+                                          (reason prefixed 'prefilter:', no LLM call)
 
-This is the cost-saving stage. It runs the cheap Haiku matcher (~$0.001/job)
-once per (user, job) instead of letting tailor + apply burn $0.27 per dud.
+This is the cost-saving stage, three layers deep:
+  1. free seniority prefilter on the already-paid-for classification
+  2. batched Haiku judge (BATCH_SIZE jobs per call — resume amortized)
+  3. barren-sweep cooldown (a sweep with zero accepts stops judging that
+     user until new discovery has a chance to land)
 
 Entry: `python -m applyd.worker.matchmaker`
 """
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -23,7 +29,8 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from ..classify import ensure_user_embedding, match_user_to_job
+from ..classify import ensure_user_embedding, match_user_to_jobs
+from ..classify.match import BATCH_SIZE
 from ..failures import categorize
 from ..llm_errors import TransientInfraError, is_transient_llm_error
 from ..config import load_env
@@ -39,6 +46,34 @@ from ..db import (
 
 logger = logging.getLogger("applyd.matchmaker")
 _stop = False
+
+# Barren-sweep cooldown: once a user's sweep judges jobs and accepts NOTHING,
+# the ranking tail is junk — stop paying to reject paralegal roles and wait
+# for new discovery. In-memory is fine: a worker restart costs one extra
+# barren sweep (~1-2 batched calls), not a loop.
+_barren_until: dict[str, float] = {}
+BARREN_COOLDOWN_SECONDS = float(
+    os.environ.get("APPLYD_MATCHMAKER_BARREN_COOLDOWN", str(6 * 3600))
+)
+
+# Seniority levels no applyd user (early-career SWE/ML) can clear, per the
+# classifier's own seniority_signal. Free rejects — the classification was
+# already paid for. Deliberately conservative: plain "senior / 5-8" stays
+# with the judge, which sees deal_breakers and the full profile.
+_SENIOR_SIGNAL = re.compile(
+    r"\b(staff|principal|director|manager|head of|vp|vice president|chief)\b"
+    r"|\b(?:[89]|1[0-9])\+",  # "8+", "10+ years", ... (no trailing \b — '+' ends the token)
+    re.IGNORECASE,
+)
+
+
+def _prefilter_seniority(job: dict) -> str | None:
+    """Return the offending seniority_signal if the job is clearly above
+    entry-level, else None (→ send to the judge)."""
+    signal_text = str((job.get("classification") or {}).get("seniority_signal") or "")
+    if signal_text and _SENIOR_SIGNAL.search(signal_text):
+        return signal_text
+    return None
 
 
 def _on_signal(signum: int, _frame: Any) -> None:
@@ -62,9 +97,13 @@ def _candidate_jobs_for_user(sb, user_id: str, batch: int = 50) -> list[dict]:
     return res.data or []
 
 
-def _record_usage(usage: UsageEventsRepo, user_id: str, match: dict[str, Any], job_id: str) -> int:
-    """Cost the match call against the user. Returns cents."""
-    u = match.get("_usage", {})
+def _record_batch_usage(
+    usage: UsageEventsRepo,
+    user_id: str,
+    u: dict[str, int],
+    verdicts: list[dict[str, Any]],
+) -> int:
+    """Cost one batched match call against the user. Returns cents."""
     cost = cost_cents_for_tailor(
         model="claude-haiku-4-5",
         prompt_tokens=u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0),
@@ -77,9 +116,8 @@ def _record_usage(usage: UsageEventsRepo, user_id: str, match: dict[str, Any], j
         cost_cents=cost,
         metadata={
             "subtype": "match",
-            "job_id": job_id,
-            "decision": match.get("decision"),
-            "confidence": match.get("confidence"),
+            "batch": True,
+            "decisions": {v["job_id"]: v["decision"] for v in verdicts},
             "input_tokens": u.get("input_tokens", 0),
             "output_tokens": u.get("output_tokens", 0),
             "cached_tokens": u.get("cache_read_input_tokens", 0),
@@ -118,7 +156,7 @@ def match_for_user(
     resume = resumes.get(user_id)
     if not resume or not (resume.get("resume_text") or "").strip():
         logger.info("matchmaker: user %s has no master resume, skipping", user_id)
-        return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
+        return {"accepted": 0, "rejected": 0, "borderline": 0, "prefiltered": 0, "matcher_cost_cents": 0}
 
     profile = profiles.get(user_id)
     profile_answers = (profile.get("profile_answers") or "").strip() if profile else ""
@@ -138,29 +176,73 @@ def match_for_user(
             "matchmaker: user %s queue full (%d/%d), skipping",
             user_id, backlog, target_backlog,
         )
-        return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
+        return {"accepted": 0, "rejected": 0, "borderline": 0, "prefiltered": 0, "matcher_cost_cents": 0}
 
     judge_n = min(need, batch_limit)
     candidates = _candidate_jobs_for_user(sb, user_id, batch=judge_n)
+    counts = {
+        "accepted": 0, "rejected": 0, "borderline": 0,
+        "prefiltered": 0, "matcher_cost_cents": 0,
+    }
     if not candidates:
-        return {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
+        return counts
 
-    counts = {"accepted": 0, "rejected": 0, "borderline": 0, "matcher_cost_cents": 0}
     resume_text = resume["resume_text"]
 
-    def score(job: dict) -> tuple[dict, dict[str, Any] | None, Exception | None]:
+    def persist(job_id: str, decision: str, reason: str) -> bool:
+        """Write the verdict row. Never let one row's DB error kill the sweep:
+        the applications row is the only dedup marker, so a crashed sweep
+        re-judges the same top-ranked jobs every tick (the 2026-06
+        failure_category incident burned ~4.9k Haiku calls this way).
+        """
         try:
-            decision_obj = match_user_to_job(
-                profile_answers=profile_answers,
-                resume_text=resume_text,
-                classification=job["classification"],
+            if decision == "reject":
+                sb.table("applications").upsert(
+                    {
+                        "user_id": user_id,
+                        "job_id": job_id,
+                        "status": "skipped",
+                        "reason": reason,
+                        "failure_category": categorize(reason),
+                    },
+                    on_conflict="user_id,job_id",
+                ).execute()
+            else:
+                apps.upsert_pending(user_id, job_id)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "matchmaker: failed to persist decision=%s for job %s "
+                "(will be re-judged next tick)",
+                decision, job_id,
             )
-            return job, decision_obj, None
-        except Exception as exc:
-            return job, None, exc
+            return False
+
+    # Layer 1: free seniority prefilter. The classifier already told us the
+    # role's experience expectation — a staff+/director/manager role is a
+    # reject for every applyd user without spending a judge token.
+    to_judge: list[dict] = []
+    for job in candidates:
+        signal_text = _prefilter_seniority(job)
+        if signal_text is None:
+            to_judge.append(job)
+            continue
+        reason = f"prefilter:seniority | signal={signal_text[:120]!r}"
+        if persist(job["id"], "reject", reason):
+            counts["prefiltered"] += 1
+
+    # Layer 2: batched judge. One call per chunk; chunks fan out across
+    # threads only when a big drain queues several of them.
+    chunks = [to_judge[i : i + BATCH_SIZE] for i in range(0, len(to_judge), BATCH_SIZE)]
+
+    def score(chunk: list[dict]) -> tuple[list[dict[str, Any]] | None, Exception | None]:
+        try:
+            return match_user_to_jobs(profile_answers, resume_text, chunk), None
+        except Exception as exc:  # noqa: BLE001
+            return None, exc
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = [pool.submit(score, j) for j in candidates]
+        futures = [pool.submit(score, c) for c in chunks]
         try:
             for fut in as_completed(futures):
                 if _stop:
@@ -168,8 +250,8 @@ def match_for_user(
                         f.cancel()
                     break
 
-                job, decision_obj, err = fut.result()
-                if err is not None or decision_obj is None:
+                verdicts, err = fut.result()
+                if err is not None or verdicts is None:
                     if err is not None and is_transient_llm_error(err):
                         # Account/provider-wide failure: every remaining match
                         # will fail too. Abort the sweep and back off rather than
@@ -177,34 +259,28 @@ def match_for_user(
                         for f in futures:
                             f.cancel()
                         raise TransientInfraError(f"match: {type(err).__name__}: {err}")
-                    logger.exception(
-                        "matchmaker: match call failed for job %s: %r",
-                        job["id"],
-                        err,
-                    )
+                    logger.exception("matchmaker: batch match call failed: %r", err)
                     continue
 
-                cost = _record_usage(usage, user_id, decision_obj, job["id"])
-                counts["matcher_cost_cents"] += cost
+                # Bill the chunk once (the spend is real regardless of what
+                # persists), then write each verdict independently.
+                batch_usage = verdicts[0].pop("_usage", None) if verdicts else None
+                if batch_usage:
+                    try:
+                        counts["matcher_cost_cents"] += _record_batch_usage(
+                            usage, user_id, batch_usage, verdicts
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("matchmaker: usage record failed")
 
-                decision = decision_obj["decision"]
-                reason = "matcher:" + (decision_obj.get("reason") or "")[:300]
-
-                if decision == "reject":
-                    sb.table("applications").upsert(
-                        {
-                            "user_id": user_id,
-                            "job_id": job["id"],
-                            "status": "skipped",
-                            "reason": reason,
-                            "failure_category": categorize(reason),
-                        },
-                        on_conflict="user_id,job_id",
-                    ).execute()
-                    counts["rejected"] += 1
-                else:
-                    apps.upsert_pending(user_id, job["id"])
-                    if decision == "borderline":
+                for v in verdicts:
+                    decision = v["decision"]
+                    reason = "matcher:" + (v.get("reason") or "")[:300]
+                    if not persist(v["job_id"], decision, reason):
+                        continue
+                    if decision == "reject":
+                        counts["rejected"] += 1
+                    elif decision == "borderline":
                         counts["borderline"] += 1
                     else:
                         counts["accepted"] += 1
@@ -214,8 +290,9 @@ def match_for_user(
             raise
 
     logger.info(
-        "matchmaker: user=%s accepted=%d rejected=%d borderline=%d cost=%d¢",
-        user_id, counts["accepted"], counts["rejected"], counts["borderline"], counts["matcher_cost_cents"],
+        "matchmaker: user=%s accepted=%d rejected=%d borderline=%d prefiltered=%d cost=%d¢",
+        user_id, counts["accepted"], counts["rejected"], counts["borderline"],
+        counts["prefiltered"], counts["matcher_cost_cents"],
     )
     return counts
 
@@ -233,11 +310,24 @@ def tick_once(batch_limit: int = 15, workers: int = 8, target_backlog: int = 30)
     for u in users:
         if _stop:
             break
+        if time.time() < _barren_until.get(u["id"], 0.0):
+            continue
         counts = match_for_user(
             u["id"], batch_limit=batch_limit, workers=workers,
             target_backlog=target_backlog,
         )
-        total += counts["accepted"] + counts["rejected"] + counts["borderline"]
+        judged = (
+            counts["accepted"] + counts["rejected"]
+            + counts["borderline"] + counts["prefiltered"]
+        )
+        if judged > 0 and counts["accepted"] + counts["borderline"] == 0:
+            _barren_until[u["id"]] = time.time() + BARREN_COOLDOWN_SECONDS
+            logger.info(
+                "matchmaker: user %s barren sweep (judged=%d, 0 accepts) — "
+                "cooling down %.1fh",
+                u["id"], judged, BARREN_COOLDOWN_SECONDS / 3600,
+            )
+        total += judged
     return total
 
 

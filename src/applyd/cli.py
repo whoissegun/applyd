@@ -68,6 +68,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="progress-print cadence (default 25)")
     p_enr.add_argument("--workers", type=int, default=8,
                        help="parallel fetch workers (default 8)")
+    p_enr.add_argument("--classify-backfill", action="store_true",
+                       help="classify+embed jobs that already have descriptions "
+                            "but no classification (no fetching)")
     p_enr.set_defaults(func=cmd_enrich)
 
     p_tail = sub.add_parser(

@@ -15,7 +15,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
+import threading
+from contextlib import contextmanager
 from typing import Any
 
 from openai import OpenAI
@@ -30,6 +33,41 @@ from .tools import TOOL_DEFS, dispatch
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
 MAX_TURNS = 40  # safety net; a normal apply is 12-20 tool calls
+# Hard wall-clock ceiling per apply. MAX_TURNS bounds LLM round-trips but not
+# a single blocking browser call: sync-Playwright `evaluate` has no timeout,
+# so a silently-dead Bright Data CDP socket hangs the call — and the whole
+# single-process worker — forever (froze prod for 40+ min on 2026-07-04).
+MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "900"))
+
+
+class ApplyTimeoutError(Exception):
+    """The apply exceeded its wall-clock budget (hung browser call, most likely)."""
+
+
+@contextmanager
+def _wall_clock_deadline(seconds: int):
+    """SIGALRM-based hard deadline. Interrupts blocking C calls (unlike any
+    cooperative check). No-ops off the main thread (e.g. FastAPI handlers) and
+    on platforms without SIGALRM — there it falls back to MAX_TURNS only.
+    """
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _raise(_signum, _frame):
+        raise ApplyTimeoutError(f"apply exceeded {seconds}s wall clock")
+
+    old_handler = signal.signal(signal.SIGALRM, _raise)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _make_client() -> OpenAI:
@@ -105,7 +143,7 @@ def run_apply(
     )
 
     try:
-        with brightdata_page(block_heavy=True) as page:
+        with _wall_clock_deadline(MAX_WALL_SECONDS), brightdata_page(block_heavy=True) as page:
             for turn in range(MAX_TURNS):
                 # Force a deterministic opener:
                 #   turn 0 = navigate (must hit the URL first)

@@ -11,13 +11,19 @@ import {
 
 export default async function DashboardOverview() {
   let user: { email: string } | null;
-  let rows: { status: string; job_id: string; last_attempt_at: string | null }[];
+  let rows: {
+    status: string;
+    job_id: string;
+    reason: string | null;
+    last_attempt_at: string | null;
+  }[];
 
   if (isDevBypass()) {
     user = { email: MOCK_USER.email };
     rows = MOCK_APPLICATIONS.map((a) => ({
       status: a.status,
       job_id: a.job_id,
+      reason: a.reason,
       last_attempt_at: a.last_attempt_at,
     }));
   } else {
@@ -29,7 +35,7 @@ export default async function DashboardOverview() {
 
     const { data: apps } = await supabase
       .from("applications")
-      .select("status, applied_at, last_attempt_at, job_id")
+      .select("status, reason, applied_at, last_attempt_at, job_id")
       .order("last_attempt_at", { ascending: false, nullsFirst: false })
       .limit(500);
     rows = apps ?? [];
@@ -40,13 +46,14 @@ export default async function DashboardOverview() {
     applied: 0,
     pending: 0,
     skipped: 0,
+    not_a_fit: 0,
   };
   for (const r of rows) {
-    const us = toUserStatus(r.status);
+    const us = toUserStatus(r.status, r.reason);
     if (us) tallies[us] += 1;
   }
 
-  const visibleRows = rows.filter((r) => toUserStatus(r.status) !== null);
+  const visibleRows = rows.filter((r) => toUserStatus(r.status, r.reason) !== null);
 
   return (
     <div className="px-8 py-8 max-w-[1100px] mx-auto flex flex-col gap-10">
@@ -57,7 +64,7 @@ export default async function DashboardOverview() {
         </div>
       </header>
 
-      <section className="grid grid-cols-3 gap-3">
+      <section className="grid grid-cols-4 gap-3">
         {USER_STATUSES.map((s) => (
           <div key={s} className="card p-5 flex flex-col gap-2">
             <span className="mono" style={{ fontSize: 11, color: "var(--color-pebble)" }}>
@@ -101,7 +108,7 @@ export default async function DashboardOverview() {
               </thead>
               <tbody>
                 {visibleRows.slice(0, 8).map((r, i) => {
-                  const us = toUserStatus(r.status)!;
+                  const us = toUserStatus(r.status, r.reason)!;
                   return (
                     <tr key={r.job_id + "-" + i}>
                       <td>

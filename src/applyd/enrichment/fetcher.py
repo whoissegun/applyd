@@ -127,6 +127,45 @@ def _tier1_ats_api(
     return None
 
 
+def job_is_live(
+    url: str,
+    client: Optional[httpx.Client] = None,
+    board_cache: Optional[AtsBoardCache] = None,
+) -> Optional[bool]:
+    """Free liveness check via the ATS bulk API — one board fetch answers
+    "is this posting still listed?" without a paid scrape or LLM call.
+
+    Returns:
+      True  — posting present in the company's board list
+      False — board fetched successfully and the posting is NOT in it
+      None  — can't tell (unknown ATS, board fetch failed, or empty board —
+              an empty list is more likely a fetch quirk than a company with
+              zero openings). Callers MUST treat None as live.
+    """
+    parsed = parse_ats_url(url)
+    if not parsed:
+        return None
+    ats, company, job_id = parsed
+    if not job_id:
+        return None
+    module = ATS_MODULES.get(ats)
+    if module is None:
+        return None
+
+    if board_cache is None:
+        board_cache = {}
+    key = (ats, company)
+    if key not in board_cache:
+        try:
+            board_cache[key] = module.fetch(company, client=client)
+        except Exception:
+            return None  # don't cache the failure — a later retry may succeed
+    board = board_cache[key]
+    if not board:
+        return None
+    return any(_job_id_matches(job, job_id) for job in board)
+
+
 def _tier3_spider(url: str, spider: SpiderClient, chrome: bool) -> Optional[str]:
     try:
         content = spider.scrape(url, chrome=chrome)

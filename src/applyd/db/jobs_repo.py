@@ -101,6 +101,13 @@ class JobsRepo:
 
     # ---------- writes ----------
 
+    # Both chunk sizes exist because big boards break bulk writes two ways:
+    # the existing-ids check is a GET whose querystring grows with every id
+    # (SimplifyJobs' ~2.5k batch exceeded the URL limit), and a single huge
+    # upsert can trip the Postgres statement timeout (Anthropic's board did).
+    _SELECT_CHUNK = 100
+    _UPSERT_CHUNK = 200
+
     def upsert(self, incoming: Iterable[Job]) -> tuple[int, int]:
         """Upsert a batch of jobs. Returns (new, updated)."""
         now = datetime.now(timezone.utc)
@@ -114,18 +121,24 @@ class JobsRepo:
         if not rows:
             return (0, 0)
 
-        existing_ids = {
-            r["id"]
-            for r in self.client.table("jobs")
-            .select("id")
-            .in_("id", [r["id"] for r in rows])
-            .execute()
-            .data
-        }
+        ids = [r["id"] for r in rows]
+        existing_ids: set[str] = set()
+        for i in range(0, len(ids), self._SELECT_CHUNK):
+            existing_ids.update(
+                r["id"]
+                for r in self.client.table("jobs")
+                .select("id")
+                .in_("id", ids[i : i + self._SELECT_CHUNK])
+                .execute()
+                .data
+            )
         new = sum(1 for r in rows if r["id"] not in existing_ids)
         updated = len(rows) - new
 
-        self.client.table("jobs").upsert(rows, on_conflict="id").execute()
+        for i in range(0, len(rows), self._UPSERT_CHUNK):
+            self.client.table("jobs").upsert(
+                rows[i : i + self._UPSERT_CHUNK], on_conflict="id"
+            ).execute()
         return new, updated
 
     def mark_enriched(
@@ -164,6 +177,27 @@ class JobsRepo:
                 "marked_inactive_at": now,
             }
         ).eq("id", job_id).eq("active", True).execute()
+
+    def set_classification(
+        self, job_id: str, classification: dict, embedding: Optional[list[float]]
+    ) -> None:
+        """Classification-only write for the backfill path — leaves the
+        description/tier/enriched_at fields alone (they're already correct
+        for jobs whose description arrived via the ATS bulk list)."""
+        payload: dict = {"classification": classification}
+        if embedding is not None:
+            payload["embedding"] = json.dumps(embedding)
+        self.client.table("jobs").update(payload).eq("id", job_id).execute()
+
+    def set_apply_gate(self, job_id: str, gate: str) -> None:
+        """Record a form-level gate discovered at apply time (login wall,
+        mandatory cover letter, ...). `rank_jobs_for_user` filters
+        `apply_gate is null`, so one discovery spares every tenant the
+        tailor+apply cost on the same wall.
+        """
+        self.client.table("jobs").update({"apply_gate": gate}).eq(
+            "id", job_id
+        ).execute()
 
     def sweep_stale(self, stale_after_days: int = 30) -> int:
         """Nightly safety net: mark active jobs we haven't seen in N days inactive.
@@ -222,6 +256,7 @@ class JobsRepo:
                 self.client.table("jobs")
                 .select(cols)
                 .order("discovered_at", desc=True)
+                .order("id")
                 .range(offset, offset + batch - 1)
             )
             if active_only:
@@ -235,6 +270,37 @@ class JobsRepo:
                 yielded += 1
                 if max_rows is not None and yielded >= max_rows:
                     return
+            if len(res.data) < batch:
+                return
+            offset += batch
+
+    def iter_unclassified(self, batch: int = 500) -> Iterator[Job]:
+        """Active jobs that HAVE a description but no classification yet.
+
+        These are invisible to the matchmaker (`rank_jobs_for_user` requires
+        classification + embedding). Jobs whose description arrived free via
+        the ATS bulk list at discover time land here — `iter_pending_enrichment`
+        never yields them because enriched_at is already set.
+        """
+        offset = 0
+        cols = ", ".join(_COLUMNS) + ", companies(canonical_name)"
+        while True:
+            res = (
+                self.client.table("jobs")
+                .select(cols)
+                .eq("active", True)
+                .not_.is_("description", "null")
+                .is_("classification", "null")
+                .order("discovered_at", desc=True)
+                .order("id")
+                .range(offset, offset + batch - 1)
+                .execute()
+            )
+            if not res.data:
+                return
+            for row in res.data:
+                company_name = (row.get("companies") or {}).get("canonical_name", "")
+                yield _row_to_job(row, company_name)
             if len(res.data) < batch:
                 return
             offset += batch
@@ -259,6 +325,7 @@ class JobsRepo:
                 .select(cols)
                 .eq("active", True)
                 .order("discovered_at", desc=False)
+                .order("id")
                 .range(offset, offset + batch - 1)
             )
             if include_failed:

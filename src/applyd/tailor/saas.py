@@ -29,6 +29,7 @@ from ..db import (
     cost_cents_for_tailor,
     get_client,
 )
+from ..enrichment.fetcher import job_is_live
 from ..llm_errors import TransientInfraError, is_transient_llm_error
 from .compile import compile_pdf, tectonic_available
 from .render import TailorClient
@@ -176,6 +177,27 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
         job = jobs.get(job_id)
         if job is None or not job.description:
             return _fail("job_missing_or_no_description")
+
+        # 4b. Free liveness check before spending on the LLM. Stale postings
+        # (SimplifyJobs lag, closed intern cycles) otherwise burn a full
+        # tailor AND a browser+Sonnet apply before anyone notices. A False
+        # here is definitive — the ATS board no longer lists the posting —
+        # so mark the job inactive for every tenant, not just this row.
+        try:
+            live = job_is_live(job.url)
+        except Exception:  # noqa: BLE001 — liveness is an optimization, never a blocker
+            logger.exception("liveness check crashed for job %s", job_id)
+            live = None
+        if live is False:
+            jobs.mark_inactive(job_id, "not_in_ats_list")
+            reason = "dead_link_pre_tailor: posting no longer on ATS board"
+            apps.release(application_id, status="skipped", reason=reason)
+            logger.info("job %s gone from ATS board — skipped app %s", job_id, application_id)
+            return {
+                "status": "skipped",
+                "application_id": application_id,
+                "reason": reason,
+            }
 
         # 5. LLM tailoring.
         try:
