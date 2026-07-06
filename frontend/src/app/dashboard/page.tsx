@@ -13,18 +13,18 @@ export default async function DashboardOverview() {
   let user: { email: string } | null;
   let rows: {
     status: string;
-    job_id: string;
     reason: string | null;
     last_attempt_at: string | null;
+    jobs: { title: string | null; companies: { canonical_name: string | null } | null } | null;
   }[];
 
   if (isDevBypass()) {
     user = { email: MOCK_USER.email };
     rows = MOCK_APPLICATIONS.map((a) => ({
       status: a.status,
-      job_id: a.job_id,
       reason: a.reason,
       last_attempt_at: a.last_attempt_at,
+      jobs: a.jobs,
     }));
   } else {
     const supabase = await createClient();
@@ -35,10 +35,10 @@ export default async function DashboardOverview() {
 
     const { data: apps } = await supabase
       .from("applications")
-      .select("status, reason, applied_at, last_attempt_at, job_id")
+      .select("status, reason, applied_at, last_attempt_at, jobs(title, companies(canonical_name))")
       .order("last_attempt_at", { ascending: false, nullsFirst: false })
       .limit(500);
-    rows = apps ?? [];
+    rows = (apps ?? []) as unknown as typeof rows;
   }
 
   // Tally only user-visible statuses; failed rows are dropped here.
@@ -102,7 +102,8 @@ export default async function DashboardOverview() {
               <thead>
                 <tr>
                   <th>Status</th>
-                  <th>Job</th>
+                  <th>Company</th>
+                  <th>Role</th>
                   <th>Last attempt</th>
                 </tr>
               </thead>
@@ -110,11 +111,12 @@ export default async function DashboardOverview() {
                 {visibleRows.slice(0, 8).map((r, i) => {
                   const us = toUserStatus(r.status, r.reason)!;
                   return (
-                    <tr key={r.job_id + "-" + i}>
+                    <tr key={i}>
                       <td>
                         <span className={`status status-${us}`}>{USER_STATUS_LABEL[us]}</span>
                       </td>
-                      <td className="mono" style={{ color: "var(--color-cosmic)" }}>{r.job_id}</td>
+                      <td>{r.jobs?.companies?.canonical_name ?? "—"}</td>
+                      <td>{r.jobs?.title ?? "—"}</td>
                       <td className="mono" style={{ color: "var(--color-cosmic)" }}>
                         <LocalDateTime iso={r.last_attempt_at} />
                       </td>
