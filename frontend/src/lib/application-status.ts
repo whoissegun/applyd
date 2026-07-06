@@ -61,3 +61,41 @@ export const BACKEND_FOR_USER_STATUS: Record<UserStatus, BackendStatus[]> = {
   skipped: ["skipped"],
   not_a_fit: ["skipped"],
 };
+
+/** Fixed skip verdicts written by the pipeline (tailor liveness check, apply
+ *  agent, gate propagation). Matched by prefix — several carry a ` | detail`
+ *  suffix meant for debugging, not the user. */
+const SKIP_REASON_LABELS: [prefix: string, label: string][] = [
+  ["prefilter:seniority", "Role is too senior for your profile"],
+  ["gated:dead_link", "Job posting is no longer live"],
+  ["dead_link_pre_tailor", "Job posting is no longer live"],
+  ["gated:login_required", "Application requires logging into an account"],
+  ["gated:signup_required", "Application requires creating an account"],
+  ["gated:cover_letter_required", "Application requires a cover letter"],
+  ["skipped:coding_challenge", "Application requires a coding challenge"],
+  ["gated:captcha", "Application is blocked by a captcha"],
+  ["gated:missing_info", "Application asks for info missing from your profile"],
+  ["skipped:jd_mismatch", "Role requirements don't match your profile"],
+];
+
+/** Human-readable reason for a skipped / not-a-fit row, or null when there's
+ *  nothing worth showing (non-skip statuses, empty reason). */
+export function humanizeSkipReason(reason?: string | null): string | null {
+  const r = (reason ?? "").trim();
+  if (!r) return null;
+  // Matcher judge rejects carry free text after the prefix — show it as-is.
+  if (r.startsWith("matcher:")) {
+    const text = r.slice("matcher:".length).trim();
+    return text || "Matcher judged this role a poor fit";
+  }
+  for (const [prefix, label] of SKIP_REASON_LABELS) {
+    if (r.startsWith(prefix)) {
+      // jd_mismatch / missing_info carry a useful detail suffix
+      // (`| reason='…'` / `| field='…'`) — surface the quoted part.
+      const detail = r.match(/\|\s*(?:reason|field)='([^']+)'/)?.[1];
+      return detail ? `${label} (${detail})` : label;
+    }
+  }
+  // Unknown reason string: show it raw rather than hide it.
+  return r;
+}

@@ -6,6 +6,7 @@ import {
   BACKEND_FOR_USER_STATUS,
   USER_STATUS_LABEL,
   USER_STATUSES,
+  humanizeSkipReason,
   toUserStatus,
   type UserStatus,
 } from "@/lib/application-status";
@@ -126,18 +127,21 @@ export default async function ApplicationsPage({
                 <th style={{ width: 130 }}>Status</th>
                 <th>Company</th>
                 <th>Role</th>
+                <th>Reason</th>
                 <th style={{ width: 200 }}>Last attempt</th>
-                <th style={{ width: 160 }}>Job ID</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => {
                 const userStatus = toUserStatus(r.status, r.reason)!;
-                const detail = r.reason ?? r.last_error ?? undefined;
+                const skipReason =
+                  userStatus === "skipped" || userStatus === "not_a_fit"
+                    ? humanizeSkipReason(r.reason ?? r.last_error)
+                    : null;
                 return (
                   <tr key={r.id}>
                     <td>
-                      <span className={`status status-${userStatus}`} title={detail}>
+                      <span className={`status status-${userStatus}`}>
                         {USER_STATUS_LABEL[userStatus]}
                       </span>
                     </td>
@@ -150,16 +154,18 @@ export default async function ApplicationsPage({
                           rel="noopener noreferrer"
                           className="hover:underline"
                         >
-                          {r.jobs.title ?? r.job_id}
+                          {r.jobs.title ?? "—"}
                         </a>
                       ) : (
-                        r.jobs?.title ?? r.job_id
+                        r.jobs?.title ?? "—"
                       )}
+                    </td>
+                    <td style={{ color: "var(--color-pebble)", maxWidth: 320 }}>
+                      {skipReason ?? "—"}
                     </td>
                     <td className="mono" style={{ color: "var(--color-cosmic)" }}>
                       <LocalDateTime iso={r.last_attempt_at} />
                     </td>
-                    <td className="mono" style={{ color: "var(--color-steel)" }}>{r.job_id}</td>
                   </tr>
                 );
               })}
