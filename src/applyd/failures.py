@@ -67,6 +67,7 @@ _PREFIX_MAP: tuple[tuple[str, str], ...] = (
     ("skipped:jd_mismatch", JD_MISMATCH),
     ("jd_mismatch", JD_MISMATCH),
     ("matcher:", MATCHER),
+    ("prefilter:", MATCHER),  # seniority prefilter: same operational bucket as a judge reject
 )
 
 

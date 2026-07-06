@@ -17,6 +17,7 @@ const FILTERS: { key: StatusFilter; label: string }[] = [
   { key: "applied", label: "Applied" },
   { key: "pending", label: "Pending" },
   { key: "skipped", label: "Skipped" },
+  { key: "not_a_fit", label: "Not a fit" },
 ];
 
 type SearchParams = Promise<{ status?: string; q?: string }>;
@@ -34,6 +35,7 @@ export default async function ApplicationsPage({
     id: string;
     status: string;
     job_id: string;
+    reason: string | null;
     last_attempt_at: string | null;
     applied_at: string | null;
     last_error: string | null;
@@ -50,7 +52,7 @@ export default async function ApplicationsPage({
     let query = supabase
       .from("applications")
       .select(
-        "id, status, job_id, last_attempt_at, applied_at, last_error, jobs(title, url, companies(canonical_name))",
+        "id, status, job_id, reason, last_attempt_at, applied_at, last_error, jobs(title, url, companies(canonical_name))",
       )
       .order("last_attempt_at", { ascending: false, nullsFirst: false })
       .limit(500);
@@ -67,12 +69,12 @@ export default async function ApplicationsPage({
 
   // Drop failed/unknown rows up-front so they never reach the table or counts.
   const visibleRows = ((data ?? []) as Row[]).filter(
-    (r) => toUserStatus(r.status) !== null,
+    (r) => toUserStatus(r.status, r.reason) !== null,
   );
 
   const rows = visibleRows.filter((r) => {
     if (active !== "all") {
-      if (toUserStatus(r.status) !== active) return false;
+      if (toUserStatus(r.status, r.reason) !== active) return false;
     }
     if (!q) return true;
     const hay = `${r.jobs?.title ?? ""} ${r.jobs?.companies?.canonical_name ?? ""}`.toLowerCase();
@@ -130,11 +132,12 @@ export default async function ApplicationsPage({
             </thead>
             <tbody>
               {rows.map((r) => {
-                const userStatus = toUserStatus(r.status)!;
+                const userStatus = toUserStatus(r.status, r.reason)!;
+                const detail = r.reason ?? r.last_error ?? undefined;
                 return (
                   <tr key={r.id}>
                     <td>
-                      <span className={`status status-${userStatus}`}>
+                      <span className={`status status-${userStatus}`} title={detail}>
                         {USER_STATUS_LABEL[userStatus]}
                       </span>
                     </td>

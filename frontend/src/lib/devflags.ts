@@ -61,6 +61,7 @@ type MockApplication = {
   id: string;
   status: "applied" | "tailored" | "pending" | "skipped" | "failed" | "in_progress";
   job_id: string;
+  reason: string | null;
   last_attempt_at: string | null;
   applied_at: string | null;
   last_error: string | null;
@@ -68,12 +69,13 @@ type MockApplication = {
 };
 
 export const MOCK_APPLICATIONS: MockApplication[] = [
-  { id: "app-001", status: "applied",     job_id: "job-001", last_attempt_at: day(0), applied_at: day(0), last_error: null, jobs: { title: "Software Engineer, ML Platform", url: "https://example.com/1", companies: { canonical_name: "Stripe" } } },
-  { id: "app-002", status: "applied",     job_id: "job-002", last_attempt_at: day(0), applied_at: day(0), last_error: null, jobs: { title: "Research Engineer",              url: "https://example.com/2", companies: { canonical_name: "Anthropic" } } },
-  { id: "app-003", status: "tailored",    job_id: "job-003", last_attempt_at: day(1), applied_at: null,   last_error: null, jobs: { title: "Software Engineer Intern",       url: "https://example.com/3", companies: { canonical_name: "Lyft" } } },
-  { id: "app-004", status: "applied",     job_id: "job-004", last_attempt_at: day(1), applied_at: day(1), last_error: null, jobs: { title: "Applied ML Engineer",            url: "https://example.com/4", companies: { canonical_name: "Runway" } } },
-  { id: "app-005", status: "pending",     job_id: "job-005", last_attempt_at: null,   applied_at: null,   last_error: null, jobs: { title: "Backend Engineer",               url: "https://example.com/5", companies: { canonical_name: "Shopify" } } },
-  { id: "app-006", status: "failed",      job_id: "job-006", last_attempt_at: day(2), applied_at: null,   last_error: "Form required cover letter.", jobs: { title: "ML Infra Engineer",              url: "https://example.com/6", companies: { canonical_name: "Cohere" } } },
-  { id: "app-007", status: "in_progress", job_id: "job-007", last_attempt_at: day(0), applied_at: null,   last_error: null, jobs: { title: "Frontend Engineer",              url: "https://example.com/7", companies: { canonical_name: "Vercel" } } },
-  { id: "app-008", status: "skipped",     job_id: "job-008", last_attempt_at: day(3), applied_at: null,   last_error: "JD mismatch.",               jobs: { title: "Software Engineer, Search",      url: "https://example.com/8", companies: { canonical_name: "Perplexity" } } },
+  { id: "app-001", status: "applied",     job_id: "job-001", reason: null, last_attempt_at: day(0), applied_at: day(0), last_error: null, jobs: { title: "Software Engineer, ML Platform", url: "https://example.com/1", companies: { canonical_name: "Stripe" } } },
+  { id: "app-002", status: "applied",     job_id: "job-002", reason: null, last_attempt_at: day(0), applied_at: day(0), last_error: null, jobs: { title: "Research Engineer",              url: "https://example.com/2", companies: { canonical_name: "Anthropic" } } },
+  { id: "app-003", status: "tailored",    job_id: "job-003", reason: null, last_attempt_at: day(1), applied_at: null,   last_error: null, jobs: { title: "Software Engineer Intern",       url: "https://example.com/3", companies: { canonical_name: "Lyft" } } },
+  { id: "app-004", status: "applied",     job_id: "job-004", reason: null, last_attempt_at: day(1), applied_at: day(1), last_error: null, jobs: { title: "Applied ML Engineer",            url: "https://example.com/4", companies: { canonical_name: "Runway" } } },
+  { id: "app-005", status: "pending",     job_id: "job-005", reason: null, last_attempt_at: null,   applied_at: null,   last_error: null, jobs: { title: "Backend Engineer",               url: "https://example.com/5", companies: { canonical_name: "Shopify" } } },
+  { id: "app-006", status: "failed",      job_id: "job-006", reason: null, last_attempt_at: day(2), applied_at: null,   last_error: "Form required cover letter.", jobs: { title: "ML Infra Engineer",              url: "https://example.com/6", companies: { canonical_name: "Cohere" } } },
+  { id: "app-007", status: "in_progress", job_id: "job-007", reason: null, last_attempt_at: day(0), applied_at: null,   last_error: null, jobs: { title: "Frontend Engineer",              url: "https://example.com/7", companies: { canonical_name: "Vercel" } } },
+  { id: "app-008", status: "skipped",     job_id: "job-008", reason: null, last_attempt_at: day(3), applied_at: null,   last_error: "gated:dead_link — posting removed.", jobs: { title: "Software Engineer, Search",      url: "https://example.com/8", companies: { canonical_name: "Perplexity" } } },
+  { id: "app-009", status: "skipped",     job_id: "job-009", reason: "matcher:Director-level role; 3+ level seniority gap for a new grad.", last_attempt_at: day(4), applied_at: null, last_error: null, jobs: { title: "Director of Engineering", url: "https://example.com/9", companies: { canonical_name: "Figma" } } },
 ];

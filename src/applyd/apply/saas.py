@@ -40,6 +40,35 @@ logger = logging.getLogger("applyd.apply.saas")
 
 CLAIMABLE_FROM: tuple[str, ...] = ("tailored", "failed")
 
+# Skip notes that describe the JOB, not this user: feed them back to the
+# shared jobs row so ranking/tailor/apply stop routing other tenants at the
+# same wall. Captcha stays per-user (often session/IP luck), and
+# missing_info / jd_mismatch depend on the candidate.
+_JOB_LEVEL_GATES: dict[str, str] = {
+    "gated:login_required": "login_required",
+    "gated:signup_required": "signup_required",
+    "gated:cover_letter_required": "cover_letter_required",
+    "skipped:coding_challenge": "coding_challenge",
+}
+
+
+def _propagate_job_gate(jobs: JobsRepo, job_id: str, status: str, note: str | None) -> None:
+    """Best-effort: a failure here must never affect the apply result."""
+    if status != "skipped" or not note:
+        return
+    try:
+        if note.startswith("gated:dead_link"):
+            jobs.mark_inactive(job_id, "dead_link_at_apply")
+            logger.info("[apply] marked job %s inactive (dead link)", job_id)
+            return
+        for prefix, gate in _JOB_LEVEL_GATES.items():
+            if note.startswith(prefix):
+                jobs.set_apply_gate(job_id, gate)
+                logger.info("[apply] set apply_gate=%s on job %s", gate, job_id)
+                return
+    except Exception:  # noqa: BLE001
+        logger.exception("[apply] failed to propagate gate for job %s", job_id)
+
 
 def _contact_block(profile: dict[str, Any]) -> str:
     """The literal form-fill fields, formatted as a small contact card the
@@ -182,14 +211,27 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         profile = profiles.get(user_id)
         profile_md = _build_profile_text(profile)
 
-        # 6. tailored resume + PDF.
+        # 6. tailored resume + PDF. Missing artifacts are a STATE problem —
+        # this row should never have been apply-claimable — not an apply
+        # failure. Requeue to 'pending' so the tailor worker produces the
+        # resume. Releasing to 'failed' kept the row claimable (CLAIMABLE_FROM
+        # includes 'failed') and one such row burned 734 attempts May–June 2026.
         tailored_row = tailored.get(user_id, job_id)
-        if tailored_row is None:
-            return _finish("failed", "no_tailored_resume")
-
-        pdf_storage_path: str | None = tailored_row.get("pdf_storage_path")
-        if not pdf_storage_path:
-            return _finish("failed", "no_tailored_pdf")
+        pdf_storage_path: str | None = (tailored_row or {}).get("pdf_storage_path")
+        if tailored_row is None or not pdf_storage_path:
+            reason = "no_tailored_resume" if tailored_row is None else "no_tailored_pdf"
+            attempts.end(attempt_id, status="failed", reason=reason)
+            apps.requeue(application_id, "pending", reason=reason)
+            logger.info(
+                "[apply] %s on app %s — requeued to pending for tailoring",
+                reason, application_id,
+            )
+            return {
+                "status": "requeued",
+                "application_id": application_id,
+                "attempt_id": attempt_id,
+                "reason": reason,
+            }
 
         try:
             pdf_bytes = sb.storage.from_("resumes").download(pdf_storage_path)
@@ -234,6 +276,7 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         # never originates here; "gated:*" notes come back on `status='skipped'`).
         status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
         note = result.get("note") or None
+        _propagate_job_gate(jobs, job_id, status, note)
         return _finish(
             status,
             note,

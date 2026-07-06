@@ -88,6 +88,10 @@ _SNAPSHOT_JS = r"""() => {
     };
 
     for (const el of document.querySelectorAll('input, textarea, select, button, a[href], [role]')) {
+        // Cap the scan: content-heavy pages (stripe.com/jobs has thousands of
+        // anchors) make this loop crawl, and the output is truncated at 8k
+        // chars anyway. Form controls appear long before ref 300 in practice.
+        if (counter >= 300) break;
         if (!isInteractive(el)) continue;
         if (!isVisible(el)) continue;
         if (el.disabled) continue;

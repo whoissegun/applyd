@@ -57,6 +57,13 @@ class CompaniesRepo:
 
     def __init__(self, client: Client) -> None:
         self.client = client
+        # Per-instance memo. A discovery run calls upsert once per JOB but the
+        # distinct companies number in the hundreds — without this, the 1-5
+        # lookups per call put ~10k streams on one Supabase HTTP/2 connection
+        # and the server GOAWAYs it mid-run (July 2026 broad_search failures).
+        # Stale only if companies are merged mid-process, which only the
+        # offline seed/merge script does.
+        self._memo: dict[tuple[str, str, str, str], str] = {}
 
     def upsert(
         self,
@@ -68,6 +75,26 @@ class CompaniesRepo:
     ) -> str:
         name_norm = _normalize_name(canonical_name)
         domain = primary_domain or _domain_from_url(careers_url)
+
+        memo_key = (name_norm, ats or "", ats_slug or "", domain or "")
+        cached = self._memo.get(memo_key)
+        if cached is not None:
+            return cached
+        company_id = self._upsert_uncached(
+            canonical_name, name_norm, ats, ats_slug, careers_url, domain
+        )
+        self._memo[memo_key] = company_id
+        return company_id
+
+    def _upsert_uncached(
+        self,
+        canonical_name: str,
+        name_norm: str,
+        ats: Optional[str],
+        ats_slug: Optional[str],
+        careers_url: Optional[str],
+        domain: Optional[str],
+    ) -> str:
 
         # 1. manual alias
         if name_norm:

@@ -318,6 +318,7 @@ body {
 .theme-eleven .status-tailored   { color: #1a4ea8; background: rgba(136, 187, 245, 0.22); box-shadow: inset 0 0 0 1px rgba(136, 187, 245, 0.5); }
 .theme-eleven .status-pending    { color: #8a5a09; background: rgba(245, 165, 36, 0.18); box-shadow: inset 0 0 0 1px rgba(245, 165, 36, 0.5); }
 .theme-eleven .status-skipped    { color: #777169; background: #f5f3f1;                  box-shadow: inset 0 0 0 1px #e5e5e5; }
+.theme-eleven .status-not_a_fit  { color: #8f8a82; background: #faf9f7;                  box-shadow: inset 0 0 0 1px #ecebe8; }
 .theme-eleven .status-failed     { color: #b32400; background: rgba(255, 71, 4, 0.12);   box-shadow: inset 0 0 0 1px rgba(255, 71, 4, 0.4); }
 .theme-eleven .status-inprogress { color: #000;    background: #f5f3f1;                  box-shadow: inset 0 0 0 1px #c8c5c1; }
 
@@ -526,6 +527,7 @@ body {
   .status-tailored { color: var(--color-sky);     background: rgba(136, 187, 245, 0.08); box-shadow: inset 0 0 0 1px rgba(136, 187, 245, 0.22); }
   .status-pending  { color: var(--color-amber);   background: rgba(245, 165, 36, 0.08); box-shadow: inset 0 0 0 1px rgba(245, 165, 36, 0.22); }
   .status-skipped  { color: var(--color-cosmic);  background: rgba(138, 143, 152, 0.08); box-shadow: inset 0 0 0 1px rgba(138, 143, 152, 0.22); }
+  .status-not_a_fit { color: var(--color-cosmic); background: rgba(138, 143, 152, 0.04); box-shadow: inset 0 0 0 1px rgba(138, 143, 152, 0.14); }
   .status-failed   { color: var(--color-ember);   background: rgba(254, 44, 2, 0.08);   box-shadow: inset 0 0 0 1px rgba(254, 44, 2, 0.28); }
   .status-inprogress { color: var(--color-ghost); background: rgba(255, 255, 255, 0.08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18); }
 

@@ -40,5 +40,13 @@ def is_transient_llm_error(exc: BaseException) -> bool:
     ):
         return True
     if isinstance(exc, openai.APIStatusError):
-        return getattr(exc, "status_code", None) in _TRANSIENT_STATUS
+        status = getattr(exc, "status_code", None)
+        if status in _TRANSIENT_STATUS:
+            return True
+        # OpenRouter reports a spend-capped key as 403 "Key limit exceeded" —
+        # account-wide like 402 no-credits, not a per-job permission problem.
+        # Plain 403s (model not allowed, etc.) stay terminal.
+        if status == 403 and "limit" in str(exc).lower():
+            return True
+        return False
     return False

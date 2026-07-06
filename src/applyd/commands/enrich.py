@@ -19,20 +19,34 @@ def cmd_enrich(args: argparse.Namespace) -> int:
     load_env()
     repo = JobsRepo(get_client())
 
+    backfill: bool = getattr(args, "classify_backfill", False)
     candidates: list[Job] = []
-    for job in repo.iter_pending_enrichment(
-        include_failed=args.retry_failed,
-        source=args.source,
-    ):
-        if not job.url:
-            continue
-        if job.description and len(job.description) >= MIN_USEFUL_CHARS:
-            continue
-        candidates.append(job)
-        if args.limit and len(candidates) >= args.limit:
-            break
+    if backfill:
+        # Described-but-unclassified jobs (bulk-list descriptions skip the
+        # normal enrich pass entirely). No fetching — classify + embed only.
+        for job in repo.iter_unclassified():
+            if not job.description or len(job.description) < MIN_USEFUL_CHARS:
+                continue
+            if args.source and job.source != args.source:
+                continue
+            candidates.append(job)
+            if args.limit and len(candidates) >= args.limit:
+                break
+    else:
+        for job in repo.iter_pending_enrichment(
+            include_failed=args.retry_failed,
+            source=args.source,
+        ):
+            if not job.url:
+                continue
+            if job.description and len(job.description) >= MIN_USEFUL_CHARS:
+                continue
+            candidates.append(job)
+            if args.limit and len(candidates) >= args.limit:
+                break
 
-    print(f"→ {len(candidates)} jobs to enrich", file=sys.stderr)
+    mode = "classify-backfill" if backfill else "enrich"
+    print(f"→ {len(candidates)} jobs to {mode}", file=sys.stderr)
     if args.dry_run:
         by_source: dict[str, int] = {}
         for j in candidates:
@@ -65,12 +79,15 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             spider._client = client
 
         def work(job: Job) -> tuple[Job, str, str, Optional[str], Optional[dict], Optional[list], Optional[str]]:
-            try:
-                text, tier, err = fetch_text(
-                    job.url, spider=spider, client=client, board_cache=board_cache,
-                )
-            except Exception as e:
-                text, tier, err = "", "failed", f"{type(e).__name__}: {e}"
+            if backfill:
+                text, tier, err = "", "cached", None
+            else:
+                try:
+                    text, tier, err = fetch_text(
+                        job.url, spider=spider, client=client, board_cache=board_cache,
+                    )
+                except Exception as e:
+                    text, tier, err = "", "failed", f"{type(e).__name__}: {e}"
 
             classification: Optional[dict] = None
             embedding: Optional[list] = None
@@ -96,15 +113,21 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             try:
                 for fut in as_completed(futures):
                     job, text, tier, err, classification, embedding, classify_err = fut.result()
-                    description = text or job.description
-                    repo.mark_enriched(
-                        job.id,
-                        description=description,
-                        tier=tier,
-                        error=err,
-                        classification=classification,
-                        embedding=embedding,
-                    )
+                    if backfill:
+                        # Description/tier/enriched_at are already correct —
+                        # only write the classification (when we got one).
+                        if classification is not None:
+                            repo.set_classification(job.id, classification, embedding)
+                    else:
+                        description = text or job.description
+                        repo.mark_enriched(
+                            job.id,
+                            description=description,
+                            tier=tier,
+                            error=err,
+                            classification=classification,
+                            embedding=embedding,
+                        )
                     stats[tier] = stats.get(tier, 0) + 1
                     if classification is not None:
                         classify_stats["ok"] += 1

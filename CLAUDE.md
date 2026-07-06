@@ -116,8 +116,14 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 
 ### Matching (cost-critical)
 - **Two-stage funnel, not one-LLM-call-per-job.** pgvector embeddings on `jobs.embedding` (classification text) + `user_profiles.embedding` (resume + LLM-extracted *positive* targets — exclusions dropped so negation doesn't pull the vector wrong). `rank_jobs_for_user()` ranks unseen jobs by cosine; the Haiku judge runs only on the top slice. A backlog stop-rule (`target_backlog`, default 30) halts judging once a user's apply queue is primed — spend tracks applications, not catalog size. Resume is the only hard requirement; `profile_answers` is optional.
+- **The judge is batched** (`match_user_to_jobs`, `BATCH_SIZE=10` jobs per Haiku call) — the profile+resume tokens dominate the prompt and per-job calls re-sent them at full price. System + profile/resume blocks carry `cache_control` markers.
+- **Free seniority prefilter before the judge.** `classification.seniority_signal` matching staff+/principal/director/manager/VP/8+-years goes straight to `skipped` with reason `prefilter:seniority` — no LLM call. Plain "senior / 5-8" still goes to the judge (it sees deal_breakers + full profile). This is an *operational* filter on already-classified data, not an enum taxonomy.
+- **Barren-sweep cooldown.** A sweep that judges jobs and accepts nothing puts the user on an in-memory cooldown (`APPLYD_MATCHMAKER_BARREN_COOLDOWN`, default 6h) — the ranking tail is junk once accepts dry up; without this the matchmaker marches the whole catalog (July 2026: 6.1k judgments, 25 accepts, 98% rejects).
+- **Persist the verdict row BEFORE billing usage, per-row try/except.** The applications row is the sole dedup marker; a sweep that crashed after billing re-judged the same top-ranked jobs every 5-min tick (June 2026: 32 jobs judged ~260× each = ~4.9k wasted calls, because the code wrote `failure_category` before its migration was applied).
+- **Matcher rejects are `status='skipped'` + reason `matcher:`/`prefilter:`** — the dashboard renders them as "Not a fit", distinct from real apply-agent skips (see `frontend/src/lib/application-status.ts`).
 
 ### Tailoring
+- **Free liveness check before the LLM call.** `tailor_for_user` runs `enrichment.fetcher.job_is_live(url)` (ATS bulk API) before spending; a definitive "not on the board" marks the job inactive for all tenants and skips the row (`dead_link_pre_tailor`). `None` (unknown ATS / fetch failed) proceeds. Catalog rows go stale routinely — the nightly `sweep_stale` safety net exists in `JobsRepo` but nothing schedules it.
 - **Sonnet 4.6 via OpenRouter default.** Prompt caching is mature; cached reads ~10× cheaper. Writing quality on constrained rewrites is strong. Model swappable via `TailorClient`.
 - **LaTeX over DOCX.** Text-native, diffable, one-binary compile (tectonic), no docxtpl fragility. ATS-parse risk mitigated by single-column Jake's Resume template.
 - **Dual output format: JSON metadata + ```latex fenced block.** Avoids JSON-escape hell for LaTeX's pervasive backslashes.
@@ -192,6 +198,8 @@ python -m applyd.apply.runner <job_id> [--model <slug>] [--profile <path>] [--te
 - **`APPLYD_TEST_MODE=true`** keeps the agent from clicking submit — fills the form, screenshots optional, returns "would have submitted." Flip to `false` only after you've eyeballed test-mode runs.
 - **Profile**: `--profile <path>`, defaults to `./profile.md`. SaaS migration moves this to a row in `user_profiles.profile_answers`.
 - **Failures/skips only**: no screenshots or transcripts on success. ATS confirmation emails are the receipt of record.
+- **Job-level skip verdicts propagate to the shared catalog** (`apply/saas.py::_propagate_job_gate`): `gated:dead_link` → `jobs.active=false`; login/signup walls, mandatory cover letters, coding challenges → `jobs.apply_gate` (ranker filters both). Captcha and profile-specific skips (`missing_info`, `jd_mismatch`) stay per-user.
+- **OpenRouter 403 "Key limit exceeded" is transient** (`llm_errors.py`): it's account-wide like 402 no-credits — workers requeue + back off. Plain 403s stay terminal.
 
 Multi-tenant work the runner needs:
 - Thread a `user_id` parameter through `runner.py`'s entry.
