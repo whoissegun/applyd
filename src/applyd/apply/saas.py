@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_env
+from ..discovery.routing import preferred_apply_url
 from ..llm_errors import TransientInfraError
 from ..db import (
     ApplicationsRepo,
@@ -253,12 +254,14 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             metadata_json = "{}"
 
-        # 7. drive the tool-use loop.
+        # 7. drive the tool-use loop. Route to the real application form, not a
+        # company-careers wrapper (Stripe's gh_jid search page) — see
+        # preferred_apply_url.
         result = run_apply(
             job_id=job.id,
             company=job.company,
             title=job.title,
-            job_url=job.url,
+            job_url=preferred_apply_url(job.id, job.url),
             resume_pdf_path=tmp_pdf_path,
             profile_md=profile_md,
             resume_tex=resume_tex,

@@ -115,6 +115,25 @@ def canonical_ats_url(job_id: str) -> Optional[str]:
     return template.format(slug=slug, job_id=jid)
 
 
+def preferred_apply_url(job_id: str, display_url: str) -> str:
+    """The best URL for the apply agent to navigate to.
+
+    Greenhouse's stored/display URL is often a company-careers wrapper
+    (stripe.com/jobs/search?gh_jid=NNN) — a search page, not the form — or a
+    JD page that needs an extra "Apply" click. The `embed/job_app` endpoint
+    renders the fillable application form directly for EVERY greenhouse board
+    (verified on self-hosted Stripe and direct-board Anthropic), and 404s for
+    dead postings. Route greenhouse applies straight to it; everything else
+    keeps its display URL (lever/ashby pages already land on the form).
+    """
+    parts = job_id.split(":", 2)
+    if len(parts) == 3 and parts[0] == "greenhouse":
+        _, slug, jid = parts
+        if slug and jid:
+            return f"https://job-boards.greenhouse.io/embed/job_app?token={jid}&for={slug}"
+    return display_url
+
+
 def parse_ats_url(url: str) -> Optional[tuple[str, str, str]]:
     """Parse an ATS posting URL into (ats, company_slug, job_id).
 
