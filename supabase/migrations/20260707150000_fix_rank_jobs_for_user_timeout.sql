@@ -11,11 +11,15 @@
 -- then ORDER BY against that parameter — the existing jobs_embedding_idx
 -- (hnsw, vector_cosine_ops) now serves the top-k directly.
 
+-- Volatile (not stable) because it sets GUCs via set_config; Postgres forbids
+-- SET in non-volatile functions. Function-level `SET hnsw.ef_search` clauses
+-- are not an option on Supabase: pgvector's GUCs only register once its
+-- library loads in the session, and setting a still-placeholder parameter
+-- needs superuser, which the migration role isn't.
 create or replace function public.rank_jobs_for_user(p_user_id uuid, p_limit int default 50)
 returns table (id text, title text, classification jsonb, distance double precision)
 language plpgsql
-stable
-set hnsw.ef_search = 200  -- headroom: WHERE clauses post-filter the index stream
+volatile
 as $$
 declare
   v_emb extensions.vector(1536);
@@ -24,6 +28,17 @@ begin
   if v_emb is null then
     return;
   end if;
+  -- Reading the vector column above loaded pgvector, so its GUCs now exist.
+  -- ef_search headroom: the WHERE clauses post-filter the index stream, and
+  -- the default (40) is below p_limit anyway. Transaction-local.
+  perform set_config('hnsw.ef_search', '200', true);
+  begin
+    -- pgvector >= 0.8: keep pulling from the index when post-filtering
+    -- discards candidates, instead of under-returning.
+    perform set_config('hnsw.iterative_scan', 'relaxed_order', true);
+  exception when others then
+    null;  -- older pgvector: GUC doesn't exist; plain scan is fine
+  end;
   return query
   select
     j.id,
@@ -41,23 +56,6 @@ begin
     )
   order by j.embedding operator(extensions.<=>) v_emb
   limit p_limit;
-end
-$$;
-
--- pgvector >= 0.8: iterative index scans keep pulling from the index when
--- post-filtering (the not-exists, gates) discards candidates, instead of
--- under-returning. Guarded so the migration also applies on older pgvector.
-do $$
-begin
-  if exists (
-    select 1 from pg_extension
-    where extname = 'vector' and extversion >= '0.8.0'
-  ) then
-    execute $sql$
-      alter function public.rank_jobs_for_user(uuid, int)
-        set hnsw.iterative_scan = 'relaxed_order'
-    $sql$;
-  end if;
 end
 $$;
 
