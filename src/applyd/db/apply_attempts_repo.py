@@ -35,6 +35,17 @@ class ApplyAttemptsRepo:
         res = self.client.table("apply_attempts").insert(payload).execute()
         return res.data[0]
 
+    def count_for_application(self, application_id: str) -> int:
+        """How many attempts exist for this application (including open ones).
+        Used to cap unbounded retries on a persistently-failing row."""
+        res = (
+            self.client.table("apply_attempts")
+            .select("id", count="exact", head=True)
+            .eq("application_id", application_id)
+            .execute()
+        )
+        return res.count or 0
+
     def end(
         self,
         attempt_id: str,

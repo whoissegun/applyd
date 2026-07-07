@@ -40,6 +40,10 @@ logger = logging.getLogger("applyd.apply.saas")
 
 CLAIMABLE_FROM: tuple[str, ...] = ("tailored", "failed")
 
+# Force an application terminal after this many attempts, whatever the reason —
+# a backstop so no failure class can loop paid retries forever.
+MAX_APPLY_ATTEMPTS = 3
+
 # Skip notes that describe the JOB, not this user: feed them back to the
 # shared jobs row so ranking/tailor/apply stop routing other tenants at the
 # same wall. Captcha stays per-user (often session/IP luck), and
@@ -276,6 +280,27 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         # never originates here; "gated:*" notes come back on `status='skipped'`).
         status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
         note = result.get("note") or None
+        # A gated/skipped verdict is terminal by definition. The runner
+        # sometimes returns one as 'failed' (e.g. it filled the form but a
+        # captcha wall blocked the final submit). Leaving it 'failed' is a bug:
+        # 'failed' is re-claimable, so the worker re-fills the whole form with
+        # paid LLM calls every cycle. Coerce to terminal 'skipped'.
+        if status == "failed" and note and (
+            note.startswith("gated:") or note.startswith("skipped:")
+        ):
+            status = "skipped"
+        # Hard backstop: no failure class should retry unbounded. After
+        # MAX_APPLY_ATTEMPTS attempts on this application, force it terminal
+        # regardless of reason. (This attempt is already counted.)
+        if status == "failed":
+            prior = attempts.count_for_application(application_id)
+            if prior >= MAX_APPLY_ATTEMPTS:
+                status = "skipped"
+                note = f"max_attempts_exhausted ({prior}): {note or 'repeated failure'}"
+                logger.warning(
+                    "[apply] app %s hit attempt cap (%d) — forcing terminal skipped",
+                    application_id, prior,
+                )
         _propagate_job_gate(jobs, job_id, status, note)
         return _finish(
             status,

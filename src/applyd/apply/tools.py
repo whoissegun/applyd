@@ -367,13 +367,55 @@ def upload_file(page: Page, ref: str, file_path: str) -> str:
 
 # ── submit ─────────────────────────────────────────────────────────────────
 
+# How long to wait after a submit click for an invisible captcha to resolve.
+# Lever's flow: clicking submit calls hcaptcha.execute(); the challenge can
+# take 40s+ to clear (observed live) before Bright Data's solver grants the
+# h-captcha-response token and the form auto-submits. Bailing in 2s guaranteed
+# a false captcha skip on every Lever form.
+SUBMIT_CAPTCHA_WAIT_SECONDS = 90
+
+_CAPTCHA_STATE_JS = r"""() => {
+    const frame = document.querySelector('iframe[src*="hcaptcha"], iframe[src*="recaptcha"]');
+    const tok = document.querySelector('[name="h-captcha-response"], [name="g-recaptcha-response"]');
+    return {
+        present: !!frame,
+        token_len: tok && tok.value ? tok.value.length : 0,
+    };
+}"""
+
+
 def submit(page: Page, ref: str, test_mode: bool) -> str:
     if test_mode:
         return _ok(f"test_mode=true; would have clicked {ref}")
     try:
+        start_url = page.url
         _ref_locator(page, ref).click(timeout=10000)
-        time.sleep(2)
-        return _ok(f"submitted via {ref}; current url={page.url}")
+
+        state = page.evaluate(_CAPTCHA_STATE_JS)
+        if not state.get("present"):
+            # No captcha in play — a short settle is enough.
+            time.sleep(2)
+            return _ok(f"submitted via {ref}; current url={page.url}")
+
+        # Captcha present: poll for a resolution rather than bailing. Success is
+        # either the page navigating away (form accepted) or the captcha token
+        # being granted (solver won; auto-submit imminent).
+        deadline = time.time() + SUBMIT_CAPTCHA_WAIT_SECONDS
+        while time.time() < deadline:
+            time.sleep(3)
+            if page.url.rstrip("/") != start_url.rstrip("/"):
+                return _ok(f"submitted via {ref}; page navigated to {page.url}")
+            state = page.evaluate(_CAPTCHA_STATE_JS)
+            if state.get("token_len", 0) > 0:
+                time.sleep(3)  # let the form's auto-submit fire
+                return _ok(
+                    f"captcha token granted after submit via {ref}; url={page.url}"
+                )
+        return _err(
+            f"submit {ref}: captcha did not resolve within "
+            f"{SUBMIT_CAPTCHA_WAIT_SECONDS}s (no token, no navigation) — likely a "
+            f"hard interactive challenge the solver can't clear"
+        )
     except Exception as e:
         return _err(f"submit {ref}: {type(e).__name__}: {e}")
 
