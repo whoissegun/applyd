@@ -124,7 +124,15 @@ _SNAPSHOT_JS = r"""() => {
                          labelText.includes('(required)') ||
                          labelText.includes('required)');
 
-        const value = (el.value !== undefined ? el.value : (el.innerText || '')).toString().slice(0, 80);
+        // React comboboxes (Greenhouse country/school/degree, react-select)
+        // keep the chosen value in component state, not el.value — so a picked
+        // field reads back empty and the agent re-picks it forever. pick_option
+        // stamps the choice on data-applyd-picked; surface it as the value so
+        // the field reads as satisfied. Survives snapshot (only *-ref is reset).
+        const picked = el.getAttribute('data-applyd-picked');
+        const rawValue = (el.value !== undefined && el.value !== '')
+            ? el.value : (el.innerText || '');
+        const value = (picked || rawValue || '').toString().slice(0, 80);
 
         out.push({ ref, role, type: inputType, label, required, value });
     }
@@ -299,7 +307,16 @@ def open_dropdown(page: Page, ref: str) -> str:
             lines = "\n".join(f"  {o['ref']}: {o['text']}" for o in options)
             return f"opened {ref} (native select), {len(options)} options:\n{lines}"
 
-        # ARIA combobox: click to expand, then read options
+        # ARIA combobox: click to expand, then read options. Mark this control
+        # as the one being opened so pick_option can stamp the chosen value
+        # back onto it (see _SNAPSHOT_JS / pick_option).
+        loc.evaluate(
+            """el => {
+                document.querySelectorAll('[data-applyd-combobox-open]')
+                    .forEach(e => e.removeAttribute('data-applyd-combobox-open'));
+                el.setAttribute('data-applyd-combobox-open', '1');
+            }"""
+        )
         loc.click(timeout=5000)
         page.wait_for_timeout(500)  # let async listbox render
         options = page.evaluate(_OPTIONS_JS)
@@ -330,8 +347,25 @@ def pick_option(page: Page, option_ref: str) -> str:
                 }"""
             )
             return _ok(f"picked native option {option_ref}")
+        option_text = (loc.inner_text(timeout=2000) or "").strip()[:80]
         loc.click(timeout=5000)
-        return _ok(f"picked {option_ref}")
+        # Stamp the chosen value on the combobox open_dropdown marked, so the
+        # next snapshot reports the field as filled. React comboboxes keep the
+        # selection in component state (not el.value), so without this the field
+        # reads back empty and the agent re-picks it forever (Greenhouse country
+        # combobox burned a full 40-turn run this way).
+        if option_text:
+            page.evaluate(
+                """(text) => {
+                    const cb = document.querySelector('[data-applyd-combobox-open]');
+                    if (cb) {
+                        cb.setAttribute('data-applyd-picked', text);
+                        cb.removeAttribute('data-applyd-combobox-open');
+                    }
+                }""",
+                option_text,
+            )
+        return _ok(f"picked {option_ref} ({option_text!r})")
     except Exception as e:
         return _err(f"pick_option {option_ref}: {type(e).__name__}: {e}")
 
