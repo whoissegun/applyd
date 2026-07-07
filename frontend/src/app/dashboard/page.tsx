@@ -5,6 +5,7 @@ import { LocalDateTime } from "@/components/LocalDateTime";
 import {
   USER_STATUSES,
   USER_STATUS_LABEL,
+  statusChipLabel,
   toUserStatus,
   type UserStatus,
 } from "@/lib/application-status";
@@ -113,7 +114,7 @@ export default async function DashboardOverview() {
                   return (
                     <tr key={i}>
                       <td>
-                        <span className={`status status-${us}`}>{USER_STATUS_LABEL[us]}</span>
+                        <span className={`status status-${us}`}>{statusChipLabel(r.status, r.reason)}</span>
                       </td>
                       <td>{r.jobs?.companies?.canonical_name ?? "—"}</td>
                       <td>{r.jobs?.title ?? "—"}</td>
