@@ -163,7 +163,56 @@ def job_is_live(
     board = board_cache[key]
     if not board:
         return None
-    return any(_job_id_matches(job, job_id) for job in board)
+    if any(_job_id_matches(job, job_id) for job in board):
+        return True
+    # Board says absent — but Lever keeps "confidential"/unlisted postings off
+    # the board list AND out of its posting API while the direct link still
+    # serves a live, submittable form (confirmed on a Palantir internship that
+    # 404s the API but renders the apply form). Board-absence alone is a
+    # false-negative there, and a `False` marks the SHARED job row inactive for
+    # every tenant. Confirm against the posting page before declaring it dead.
+    if ats == "lever":
+        return _lever_posting_page_live(url, client)
+    return False
+
+
+# Lever renders these when a posting has actually been pulled.
+_LEVER_DEAD_MARKERS = (
+    "no longer accepting",
+    "posting is not available",
+    "position is no longer",
+    "not currently accepting",
+)
+
+
+def _lever_posting_page_live(url: str, client: Optional[httpx.Client]) -> Optional[bool]:
+    """Confirm a board-absent Lever posting against its HTML page.
+
+    Returns:
+      None  — page still serves a submittable form (treat as live; do NOT mark
+              the shared row dead on an unconfirmed signal)
+      False — page confirms the posting is closed / gone
+    """
+    base = url.split("?")[0].rstrip("/")
+    if base.endswith("/apply"):
+        base = base[: -len("/apply")]
+    try:
+        with http_client(client) as c:
+            r = c.get(base, follow_redirects=True, timeout=20.0, headers=_BROWSER_HEADERS)
+    except Exception:
+        return None  # can't confirm death — leave it live
+    if r.status_code != 200:
+        return False
+    # Redirected away from the posting (e.g. back to the board root) → gone.
+    if "/apply" not in r.text and base.rsplit("/", 1)[-1] not in str(r.url):
+        return False
+    body = r.text.lower()
+    if any(m in body for m in _LEVER_DEAD_MARKERS):
+        return False
+    # Live Lever posting pages carry the apply submit control.
+    if "template-btn-submit" in body or "postings-btn" in body or "/apply" in body:
+        return None
+    return False
 
 
 def _tier3_spider(url: str, spider: SpiderClient, chrome: bool) -> Optional[str]:
