@@ -89,6 +89,32 @@ def extract_company_slug(url: str) -> Optional[str]:
     return parts[0] if parts else None
 
 
+# Canonical posting-URL templates per ATS, keyed to the `{ats}:{slug}:{id}`
+# job_id we store. Used to reconstruct a parseable ATS URL when the display
+# URL is a company-careers wrapper (e.g. Stripe's stripe.com/jobs/search?
+# gh_jid=NNN) that parse_ats_url can't read.
+_CANONICAL_URL_TEMPLATES = {
+    "greenhouse": "https://boards.greenhouse.io/{slug}/jobs/{job_id}",
+    "lever": "https://jobs.lever.co/{slug}/{job_id}",
+    "ashby": "https://jobs.ashbyhq.com/{slug}/{job_id}",
+    "workable": "https://apply.workable.com/{slug}/j/{job_id}",
+    "smartrecruiters": "https://jobs.smartrecruiters.com/{slug}/{job_id}",
+}
+
+
+def canonical_ats_url(job_id: str) -> Optional[str]:
+    """Build a canonical, parse_ats_url-readable posting URL from a stored
+    `{ats}:{slug}:{job_id}` id. Returns None for an unknown/malformed id."""
+    parts = job_id.split(":", 2)
+    if len(parts) != 3:
+        return None
+    ats, slug, jid = parts
+    template = _CANONICAL_URL_TEMPLATES.get(ats)
+    if not template or not slug or not jid:
+        return None
+    return template.format(slug=slug, job_id=jid)
+
+
 def parse_ats_url(url: str) -> Optional[tuple[str, str, str]]:
     """Parse an ATS posting URL into (ats, company_slug, job_id).
 
