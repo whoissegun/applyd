@@ -42,7 +42,7 @@ MAX_TURNS = 40  # safety net; a normal apply is 12-20 tool calls
 # so one bad job can't hog the single-worker queue (a 30-min hang stalled ~14
 # tailored jobs behind it). Failing fast + MAX_APPLY_ATTEMPTS is cheaper than
 # grinding. Override with APPLYD_APPLY_MAX_SECONDS if a slow ATS needs it.
-MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "360"))
+MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "300"))
 # Grace on top of MAX_WALL_SECONDS before the hard watchdog kills the process.
 WATCHDOG_GRACE_SECONDS = 60
 
