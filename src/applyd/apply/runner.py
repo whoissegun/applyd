@@ -32,7 +32,12 @@ from .tools import TOOL_DEFS, dispatch
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
-MAX_TURNS = 40  # safety net; a normal apply is 12-20 tool calls
+# Turn budget. A short ATS form is 12-20 tool calls, but a long Greenhouse
+# education form (Stripe: ~15 required fields, each combobox costing an
+# open+pick pair) can legitimately need 45+ and was hitting this ceiling
+# mid-fill. The 5-minute wall clock (MAX_WALL_SECONDS) is the real safety
+# bound; this just stops a runaway loop. Override via APPLYD_APPLY_MAX_TURNS.
+MAX_TURNS = int(os.environ.get("APPLYD_APPLY_MAX_TURNS", "65"))
 # Hard wall-clock ceiling per apply. MAX_TURNS bounds LLM round-trips but not
 # a single blocking browser call: sync-Playwright `evaluate` has no timeout,
 # so a silently-dead Bright Data CDP socket hangs the call — and the whole
