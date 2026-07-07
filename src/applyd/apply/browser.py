@@ -25,7 +25,14 @@ def brightdata_cdp_url() -> str:
     password = _required("BRIGHTDATA_ZONE_PASSWORD")
     host = os.environ.get("BRIGHTDATA_HOST", "brd.superproxy.io")
     port = os.environ.get("BRIGHTDATA_CDP_PORT", "9222")
-    return f"wss://brd-customer-{customer}-zone-{zone}:{password}@{host}:{port}"
+    user = f"brd-customer-{customer}-zone-{zone}"
+    # Pin the proxy exit country (e.g. "ca"). A job application arriving from
+    # a random overseas datacenter IP is a huge captcha risk signal — hCaptcha
+    # served us a challenge in Polish before this was set.
+    country = os.environ.get("BRIGHTDATA_COUNTRY", "").strip().lower()
+    if country:
+        user += f"-country-{country}"
+    return f"wss://{user}:{password}@{host}:{port}"
 
 
 @contextmanager
