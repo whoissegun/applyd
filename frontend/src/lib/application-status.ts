@@ -52,6 +52,25 @@ export const USER_STATUS_LABEL: Record<UserStatus, string> = {
   not_a_fit: "Not a fit",
 };
 
+/** Finer labels within the "pending" bucket, so a queued row shows *which*
+ *  stage it's in rather than a flat "Pending". Backend statuses map:
+ *    pending     → resume not tailored yet (or being tailored)
+ *    tailored    → resume ready, waiting for the apply worker
+ *    in_progress → apply agent is filling the form right now */
+const PENDING_STAGE_LABEL: Record<string, string> = {
+  pending: "Tailoring resume",
+  tailored: "Queued to apply",
+  in_progress: "Applying",
+};
+
+/** Label for a status chip: the fine-grained stage inside "pending", else the
+ *  bucket label. Tallies/filters still use the coarse USER_STATUS_LABEL. */
+export function statusChipLabel(backendStatus: string, reason?: string | null): string {
+  const us = toUserStatus(backendStatus, reason);
+  if (us === "pending") return PENDING_STAGE_LABEL[backendStatus] ?? "Pending";
+  return us ? USER_STATUS_LABEL[us] : "";
+}
+
 /** Backend statuses that roll up into each user-facing bucket. Used to
  *  translate user filters → SQL queries (the skipped/not_a_fit split then
  *  happens client-side on reason). */

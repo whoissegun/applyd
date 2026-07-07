@@ -4,9 +4,9 @@ import { LocalDateTime } from "@/components/LocalDateTime";
 import Link from "next/link";
 import {
   BACKEND_FOR_USER_STATUS,
-  USER_STATUS_LABEL,
   USER_STATUSES,
   humanizeSkipReason,
+  statusChipLabel,
   toUserStatus,
   type UserStatus,
 } from "@/lib/application-status";
@@ -142,7 +142,7 @@ export default async function ApplicationsPage({
                   <tr key={r.id}>
                     <td>
                       <span className={`status status-${userStatus}`}>
-                        {USER_STATUS_LABEL[userStatus]}
+                        {statusChipLabel(r.status, r.reason)}
                       </span>
                     </td>
                     <td>{r.jobs?.companies?.canonical_name ?? "—"}</td>
