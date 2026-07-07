@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from supabase import Client
@@ -101,6 +101,70 @@ class ApplicationsRepo:
             .execute()
         )
         return res.data[0] if res.data else None
+
+    def requeue_orphaned(self, stale_minutes: int = 20) -> list[dict]:
+        """Requeue rows stuck 'in_progress' past `stale_minutes` — the worker
+        that claimed them died without releasing (deploy restart mid-apply,
+        hard-watchdog force-exit, crash). Without this they sit 'in_progress'
+        forever and render as Pending in the dashboard.
+
+        Rows with a tailored resume go back to 'tailored' (re-apply); the rest
+        to 'pending' (re-tailor). Rows whose job was deleted go to 'failed'.
+        Also closes their never-ended apply_attempts rows as orphaned.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
+        ).isoformat()
+        stuck = (
+            self.client.table("applications")
+            .select("id, user_id, job_id")
+            .eq("status", "in_progress")
+            .lt("last_attempt_at", cutoff)
+            .execute()
+            .data
+            or []
+        )
+        requeued: list[dict] = []
+        for row in stuck:
+            if row["job_id"] is None:
+                target = "failed"
+            else:
+                has_resume = bool(
+                    self.client.table("tailored_resumes")
+                    .select("id")
+                    .eq("user_id", row["user_id"])
+                    .eq("job_id", row["job_id"])
+                    .limit(1)
+                    .execute()
+                    .data
+                )
+                target = "tailored" if has_resume else "pending"
+            reason = "requeued: orphaned in_progress claim (worker died mid-run)"
+            res = (
+                self.client.table("applications")
+                .update(
+                    {
+                        "status": target,
+                        "last_error": reason,
+                        "failure_category": categorize(reason),
+                    }
+                )
+                .eq("id", row["id"])
+                .eq("status", "in_progress")  # guard: skip if a live worker just released it
+                .lt("last_attempt_at", cutoff)
+                .execute()
+                .data
+            )
+            if res:
+                self.client.table("apply_attempts").update(
+                    {
+                        "status": "failed",
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": "orphaned: worker died mid-run",
+                    }
+                ).eq("application_id", row["id"]).is_("ended_at", "null").execute()
+                requeued.append({**row, "requeued_to": target})
+        return requeued
 
     def release(
         self,

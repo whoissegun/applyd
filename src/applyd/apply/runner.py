@@ -38,10 +38,36 @@ MAX_TURNS = 40  # safety net; a normal apply is 12-20 tool calls
 # so a silently-dead Bright Data CDP socket hangs the call — and the whole
 # single-process worker — forever (froze prod for 40+ min on 2026-07-04).
 MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "900"))
+# Grace on top of MAX_WALL_SECONDS before the hard watchdog kills the process.
+WATCHDOG_GRACE_SECONDS = 60
 
 
 class ApplyTimeoutError(Exception):
     """The apply exceeded its wall-clock budget (hung browser call, most likely)."""
+
+
+def _start_hard_watchdog(seconds: int, job_id: str) -> threading.Event:
+    """Backstop for hangs SIGALRM can't interrupt. Sync-Playwright parks the
+    main thread inside its transport wait, so the Python-level alarm handler
+    never gets to run — a dead CDP socket froze prod for 12h on 2026-07-07
+    with the alarm armed the whole time. A daemon thread force-exits the
+    process past the deadline; the supervisor restarts it and the orphan
+    reaper requeues the abandoned claim. Set the returned Event to disarm.
+    """
+    done = threading.Event()
+
+    def _watch() -> None:
+        if not done.wait(seconds):
+            print(
+                f"✗ hard watchdog: apply for {job_id} exceeded {seconds}s; "
+                f"force-exiting so the supervisor restarts us",
+                file=sys.stderr,
+                flush=True,
+            )
+            os._exit(70)
+
+    threading.Thread(target=_watch, daemon=True, name="apply-watchdog").start()
+    return done
 
 
 @contextmanager
@@ -142,6 +168,9 @@ def run_apply(
         file=sys.stderr,
     )
 
+    watchdog_disarm = _start_hard_watchdog(
+        MAX_WALL_SECONDS + WATCHDOG_GRACE_SECONDS, job_id
+    )
     try:
         with _wall_clock_deadline(MAX_WALL_SECONDS), brightdata_page(block_heavy=True) as page:
             for turn in range(MAX_TURNS):
@@ -215,6 +244,8 @@ def run_apply(
         final_status = "infra_error" if is_transient_llm_error(e) else "failed"
         final_note = f"runner exception: {type(e).__name__}: {str(e)[:200]}"
         print(f"✗ runner exception: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        watchdog_disarm.set()
 
     print(
         f"✓ direct-apply done: status={final_status} note={final_note!r}\n"

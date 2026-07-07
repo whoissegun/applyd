@@ -33,6 +33,7 @@ from applyd.failures import (  # noqa: E402
     categorize,
     notify,
 )
+from applyd.db import ApplicationsRepo, get_client  # noqa: E402
 from applyd.llm_errors import TransientInfraError  # noqa: E402
 from applyd.tailor.saas import compile_self_check  # noqa: E402
 from applyd.worker import matchmaker  # noqa: E402
@@ -142,6 +143,19 @@ def run_forever(
     while not _stop:
         matched = tailored = applied = 0
         try:
+            # Reap claims orphaned by a worker death (deploy restart mid-apply,
+            # hard-watchdog force-exit). Every cycle: the query is one indexed
+            # select over a handful of rows.
+            try:
+                orphans = ApplicationsRepo(get_client()).requeue_orphaned()
+                for o in orphans:
+                    logger.warning(
+                        "[worker-all] requeued orphaned claim %s (job %s) -> %s",
+                        o["id"], o["job_id"], o["requeued_to"],
+                    )
+            except Exception:
+                logger.exception("[worker-all] orphan reap failed; continuing")
+
             now = time.monotonic()
             if last_match_at is None or (now - last_match_at) >= match_interval_seconds:
                 logger.info("[worker-all] match sweep starting (batch=%d workers=%d)", match_batch, match_workers)
