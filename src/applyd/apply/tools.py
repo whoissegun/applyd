@@ -156,10 +156,31 @@ def snapshot(page: Page) -> str:
 
 # ── click / fill ───────────────────────────────────────────────────────────
 
+def _click_with_overlay_fallback(page: Page, ref: str, timeout: int = 10000) -> str:
+    """Click a ref; if an overlay (hCaptcha iframe, consent banner) intercepts
+    the pointer, wait for it to settle, retry, then fall back to a
+    programmatic el.click() which bypasses hit-testing. Lever renders its
+    invisible hCaptcha over form controls, which made every radio click fail.
+    """
+    loc = _ref_locator(page, ref)
+    try:
+        loc.click(timeout=timeout)
+        return f"clicked {ref}"
+    except Exception as e:
+        if "intercepts pointer events" not in str(e):
+            raise
+    time.sleep(2)
+    try:
+        loc.click(timeout=5000)
+        return f"clicked {ref} (after overlay settled)"
+    except Exception:
+        loc.evaluate("el => el.click()")
+        return f"clicked {ref} via JS (overlay was intercepting the pointer)"
+
+
 def click(page: Page, ref: str) -> str:
     try:
-        _ref_locator(page, ref).click(timeout=10000)
-        return _ok(f"clicked {ref}")
+        return _ok(_click_with_overlay_fallback(page, ref))
     except Exception as e:
         return _err(f"click {ref}: {type(e).__name__}: {e}")
 
@@ -189,11 +210,44 @@ def click_many(page: Page, refs: list[str]) -> str:
     out = []
     for ref in refs:
         try:
-            _ref_locator(page, ref).click(timeout=8000)
-            out.append(f"  ok: {ref}")
+            out.append(f"  ok: {_click_with_overlay_fallback(page, ref, timeout=8000)}")
         except Exception as e:
             out.append(f"  err: {ref} :: {type(e).__name__}: {e}")
     return f"click_many ({len(refs)} items):\n" + "\n".join(out)
+
+
+def fill_autocomplete(page: Page, ref: str, value: str) -> str:
+    """Fill a typeahead field (Lever location, Google Places, etc.) where a
+    suggestion must be PICKED, not just typed — these widgets keep the real
+    value in a hidden input (e.g. Lever's `selectedLocation`) and clear the
+    visible field on submit if nothing was selected. Types keystroke-by-
+    keystroke so suggestion listeners fire, then clicks the first suggestion
+    (keyboard ArrowDown+Enter as fallback).
+    """
+    try:
+        loc = _ref_locator(page, ref)
+        loc.click(timeout=5000)
+        loc.fill("", timeout=5000)
+        loc.press_sequentially(value, delay=80, timeout=20000)
+        page.wait_for_timeout(1500)  # let async suggestions render
+        options = page.evaluate(_OPTIONS_JS)
+        if options:
+            _ref_locator(page, options[0]["ref"]).click(timeout=5000)
+            picked = repr(options[0]["text"])
+        else:
+            loc.press("ArrowDown")
+            loc.press("Enter")
+            picked = "keyboard ArrowDown+Enter (no suggestion list detected)"
+        page.wait_for_timeout(500)
+        final = (loc.evaluate("el => el.value") or "").strip()
+        if not final:
+            return _err(
+                f"fill_autocomplete {ref}: field is empty after picking — "
+                f"suggestions likely never rendered. Do not plain-fill this field."
+            )
+        return _ok(f"fill_autocomplete {ref}: picked {picked}; field value={final!r}")
+    except Exception as e:
+        return _err(f"fill_autocomplete {ref}: {type(e).__name__}: {e}")
 
 
 # ── dropdown / combobox (two-step) ─────────────────────────────────────────
@@ -337,6 +391,8 @@ def dispatch(page: Page, name: str, args: dict[str, Any], *, test_mode: bool) ->
         return fill(page, args["ref"], args["value"])
     if name == "fill_many":
         return fill_many(page, args["fields"])
+    if name == "fill_autocomplete":
+        return fill_autocomplete(page, args["ref"], args["value"])
     if name == "click_many":
         return click_many(page, args["refs"])
     if name == "open_dropdown":
@@ -405,6 +461,12 @@ TOOL_DEFS = [
             }
         },
         required=["fields"],
+    ),
+    _fn(
+        "fill_autocomplete",
+        "Fill a typeahead/suggestion field (location fields, Google Places, Lever location) where an option must be PICKED from a dropdown that appears as you type. Types the value keystroke-by-keystroke and selects the first suggestion. Use this INSTEAD of fill for any field that shows suggestions — plain fill leaves the hidden selection empty and the form clears the field on submit.",
+        {"ref": {"type": "string"}, "value": {"type": "string"}},
+        required=["ref", "value"],
     ),
     _fn(
         "click_many",
