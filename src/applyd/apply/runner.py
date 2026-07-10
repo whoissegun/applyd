@@ -196,6 +196,7 @@ def run_apply(
     final_note: str = ""
     turns_done: int = 0
     tool_call_counts: dict[str, int] = {}
+    nudged = False
 
     print(
         f"→ direct-apply [{company}] {title} ({job_id})\n"
@@ -218,6 +219,9 @@ def run_apply(
                     tool_choice: Any = {"type": "function", "function": {"name": "navigate"}}
                 elif turn == 1:
                     tool_choice = {"type": "function", "function": {"name": "snapshot"}}
+                elif nudged:
+                    # Just nudged after a prose stall — force a tool call.
+                    tool_choice = "required"
                 else:
                     tool_choice = "auto"
 
@@ -241,10 +245,26 @@ def run_apply(
 
                 tool_calls = asst.tool_calls or []
                 if not tool_calls:
-                    # Model gave a text answer instead of calling a tool — abort.
+                    # Model gave a text answer instead of calling a tool. Haiku
+                    # does this under pressure (e.g. thinking aloud about a
+                    # truncated snapshot, 2026-07-10 — killed a run that was 80%
+                    # done). Nudge once with tool_choice forced; only a second
+                    # stall aborts the run.
+                    if not nudged:
+                        nudged = True
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Do not reply with prose. Continue the task via "
+                                "tool calls only; when finished (or skipping), "
+                                "call report_done."
+                            ),
+                        })
+                        continue
                     final_status = "failed"
                     final_note = f"agent stopped without tool call: {(asst.content or '')[:200]}"
                     break
+                nudged = False
 
                 done = False
                 for tc in tool_calls:

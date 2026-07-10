@@ -167,6 +167,10 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 - **"smart" mode sometimes picks HTTP for an SPA and returns the app shell (~25 chars).** Cascade retries with explicit `request: "chrome"` as tier 3b.
 - **Response shape varies** (dict vs list-of-one-dict). Normalized in `SpiderClient.scrape`.
 
+### Bright Data / Playwright
+- **Never use `page.route()` on the Scraping Browser connection.** Client-side interception over `connect_over_cdp` is a known intermittent-hang class (microsoft/playwright#11776, ~30% of runs): every request round-trips through Python on the same websocket as click/evaluate, and a silent ws drop parks sync-Playwright forever (SIGALRM can't interrupt a greenlet transport wait). This caused the July 7 12h freeze and the `browser_in_use` cascade. Resource blocking is browser-side via CDP `Network.setBlockedURLs` (`apply/browser.py::BLOCKED_URL_PATTERNS`).
+- **A Bright Data session is single-domain** (`navigate_domains_limit`): a cross-domain redirect (amazon.jobs → hiring portal) kills the session mid-run. No fix yet — such jobs terminal-skip.
+
 ### Supabase
 - **New tables in `public` are not auto-exposed to the Data API** (breaking change 2026-04-28). Migrations must `GRANT` explicitly to `anon`/`authenticated`. Initial schema migration handles this; future tables must follow suit.
 - **`SECURITY DEFINER` functions don't go in `public`.** Put them in `internal` and `set search_path = ''`. The signup trigger function is in `internal.handle_new_auth_user()`.

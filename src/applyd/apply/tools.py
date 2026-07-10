@@ -155,8 +155,12 @@ def snapshot(page: Page) -> str:
                 f"{e['ref']}: [{e['role']}{type_part}{req}] {e['label']!r}{value}"
             )
         text = "\n".join(lines)
-        if len(text) > 8000:
-            text = text[:8000] + f"\n... [truncated, {len(text)} chars total]"
+        # Long-form ATS pages (Palantir Lever: 100+ controls) overflow 8k and
+        # the truncation makes the model stall reasoning about what it can't
+        # see (2026-07-10). 16k chars ≈ 4k tokens; with the sliding prompt
+        # cache the marginal cost is cached-read rate, i.e. negligible.
+        if len(text) > 16000:
+            text = text[:16000] + f"\n... [truncated, {len(text)} chars total]"
         return text
     except Exception as e:
         return _err(f"snapshot: {type(e).__name__}: {e}")
