@@ -31,7 +31,11 @@ from .tools import TOOL_DEFS, dispatch
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
+# The apply-loop model. Haiku 4.5 completed the July 2026 A/B (Palantir Lever,
+# 59 turns) at half Sonnet's price with the same tool semantics; form-filling
+# doesn't need Sonnet. Swap by editing this constant (must be a key in
+# db/pricing.PRICING). Sonnet remains the tailor default (tailor/render.py).
+DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 # Turn budget. A short ATS form is 12-20 tool calls, but a long Greenhouse
 # education form (Stripe: ~15 required fields, each combobox costing an
 # open+pick pair) can legitimately need 45+ and was hitting this ceiling
@@ -338,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Resolves the application row by (user_id, job_id) and hands off to
     `apply_for_user`. The `APPLYD_TEST_MODE` env var controls submit vs.
-    fill-only; the model is set via `APPLYD_APPLY_MODEL`.
+    fill-only; the model is the DEFAULT_MODEL constant above.
     """
     load_env()
 

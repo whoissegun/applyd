@@ -142,7 +142,7 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
 
     job_id: str = claimed["job_id"]
     tmp_pdf_path: str | None = None
-    model = os.environ.get("APPLYD_APPLY_MODEL", DEFAULT_MODEL)
+    model = DEFAULT_MODEL
     test_mode = os.environ.get("APPLYD_TEST_MODE", "true").lower() == "true"
 
     def _finish(
