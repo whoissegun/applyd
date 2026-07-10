@@ -9,7 +9,21 @@ from typing import Iterator
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 
-BLOCK_RESOURCE_TYPES = {"image", "media", "font"}
+# Bandwidth blocking for the remote browser, done BROWSER-SIDE via CDP
+# Network.setBlockedURLs. Do NOT replace this with page.route(): client-side
+# interception routes every request (hCaptcha assets, telemetry — dozens per
+# form) through Python over the same websocket that carries click/evaluate,
+# and that combination hangs intermittently over connect_over_cdp
+# (microsoft/playwright#11776, ~30% of runs — matched our 2-of-3 hang rate on
+# Palantir Lever, 2026-07-10). Extension patterns instead of resource types is
+# the trade-off; unextensioned images slip through at ~$8/GB pocket change.
+BLOCKED_URL_PATTERNS = [
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.avif", "*.svg", "*.ico",
+    "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
+    "*.mp4", "*.webm", "*.mp3", "*.ogg", "*.mov",
+    "*google-analytics.com*", "*googletagmanager.com*", "*doubleclick.net*",
+    "*facebook.net*", "*hotjar.com*", "*segment.io*",
+]
 
 # connect_over_cdp retry: Bright Data refuses a connect with
 # "internal server error (browser_in_use)" while a previous session under the
@@ -57,8 +71,9 @@ def brightdata_cdp_url() -> str:
 def brightdata_page(block_heavy: bool = True) -> Iterator[Page]:
     """Open a Bright Data Scraping Browser page.
 
-    `block_heavy=True` aborts image/media/font requests to cut proxy bandwidth.
-    Leaves HTML/CSS/JS/XHR alone since reCAPTCHA + form SDKs need them.
+    `block_heavy=True` blocks image/media/font URLs browser-side (CDP
+    Network.setBlockedURLs) to cut proxy bandwidth. Leaves HTML/CSS/JS/XHR
+    alone since reCAPTCHA + form SDKs need them.
     """
     with sync_playwright() as p:
         url = brightdata_cdp_url()
@@ -88,14 +103,20 @@ def brightdata_page(block_heavy: bool = True) -> Iterator[Page]:
             )
             page = context.new_page()
             if block_heavy:
-                page.route(
-                    "**/*",
-                    lambda route: (
-                        route.abort()
-                        if route.request.resource_type in BLOCK_RESOURCE_TYPES
-                        else route.continue_()
-                    ),
-                )
+                # Best-effort: blocking is a bandwidth optimization, never
+                # worth failing the apply over.
+                try:
+                    cdp = context.new_cdp_session(page)
+                    cdp.send("Network.enable")
+                    cdp.send(
+                        "Network.setBlockedURLs", {"urls": BLOCKED_URL_PATTERNS}
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(
+                        f"⚠ Network.setBlockedURLs failed ({type(e).__name__}: "
+                        f"{str(e)[:120]}); continuing without resource blocking",
+                        file=sys.stderr,
+                    )
             yield page
         finally:
             browser.close()
