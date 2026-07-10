@@ -25,13 +25,17 @@ from openai import OpenAI
 
 from ..config import load_env
 from ..llm_errors import is_transient_llm_error
-from .browser import brightdata_page
+from .browser import BrowserConnectError, brightdata_page
 from .prompts import SYSTEM_PROMPT, build_user_blocks
 from .tools import TOOL_DEFS, dispatch
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
+# The apply-loop model. Haiku 4.5 completed the July 2026 A/B (Palantir Lever,
+# 59 turns) at half Sonnet's price with the same tool semantics; form-filling
+# doesn't need Sonnet. Swap by editing this constant (must be a key in
+# db/pricing.PRICING). Sonnet remains the tailor default (tailor/render.py).
+DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
 # Turn budget. A short ATS form is 12-20 tool calls, but a long Greenhouse
 # education form (Stripe: ~15 required fields, each combobox costing an
 # open+pick pair) can legitimately need 45+ and was hitting this ceiling
@@ -166,6 +170,27 @@ def run_apply(
     client = _make_client()
     messages: list[dict[str, Any]] = [system_message, user_message]
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    actual_cost_usd = 0.0
+
+    # OpenRouter request extras, all cost levers:
+    # - top-level cache_control = "automatic caching": OpenRouter slides the
+    #   cache breakpoint to the newest message every request, so the entire
+    #   growing tool-loop transcript is read back at the cached rate (0.1x)
+    #   instead of full input price each turn. Without this only the static
+    #   system/profile prefix was cached and input cost grew quadratically
+    #   with turn count (83% of all apply spend, July 2026 audit).
+    # - usage.include: OpenRouter returns its actually-billed cost per call
+    #   (usage.cost, USD) — recorded to usage_events as ground truth against
+    #   our computed pricing.
+    # - provider pinning (Anthropic models only): the prompt cache lives at
+    #   the upstream provider; letting OpenRouter route consecutive turns to
+    #   different upstreams (Anthropic vs Vertex/Bedrock) forfeits every hit.
+    extra_body: dict[str, Any] = {
+        "cache_control": {"type": "ephemeral"},
+        "usage": {"include": True},
+    }
+    if model.startswith("anthropic/"):
+        extra_body["provider"] = {"order": ["anthropic"]}
 
     final_status: str | None = None
     final_note: str = ""
@@ -202,9 +227,11 @@ def run_apply(
                     tools=TOOL_DEFS,
                     tool_choice=tool_choice,
                     max_tokens=4096,
+                    extra_body=extra_body,
                 )
 
                 _accumulate_tokens(tokens, resp.usage)
+                actual_cost_usd += getattr(resp.usage, "cost", 0.0) or 0.0
                 turns_done = turn + 1
 
                 asst = resp.choices[0].message
@@ -248,10 +275,12 @@ def run_apply(
                 final_status = "failed"
                 final_note = f"hit MAX_TURNS={MAX_TURNS} without report_done"
     except Exception as e:
-        # Transient infra (no credits, rate limit, provider outage) is not this
-        # job's fault — surface a distinct status so the caller requeues instead
-        # of burning the application to terminal 'failed'.
-        final_status = "infra_error" if is_transient_llm_error(e) else "failed"
+        # Transient infra (no credits, rate limit, provider outage, Bright Data
+        # refusing the CDP connect) is not this job's fault — surface a distinct
+        # status so the caller requeues instead of burning the application to
+        # terminal 'failed'. BrowserConnectError fires before any LLM spend.
+        transient = is_transient_llm_error(e) or isinstance(e, BrowserConnectError)
+        final_status = "infra_error" if transient else "failed"
         final_note = f"runner exception: {type(e).__name__}: {str(e)[:200]}"
         print(f"✗ runner exception: {type(e).__name__}: {e}", file=sys.stderr)
     finally:
@@ -269,6 +298,7 @@ def run_apply(
         "status": final_status or "failed",
         "note": final_note,
         "tokens": tokens,
+        "actual_cost_usd": actual_cost_usd,
         "browser_mb": 1.5,
         "turn_count": turns_done,
         "tool_call_counts": tool_call_counts,
@@ -281,13 +311,17 @@ def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:
         return
     tokens["input"] += getattr(usage, "prompt_tokens", 0) or 0
     tokens["output"] += getattr(usage, "completion_tokens", 0) or 0
-    # OpenAI / OpenRouter standard: prompt_tokens_details.cached_tokens (read).
+    # OpenAI / OpenRouter standard: prompt_tokens_details.cached_tokens (read)
+    # and prompt_tokens_details.cache_write_tokens (write, OpenRouter name).
     details = getattr(usage, "prompt_tokens_details", None)
     if details is not None:
         cached = getattr(details, "cached_tokens", 0) or 0
+        written = getattr(details, "cache_write_tokens", 0) or 0
         tokens["cache_read"] += cached
-        # Subtract cached from input so "fresh input" reflects only un-cached.
-        tokens["input"] -= cached
+        tokens["cache_write"] += written
+        # OpenRouter's prompt_tokens is the TOTAL input (cached reads and cache
+        # writes included). Subtract both so "input" is only full-price tokens.
+        tokens["input"] -= cached + written
     # Anthropic-specific (when routed via OpenRouter to Anthropic, sometimes surfaces here):
     tokens["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
     tokens["cache_write"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
@@ -308,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
 
     Resolves the application row by (user_id, job_id) and hands off to
     `apply_for_user`. The `APPLYD_TEST_MODE` env var controls submit vs.
-    fill-only; the model is set via `APPLYD_APPLY_MODEL`.
+    fill-only; the model is the DEFAULT_MODEL constant above.
     """
     load_env()
 

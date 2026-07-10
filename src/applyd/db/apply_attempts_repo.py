@@ -37,11 +37,18 @@ class ApplyAttemptsRepo:
 
     def count_for_application(self, application_id: str) -> int:
         """How many attempts exist for this application (including open ones).
-        Used to cap unbounded retries on a persistently-failing row."""
+        Used to cap unbounded retries on a persistently-failing row.
+
+        Attempts closed with an 'infra:' reason (provider outage, no credits,
+        Bright Data busy) don't count — they say nothing about the job, and
+        counting them let a transient outage exhaust a healthy application's
+        retry budget (one row burned 17 attempts on browser_in_use, 2026-07-07).
+        """
         res = (
             self.client.table("apply_attempts")
             .select("id", count="exact", head=True)
             .eq("application_id", application_id)
+            .or_("reason.is.null,reason.not.like.infra:*")
             .execute()
         )
         return res.count or 0

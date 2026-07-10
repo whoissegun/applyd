@@ -112,7 +112,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 - **Session-scoped `board_cache`.** When many jobs share a board, fetch that board once per run.
 
 ### LLM provider
-- **Everything runs through OpenRouter (OpenAI-compatible API), one `OPENROUTER_API_KEY`.** Tailor/apply use `anthropic/claude-sonnet-4-6`; classify/match use `anthropic/claude-haiku-4.5`; embeddings use `openai/text-embedding-3-small`. Per-call model swap is free (`--model deepseek/...` etc.). Prompt caching still works via `cache_control` passthrough. Pricing keys live in `db/pricing.py` (canonical Anthropic ids double as OpenRouter slugs). The Anthropic SDK was fully removed June 2026 — don't reintroduce direct `anthropic.Anthropic()` calls.
+- **Everything runs through OpenRouter (OpenAI-compatible API), one `OPENROUTER_API_KEY`.** Tailor uses `anthropic/claude-sonnet-4-6`; apply uses `anthropic/claude-haiku-4.5` (code constant `apply/runner.py::DEFAULT_MODEL`, not an env var — A/B'd July 2026, half Sonnet's price, same tool semantics); classify/match use `anthropic/claude-haiku-4.5`; embeddings use `openai/text-embedding-3-small`. Per-call model swap is free (`--model deepseek/...` etc.). Prompt caching still works via `cache_control` passthrough. Pricing keys live in `db/pricing.py` (canonical Anthropic ids double as OpenRouter slugs). The Anthropic SDK was fully removed June 2026 — don't reintroduce direct `anthropic.Anthropic()` calls.
 
 ### Matching (cost-critical)
 - **Two-stage funnel, not one-LLM-call-per-job.** pgvector embeddings on `jobs.embedding` (classification text) + `user_profiles.embedding` (resume + LLM-extracted *positive* targets — exclusions dropped so negation doesn't pull the vector wrong). `rank_jobs_for_user()` ranks unseen jobs by cosine; the Haiku judge runs only on the top slice. A backlog stop-rule (`target_backlog`, default 30) halts judging once a user's apply queue is primed — spend tracks applications, not catalog size. Resume is the only hard requirement; `profile_answers` is optional.
@@ -200,6 +200,10 @@ python -m applyd.apply.runner <job_id> [--model <slug>] [--profile <path>] [--te
 - **Failures/skips only**: no screenshots or transcripts on success. ATS confirmation emails are the receipt of record.
 - **Job-level skip verdicts propagate to the shared catalog** (`apply/saas.py::_propagate_job_gate`): `gated:dead_link` → `jobs.active=false`; login/signup walls, mandatory cover letters, coding challenges → `jobs.apply_gate` (ranker filters both). Captcha and profile-specific skips (`missing_info`, `jd_mismatch`) stay per-user.
 - **OpenRouter 403 "Key limit exceeded" is transient** (`llm_errors.py`): it's account-wide like 402 no-credits — workers requeue + back off. Plain 403s stay terminal.
+- **Sliding prompt cache via OpenRouter automatic caching** (July 2026): the runner sends top-level `cache_control: {"type":"ephemeral"}` + pins `provider: {order: ["anthropic"]}` for `anthropic/*` models. Before this, only the static prefix was cached and the growing tool-loop transcript was re-sent at full price every turn — 83% of all apply spend. Don't remove the provider pin: the cache lives at the upstream provider, and cross-provider routing forfeits every hit. Keep `TOOL_DEFS` byte-stable across turns (any change invalidates the whole cache).
+- **`usage_events.metadata.openrouter_cost_usd`** is what OpenRouter actually billed (from `usage: {include: true}`); `cost_cents` is our computed figure (now includes cache writes at 1.25×). Aggregate via the `usage_daily` / `usage_monthly` / `apply_spend_by_outcome` views.
+- **CDP connect failures are transient infra, not job failures.** Bright Data refuses reconnects with `browser_in_use` for up to ~5 min after an unclean worker death (no remote kill API exists). `brightdata_page` retries once, then raises `BrowserConnectError` → requeue + worker backoff. Attempts closed with an `infra:` reason are excluded from the `MAX_APPLY_ATTEMPTS` cap.
+- **`hit MAX_TURNS` failures are terminal on the first hit** — retrying the same form with the same model fails identically at ~$1/run (one app burned $3.30 across three retries before this rule).
 
 Multi-tenant work the runner needs:
 - Thread a `user_id` parameter through `runner.py`'s entry.
@@ -220,7 +224,7 @@ Required env vars (`.env` at repo root, auto-loaded by `applyd.config.load_env`)
 - `SUPABASE_URL` — project HTTPS gateway (`https://<ref>.supabase.co`)
 - `SUPABASE_PUBLISHABLE_KEY` — replaces legacy `anon`; safe to expose in frontends
 - `SUPABASE_SECRET_KEY` — replaces legacy `service_role`; server/workers only, bypasses RLS
-  - tailor/apply default `anthropic/claude-sonnet-4-6`; classify/match `anthropic/claude-haiku-4.5`; embeddings `openai/text-embedding-3-small`
+  - tailor default `anthropic/claude-sonnet-4-6`; apply `anthropic/claude-haiku-4.5` (code constant, see LLM provider section); classify/match `anthropic/claude-haiku-4.5`; embeddings `openai/text-embedding-3-small`
 - `APPLYD_TEST_MODE=true|false` — when `true`, the apply runner stops short of submitting. Default to `true` during scale-up
 
 Optional:
