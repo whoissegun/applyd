@@ -152,11 +152,13 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         browser_mb: float = 0.0,
         turn_count: int | None = None,
         tool_call_counts: dict[str, int] | None = None,
+        actual_cost_usd: float | None = None,
     ) -> dict[str, Any]:
         tokens = tokens or {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         prompt = tokens.get("input", 0)
         completion = tokens.get("output", 0)
         cached = tokens.get("cache_read", 0)
+        written = tokens.get("cache_write", 0)
 
         try:
             cost_cents = cost_cents_for_apply(
@@ -164,6 +166,7 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 cached_tokens=cached,
+                cache_write_tokens=written,
                 browser_mb=browser_mb,
             )
         except ValueError:
@@ -189,6 +192,10 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
                 "prompt_tokens": prompt,
                 "completion_tokens": completion,
                 "cached_tokens": cached,
+                "cache_write_tokens": written,
+                # What OpenRouter says it actually billed us (USD) — ground
+                # truth to audit our computed cost_cents against.
+                "openrouter_cost_usd": actual_cost_usd,
                 "browser_mb": browser_mb,
                 "test_mode": test_mode,
                 "attempt_id": attempt_id,
@@ -272,10 +279,15 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
 
         status_raw = result.get("status", "failed")
         if status_raw == "infra_error":
-            # Account/provider-wide failure inside the tool-use loop: requeue to
+            # Account/provider-wide failure inside the tool-use loop (LLM
+            # credits/outage, Bright Data refusing the CDP connect): requeue to
             # 'tailored' (re-appliable) and signal the worker to back off rather
-            # than burn the application to terminal 'failed'.
+            # than burn the application to terminal 'failed'. Close the attempt
+            # row with an 'infra:' reason — these rows don't count toward the
+            # MAX_APPLY_ATTEMPTS cap (see count_for_application) and leaving
+            # them 'pending' forever polluted the table (106 rows by July 2026).
             note = result.get("note") or "apply infra error"
+            attempts.end(attempt_id, status="failed", reason=f"infra: {note}")
             apps.requeue(application_id, "tailored", reason=f"infra: {note}")
             logger.warning("[apply] infra error on app %s, requeued: %s", application_id, note)
             raise TransientInfraError(f"apply: {note}")
@@ -292,9 +304,21 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
             note.startswith("gated:") or note.startswith("skipped:")
         ):
             status = "skipped"
+        # A MAX_TURNS burnout is terminal on the FIRST hit: retrying the same
+        # form with the same model fails identically, and each retry is a full
+        # paid run (one application burned $3.30 across three 40-turn retries,
+        # July 2026). Flip the model or the form handling before re-trying.
+        if status == "failed" and note and note.startswith("hit MAX_TURNS"):
+            status = "skipped"
+            note = f"max_turns_exhausted: {note}"
+            logger.warning(
+                "[apply] app %s hit MAX_TURNS — terminal skip, no retries",
+                application_id,
+            )
         # Hard backstop: no failure class should retry unbounded. After
         # MAX_APPLY_ATTEMPTS attempts on this application, force it terminal
-        # regardless of reason. (This attempt is already counted.)
+        # regardless of reason. (This attempt is already counted; infra-reason
+        # attempts are excluded — transient outages say nothing about the job.)
         if status == "failed":
             prior = attempts.count_for_application(application_id)
             if prior >= MAX_APPLY_ATTEMPTS:
@@ -312,6 +336,7 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
             browser_mb=float(result.get("browser_mb", 1.5)),
             turn_count=result.get("turn_count"),
             tool_call_counts=result.get("tool_call_counts") or None,
+            actual_cost_usd=result.get("actual_cost_usd"),
         )
 
     except TransientInfraError:

@@ -25,27 +25,52 @@ from typing import TypedDict
 
 
 class _ModelPrice(TypedDict):
-    input_cents_per_mtok: float       # cents per 1M input tokens
-    output_cents_per_mtok: float      # cents per 1M output tokens
+    input_cents_per_mtok: float        # cents per 1M input tokens
+    output_cents_per_mtok: float       # cents per 1M output tokens
     cached_read_cents_per_mtok: float  # cents per 1M cached-read input tokens
+    cache_write_cents_per_mtok: float  # cents per 1M cache-write input tokens
 
 
 # $1 = 100 cents; $3/Mtok = 300 cents/Mtok.
+# Anthropic bills cache writes at 1.25x input (5-min TTL). OpenAI and Google
+# cache automatically with free writes — their write rate is 0.
 PRICING: dict[str, _ModelPrice] = {
     "claude-sonnet-4-6": {
         "input_cents_per_mtok": 300.0,
         "output_cents_per_mtok": 1500.0,
         "cached_read_cents_per_mtok": 30.0,
+        "cache_write_cents_per_mtok": 375.0,
     },
     "anthropic/claude-sonnet-4-6": {
         "input_cents_per_mtok": 300.0,
         "output_cents_per_mtok": 1500.0,
         "cached_read_cents_per_mtok": 30.0,
+        "cache_write_cents_per_mtok": 375.0,
     },
     "claude-haiku-4-5": {
         "input_cents_per_mtok": 100.0,
         "output_cents_per_mtok": 500.0,
         "cached_read_cents_per_mtok": 10.0,
+        "cache_write_cents_per_mtok": 125.0,
+    },
+    "anthropic/claude-haiku-4.5": {
+        "input_cents_per_mtok": 100.0,
+        "output_cents_per_mtok": 500.0,
+        "cached_read_cents_per_mtok": 10.0,
+        "cache_write_cents_per_mtok": 125.0,
+    },
+    # A/B candidates for the apply loop (July 2026 OpenRouter list prices).
+    "openai/gpt-5-mini": {
+        "input_cents_per_mtok": 25.0,
+        "output_cents_per_mtok": 200.0,
+        "cached_read_cents_per_mtok": 2.5,
+        "cache_write_cents_per_mtok": 0.0,
+    },
+    "google/gemini-2.5-flash": {
+        "input_cents_per_mtok": 30.0,
+        "output_cents_per_mtok": 250.0,
+        "cached_read_cents_per_mtok": 7.5,
+        "cache_write_cents_per_mtok": 0.0,
     },
 }
 
@@ -66,6 +91,7 @@ def _llm_cost_cents(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int,
+    cache_write_tokens: int = 0,
 ) -> float:
     if model not in PRICING:
         raise ValueError(
@@ -74,15 +100,18 @@ def _llm_cost_cents(
         )
     p = PRICING[model]
     # Anthropic-style accounting: prompt_tokens is the *uncached* input count;
-    # cached_tokens is reported separately and billed at the cached read rate.
-    # If a caller double-counts (passes prompt = total, then also cached) we'll
-    # over-bill — that's on them; the SDK exposes the split cleanly.
+    # cached_tokens (reads) and cache_write_tokens are reported separately and
+    # billed at their own rates. If a caller double-counts (passes prompt =
+    # total, then also cached) we'll over-bill — that's on them; the SDK
+    # exposes the split cleanly.
     fresh_input = max(prompt_tokens, 0)
     cached = max(cached_tokens, 0)
+    written = max(cache_write_tokens, 0)
     output = max(completion_tokens, 0)
     return (
         fresh_input * p["input_cents_per_mtok"] / 1_000_000
         + cached * p["cached_read_cents_per_mtok"] / 1_000_000
+        + written * p["cache_write_cents_per_mtok"] / 1_000_000
         + output * p["output_cents_per_mtok"] / 1_000_000
     )
 
@@ -92,10 +121,13 @@ def cost_cents_for_tailor(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> int:
     """Cost in integer cents for one tailor call. Raises ValueError on unknown model."""
     return _round_cents(
-        _llm_cost_cents(model, prompt_tokens, completion_tokens, cached_tokens)
+        _llm_cost_cents(
+            model, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens
+        )
     )
 
 
@@ -104,6 +136,7 @@ def cost_cents_for_apply(
     prompt_tokens: int,
     completion_tokens: int,
     cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
     browser_mb: float = 1.5,
 ) -> int:
     """Cost in integer cents for one apply call (LLM + Bright Data bandwidth).
@@ -111,6 +144,8 @@ def cost_cents_for_apply(
     browser_mb is per-apply bandwidth used by the Scraping Browser; default
     ~1.5MB matches observed averages on Greenhouse/Lever forms.
     """
-    llm = _llm_cost_cents(model, prompt_tokens, completion_tokens, cached_tokens)
+    llm = _llm_cost_cents(
+        model, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens
+    )
     bandwidth = max(browser_mb, 0.0) / 1024.0 * BRIGHTDATA_CENTS_PER_GB
     return _round_cents(llm + bandwidth)
