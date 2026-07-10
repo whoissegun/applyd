@@ -295,6 +295,12 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         # never originates here; "gated:*" notes come back on `status='skipped'`).
         status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
         note = result.get("note") or None
+        # Some models (Haiku 4.5, observed 2026-07-10) put the gated/skipped
+        # string in report_done's STATUS field and plain English in note.
+        # Without this it coerces to 'failed' → re-claimable → paid retries.
+        if status == "failed" and status_raw.startswith(("gated:", "skipped:")):
+            status = "skipped"
+            note = f"{status_raw} | {note}" if note else status_raw
         # A gated/skipped verdict is terminal by definition. The runner
         # sometimes returns one as 'failed' (e.g. it filled the form but a
         # captcha wall blocked the final submit). Leaving it 'failed' is a bug:
