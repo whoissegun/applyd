@@ -427,7 +427,12 @@ def submit(page: Page, ref: str, test_mode: bool) -> str:
         return _ok(f"test_mode=true; would have clicked {ref}")
     try:
         start_url = page.url
-        _ref_locator(page, ref).click(timeout=10000)
+        # Overlay fallback matters MOST here: Lever renders its invisible
+        # hCaptcha widget over the submit button, so a bare click times out
+        # (burned a fully-filled Palantir form, 2026-07-10). The JS-click
+        # fallback fires the form's submit handler, which calls
+        # hcaptcha.execute() — the captcha poll below then handles resolution.
+        _click_with_overlay_fallback(page, ref)
 
         state = page.evaluate(_CAPTCHA_STATE_JS)
         if not state.get("present"):
