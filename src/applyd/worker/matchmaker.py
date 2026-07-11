@@ -51,10 +51,34 @@ _stop = False
 # the ranking tail is junk — stop paying to reject paralegal roles and wait
 # for new discovery. In-memory is fine: a worker restart costs one extra
 # barren sweep (~1-2 batched calls), not a loop.
+#
+# The cooldown clears EARLY when new classified jobs land in the catalog:
+# _barren_catalog_mark remembers the newest jobs.enriched_at at the moment the
+# cooldown was set, and tick_once lifts the cooldown once the high-water mark
+# moves. Without this, a big ingest right after a barren sweep sat invisible
+# for 6h (2026-07-11: 2,475 fresh jobs, pending=0 until a manual restart).
 _barren_until: dict[str, float] = {}
+_barren_catalog_mark: dict[str, str] = {}
 BARREN_COOLDOWN_SECONDS = float(
     os.environ.get("APPLYD_MATCHMAKER_BARREN_COOLDOWN", str(6 * 3600))
 )
+
+
+def _catalog_high_water(sb) -> str | None:
+    """Newest enriched_at among active, classified jobs — the 'has anything
+    new arrived' signal for cooldown resets. ISO strings from PostgREST are
+    lexicographically comparable."""
+    res = (
+        sb.table("jobs")
+        .select("enriched_at")
+        .eq("active", True)
+        .not_.is_("classification", "null")
+        .not_.is_("enriched_at", "null")
+        .order("enriched_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0]["enriched_at"] if res.data else None
 
 # Seniority levels no applyd user (early-career SWE/ML) can clear, per the
 # classifier's own seniority_signal. Free rejects — the classification was
@@ -307,11 +331,21 @@ def tick_once(batch_limit: int = 15, workers: int = 8, target_backlog: int = 30)
     )
     users = [u for u in users if (u.get("profile_answers") or "").strip()]
     total = 0
+    high_water = _catalog_high_water(sb) if _barren_until else None
     for u in users:
         if _stop:
             break
         if time.time() < _barren_until.get(u["id"], 0.0):
-            continue
+            mark = _barren_catalog_mark.get(u["id"], "")
+            if high_water and high_water > mark:
+                _barren_until.pop(u["id"], None)
+                _barren_catalog_mark.pop(u["id"], None)
+                logger.info(
+                    "matchmaker: user %s cooldown lifted — new classified jobs "
+                    "since %s", u["id"], mark or "(unknown)",
+                )
+            else:
+                continue
         counts = match_for_user(
             u["id"], batch_limit=batch_limit, workers=workers,
             target_backlog=target_backlog,
@@ -322,9 +356,10 @@ def tick_once(batch_limit: int = 15, workers: int = 8, target_backlog: int = 30)
         )
         if judged > 0 and counts["accepted"] + counts["borderline"] == 0:
             _barren_until[u["id"]] = time.time() + BARREN_COOLDOWN_SECONDS
+            _barren_catalog_mark[u["id"]] = _catalog_high_water(sb) or ""
             logger.info(
                 "matchmaker: user %s barren sweep (judged=%d, 0 accepts) — "
-                "cooling down %.1fh",
+                "cooling down %.1fh (or until new classified jobs land)",
                 u["id"], judged, BARREN_COOLDOWN_SECONDS / 3600,
             )
         total += judged
