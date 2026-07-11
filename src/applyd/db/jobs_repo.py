@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Iterator, Optional
 
+from postgrest.exceptions import APIError
 from supabase import Client
 
 from ..discovery.routing import detect_gate
@@ -104,9 +105,12 @@ class JobsRepo:
     # Both chunk sizes exist because big boards break bulk writes two ways:
     # the existing-ids check is a GET whose querystring grows with every id
     # (SimplifyJobs' ~2.5k batch exceeded the URL limit), and a single huge
-    # upsert can trip the Postgres statement timeout (Anthropic's board did).
+    # upsert can trip the Postgres statement timeout (Anthropic's board did;
+    # by July 2026 even 200-row chunks of raw_payload-heavy rows did — see
+    # _upsert_rows' adaptive halving).
     _SELECT_CHUNK = 100
-    _UPSERT_CHUNK = 200
+    _UPSERT_CHUNK = 100
+    _UPSERT_CHUNK_MIN = 10
 
     def upsert(self, incoming: Iterable[Job]) -> tuple[int, int]:
         """Upsert a batch of jobs. Returns (new, updated)."""
@@ -135,11 +139,28 @@ class JobsRepo:
         new = sum(1 for r in rows if r["id"] not in existing_ids)
         updated = len(rows) - new
 
-        for i in range(0, len(rows), self._UPSERT_CHUNK):
-            self.client.table("jobs").upsert(
-                rows[i : i + self._UPSERT_CHUNK], on_conflict="id"
-            ).execute()
+        self._upsert_rows(rows)
         return new, updated
+
+    def _upsert_rows(self, rows: list[dict]) -> None:
+        """Chunked upsert that halves the chunk size on Postgres statement
+        timeout (57014) instead of dying. Discovery batches vary wildly in
+        row weight (raw_payload jsonb); a fixed chunk that's fine for Lever
+        rows times out on SimplifyJobs' heavy ones (2026-07-11: the whole
+        ~2.5k-job source was lost to one timeout).
+        """
+        size = self._UPSERT_CHUNK
+        i = 0
+        while i < len(rows):
+            chunk = rows[i : i + size]
+            try:
+                self.client.table("jobs").upsert(chunk, on_conflict="id").execute()
+                i += len(chunk)
+            except APIError as e:
+                if getattr(e, "code", None) == "57014" and size > self._UPSERT_CHUNK_MIN:
+                    size = max(size // 2, self._UPSERT_CHUNK_MIN)
+                    continue
+                raise
 
     def mark_enriched(
         self,
