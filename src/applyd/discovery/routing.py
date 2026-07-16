@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+import httpx
 
 
 ATS_DOMAINS = {
@@ -115,7 +118,7 @@ def canonical_ats_url(job_id: str) -> Optional[str]:
     return template.format(slug=slug, job_id=jid)
 
 
-def preferred_apply_url(job_id: str, display_url: str) -> str:
+def preferred_apply_url(job_id: str, display_url: str, company: str | None = None) -> str:
     """The best URL for the apply agent to navigate to.
 
     Greenhouse's stored/display URL is often a company-careers wrapper
@@ -125,13 +128,74 @@ def preferred_apply_url(job_id: str, display_url: str) -> str:
     (verified on self-hosted Stripe and direct-board Anthropic), and 404s for
     dead postings. Route greenhouse applies straight to it; everything else
     keeps its display URL (lever/ashby pages already land on the form).
+
+    Always target job-boards.greenhouse.io, never legacy boards.greenhouse.io
+    or a company-site wrapper: Bright Data robots.txt-blocks the legacy host
+    (error `brob`) and compliance-blocks some company sites outright
+    (stripe.com needs KYC) — both crashed the apply worker on 2026-07-11.
+    Aggregator rows (simplifyjobs:*) carry those blocked URLs, so this also
+    rewrites by URL shape, deriving the board slug from `for=`, the path, or
+    a company-name guess verified against the free Greenhouse API.
     """
     parts = job_id.split(":", 2)
     if len(parts) == 3 and parts[0] == "greenhouse":
         _, slug, jid = parts
         if slug and jid:
             return f"https://job-boards.greenhouse.io/embed/job_app?token={jid}&for={slug}"
-    return display_url
+
+    rewritten = _greenhouse_rewrite(display_url, company)
+    return rewritten or display_url
+
+
+def _greenhouse_rewrite(display_url: str, company: str | None) -> Optional[str]:
+    """Rewrite any greenhouse-shaped URL to the job-boards embed form.
+
+    Returns None when the URL isn't greenhouse-shaped or the board slug can't
+    be established — caller keeps the original URL (the agent then gates it).
+    """
+    try:
+        parsed = urlparse(display_url)
+        query = parse_qs(parsed.query)
+    except ValueError:
+        return None
+    host = parsed.hostname or ""
+
+    token = (query.get("token") or query.get("gh_jid") or [None])[0]
+    slug = (query.get("for") or [None])[0]
+    if not token and host.endswith("greenhouse.io"):
+        # boards.greenhouse.io/{slug}/jobs/{id}
+        path = [p for p in parsed.path.split("/") if p]
+        if len(path) >= 3 and path[1] == "jobs":
+            slug, token = path[0], path[2]
+    if not token or not token.isdigit():
+        return None
+    # Only rewrite URLs that are actually greenhouse-backed: greenhouse hosts,
+    # or a company-site wrapper carrying gh_jid.
+    if not host.endswith("greenhouse.io") and "gh_jid" not in query:
+        return None
+
+    if not slug and company:
+        # Best-effort slug guess ("Jump Trading" -> "jumptrading"), verified
+        # against the free boards API so a wrong guess can't send the agent
+        # to another company's form.
+        guess = re.sub(r"[^a-z0-9]", "", company.lower())
+        if guess and _greenhouse_posting_exists(guess, token):
+            slug = guess
+    if not slug:
+        return None
+    return f"https://job-boards.greenhouse.io/embed/job_app?token={token}&for={slug}"
+
+
+def _greenhouse_posting_exists(slug: str, token: str) -> bool:
+    try:
+        resp = httpx.get(
+            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{token}",
+            timeout=10.0,
+            follow_redirects=True,
+        )
+        return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 def parse_ats_url(url: str) -> Optional[tuple[str, str, str]]:
