@@ -19,7 +19,7 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable
 
 from openai import OpenAI
 
@@ -132,12 +132,20 @@ def run_apply(
     tailor_metadata_json: str = "",
     model: str = DEFAULT_MODEL,
     test_mode: bool | None = None,
+    on_verdict: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Programmatic apply entry — stateless, no I/O outside the browser+LLM.
 
     Returns a dict with keys: status, note, tokens, browser_mb. The caller
     persists results (`applyd.apply.saas.apply_for_user` handles this for the
     multi-tenant flow).
+
+    `on_verdict` fires with the full result dict the moment report_done lands —
+    BEFORE the browser closes. browser.close() over a stalled CDP socket can
+    hang past the hard watchdog, and a verdict that dies unpersisted gets
+    requeued — for status='applied' that means re-submitting a form a company
+    already received (near-miss, 2026-07-11 crash). Persist in the callback;
+    the return value is the same dict.
     """
     load_env()
     if test_mode is None:
@@ -197,6 +205,19 @@ def run_apply(
     turns_done: int = 0
     tool_call_counts: dict[str, int] = {}
     nudged = False
+
+    def _result() -> dict[str, Any]:
+        # browser_mb: we don't currently meter Bright Data bandwidth per-call.
+        # 1.5 MB is the observed average on Greenhouse/Lever forms — pricing.py.
+        return {
+            "status": final_status or "failed",
+            "note": final_note,
+            "tokens": tokens,
+            "actual_cost_usd": actual_cost_usd,
+            "browser_mb": 1.5,
+            "turn_count": turns_done,
+            "tool_call_counts": tool_call_counts,
+        }
 
     print(
         f"→ direct-apply [{company}] {title} ({job_id})\n"
@@ -290,6 +311,19 @@ def run_apply(
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
                 if done:
+                    # Verdict is final — hand it to the caller for persistence
+                    # while the browser is still open. A persist error must not
+                    # crash a finished run: fall through and let the caller's
+                    # post-return path retry the write.
+                    if on_verdict is not None:
+                        try:
+                            on_verdict(_result())
+                        except Exception as e:  # noqa: BLE001
+                            print(
+                                f"⚠ on_verdict persist failed ({type(e).__name__}: "
+                                f"{str(e)[:200]}); will persist after browser close",
+                                file=sys.stderr,
+                            )
                     break
             else:
                 final_status = "failed"
@@ -312,17 +346,7 @@ def run_apply(
         f"cache_read={tokens['cache_read']} cache_write={tokens['cache_write']}",
         file=sys.stderr,
     )
-    # browser_mb: we don't currently meter Bright Data bandwidth per-call.
-    # 1.5 MB is the observed average on Greenhouse/Lever forms — see pricing.py.
-    return {
-        "status": final_status or "failed",
-        "note": final_note,
-        "tokens": tokens,
-        "actual_cost_usd": actual_cost_usd,
-        "browser_mb": 1.5,
-        "turn_count": turns_done,
-        "tool_call_counts": tool_call_counts,
-    }
+    return _result()
 
 
 def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:

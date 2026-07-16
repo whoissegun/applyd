@@ -261,6 +261,85 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         except (TypeError, ValueError):
             metadata_json = "{}"
 
+        def _handle_result(result: dict[str, Any]) -> dict[str, Any]:
+            status_raw = result.get("status", "failed")
+            if status_raw == "infra_error":
+                # Account/provider-wide failure inside the tool-use loop (LLM
+                # credits/outage, Bright Data refusing the CDP connect): requeue to
+                # 'tailored' (re-appliable) and signal the worker to back off rather
+                # than burn the application to terminal 'failed'. Close the attempt
+                # row with an 'infra:' reason — these rows don't count toward the
+                # MAX_APPLY_ATTEMPTS cap (see count_for_application) and leaving
+                # them 'pending' forever polluted the table (106 rows by July 2026).
+                note = result.get("note") or "apply infra error"
+                attempts.end(attempt_id, status="failed", reason=f"infra: {note}")
+                apps.requeue(application_id, "tailored", reason=f"infra: {note}")
+                logger.warning("[apply] infra error on app %s, requeued: %s", application_id, note)
+                raise TransientInfraError(f"apply: {note}")
+            # The runner emits a couple of values not in our terminal set ("lost_race"
+            # never originates here; "gated:*" notes come back on `status='skipped'`).
+            status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
+            note = result.get("note") or None
+            # Some models (Haiku 4.5, observed 2026-07-10) put the gated/skipped
+            # string in report_done's STATUS field and plain English in note.
+            # Without this it coerces to 'failed' → re-claimable → paid retries.
+            if status == "failed" and status_raw.startswith(("gated:", "skipped:")):
+                status = "skipped"
+                note = f"{status_raw} | {note}" if note else status_raw
+            # A gated/skipped verdict is terminal by definition. The runner
+            # sometimes returns one as 'failed' (e.g. it filled the form but a
+            # captcha wall blocked the final submit). Leaving it 'failed' is a bug:
+            # 'failed' is re-claimable, so the worker re-fills the whole form with
+            # paid LLM calls every cycle. Coerce to terminal 'skipped'.
+            if status == "failed" and note and (
+                note.startswith("gated:") or note.startswith("skipped:")
+            ):
+                status = "skipped"
+            # A MAX_TURNS burnout is terminal on the FIRST hit: retrying the same
+            # form with the same model fails identically, and each retry is a full
+            # paid run (one application burned $3.30 across three 40-turn retries,
+            # July 2026). Flip the model or the form handling before re-trying.
+            if status == "failed" and note and note.startswith("hit MAX_TURNS"):
+                status = "skipped"
+                note = f"max_turns_exhausted: {note}"
+                logger.warning(
+                    "[apply] app %s hit MAX_TURNS — terminal skip, no retries",
+                    application_id,
+                )
+            # Hard backstop: no failure class should retry unbounded. After
+            # MAX_APPLY_ATTEMPTS attempts on this application, force it terminal
+            # regardless of reason. (This attempt is already counted; infra-reason
+            # attempts are excluded — transient outages say nothing about the job.)
+            if status == "failed":
+                prior = attempts.count_for_application(application_id)
+                if prior >= MAX_APPLY_ATTEMPTS:
+                    status = "skipped"
+                    note = f"max_attempts_exhausted ({prior}): {note or 'repeated failure'}"
+                    logger.warning(
+                        "[apply] app %s hit attempt cap (%d) — forcing terminal skipped",
+                        application_id, prior,
+                    )
+            _propagate_job_gate(jobs, job_id, status, note)
+            return _finish(
+                status,
+                note,
+                tokens=result.get("tokens"),
+                browser_mb=float(result.get("browser_mb", 1.5)),
+                turn_count=result.get("turn_count"),
+                tool_call_counts=result.get("tool_call_counts") or None,
+                actual_cost_usd=result.get("actual_cost_usd"),
+            )
+
+        # Persist the verdict the moment report_done lands, while the browser
+        # is still open: browser.close() over a stalled CDP socket can outlive
+        # the hard watchdog, and an unpersisted 'applied' verdict gets requeued
+        # and RE-SUBMITTED (near-miss 2026-07-11). If the early persist itself
+        # errors, the runner swallows it and we persist after close instead.
+        early: dict[str, Any] = {}
+
+        def _persist_early(runner_result: dict[str, Any]) -> None:
+            early["outcome"] = _handle_result(runner_result)
+
         # 7. drive the tool-use loop. Route to the real application form, not a
         # company-careers wrapper (Stripe's gh_jid search page) — see
         # preferred_apply_url.
@@ -268,82 +347,18 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
             job_id=job.id,
             company=job.company,
             title=job.title,
-            job_url=preferred_apply_url(job.id, job.url),
+            job_url=preferred_apply_url(job.id, job.url, company=job.company),
             resume_pdf_path=tmp_pdf_path,
             profile_md=profile_md,
             resume_tex=resume_tex,
             tailor_metadata_json=metadata_json,
             model=model,
             test_mode=test_mode,
+            on_verdict=_persist_early,
         )
-
-        status_raw = result.get("status", "failed")
-        if status_raw == "infra_error":
-            # Account/provider-wide failure inside the tool-use loop (LLM
-            # credits/outage, Bright Data refusing the CDP connect): requeue to
-            # 'tailored' (re-appliable) and signal the worker to back off rather
-            # than burn the application to terminal 'failed'. Close the attempt
-            # row with an 'infra:' reason — these rows don't count toward the
-            # MAX_APPLY_ATTEMPTS cap (see count_for_application) and leaving
-            # them 'pending' forever polluted the table (106 rows by July 2026).
-            note = result.get("note") or "apply infra error"
-            attempts.end(attempt_id, status="failed", reason=f"infra: {note}")
-            apps.requeue(application_id, "tailored", reason=f"infra: {note}")
-            logger.warning("[apply] infra error on app %s, requeued: %s", application_id, note)
-            raise TransientInfraError(f"apply: {note}")
-        # The runner emits a couple of values not in our terminal set ("lost_race"
-        # never originates here; "gated:*" notes come back on `status='skipped'`).
-        status = status_raw if status_raw in {"applied", "skipped", "failed"} else "failed"
-        note = result.get("note") or None
-        # Some models (Haiku 4.5, observed 2026-07-10) put the gated/skipped
-        # string in report_done's STATUS field and plain English in note.
-        # Without this it coerces to 'failed' → re-claimable → paid retries.
-        if status == "failed" and status_raw.startswith(("gated:", "skipped:")):
-            status = "skipped"
-            note = f"{status_raw} | {note}" if note else status_raw
-        # A gated/skipped verdict is terminal by definition. The runner
-        # sometimes returns one as 'failed' (e.g. it filled the form but a
-        # captcha wall blocked the final submit). Leaving it 'failed' is a bug:
-        # 'failed' is re-claimable, so the worker re-fills the whole form with
-        # paid LLM calls every cycle. Coerce to terminal 'skipped'.
-        if status == "failed" and note and (
-            note.startswith("gated:") or note.startswith("skipped:")
-        ):
-            status = "skipped"
-        # A MAX_TURNS burnout is terminal on the FIRST hit: retrying the same
-        # form with the same model fails identically, and each retry is a full
-        # paid run (one application burned $3.30 across three 40-turn retries,
-        # July 2026). Flip the model or the form handling before re-trying.
-        if status == "failed" and note and note.startswith("hit MAX_TURNS"):
-            status = "skipped"
-            note = f"max_turns_exhausted: {note}"
-            logger.warning(
-                "[apply] app %s hit MAX_TURNS — terminal skip, no retries",
-                application_id,
-            )
-        # Hard backstop: no failure class should retry unbounded. After
-        # MAX_APPLY_ATTEMPTS attempts on this application, force it terminal
-        # regardless of reason. (This attempt is already counted; infra-reason
-        # attempts are excluded — transient outages say nothing about the job.)
-        if status == "failed":
-            prior = attempts.count_for_application(application_id)
-            if prior >= MAX_APPLY_ATTEMPTS:
-                status = "skipped"
-                note = f"max_attempts_exhausted ({prior}): {note or 'repeated failure'}"
-                logger.warning(
-                    "[apply] app %s hit attempt cap (%d) — forcing terminal skipped",
-                    application_id, prior,
-                )
-        _propagate_job_gate(jobs, job_id, status, note)
-        return _finish(
-            status,
-            note,
-            tokens=result.get("tokens"),
-            browser_mb=float(result.get("browser_mb", 1.5)),
-            turn_count=result.get("turn_count"),
-            tool_call_counts=result.get("tool_call_counts") or None,
-            actual_cost_usd=result.get("actual_cost_usd"),
-        )
+        if "outcome" in early:
+            return early["outcome"]
+        return _handle_result(result)
 
     except TransientInfraError:
         # Already requeued above; propagate so the worker backs off globally

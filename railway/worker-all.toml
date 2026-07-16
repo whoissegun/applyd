@@ -10,5 +10,8 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "python -m applyd.worker.all"
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
+# ALWAYS, not ON_FAILURE+maxRetries: the apply watchdog exits on purpose
+# (hung CDP socket) and expects a restart. maxRetries is a fixed per-deploy
+# budget, not a rolling window - 10 watchdog exits marked the July 11 deploy
+# CRASHED and the worker stayed down for days.
+restartPolicyType = "ALWAYS"
