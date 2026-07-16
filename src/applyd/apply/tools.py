@@ -14,11 +14,35 @@ silently when its DOM-shape guesses didn't match.
 """
 from __future__ import annotations
 
+import os
+import random
+import re
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
+
+
+# ── human-behavior knobs ─────────────────────────────────────────────────────
+# reCAPTCHA v3 / invisible hCaptcha score a session on mouse movement and typing
+# cadence. Instant .fill() (zero keystrokes) + a Bright Data browser that never
+# moves the pointer is a maximal bot signature — on Greenhouse that trips the
+# email-verification wall (the app is held pending a code we can't read, so it
+# never reaches the recruiter). These add cheap realism to lift the score.
+# Disable with APPLYD_HUMANIZE=false for debugging / speed.
+_HUMANIZE = os.environ.get("APPLYD_HUMANIZE", "true").lower() != "false"
+# Per-field typing cadence (ms between keystrokes); randomized per field so the
+# rhythm isn't a constant. Long values (rare — cover letters are skipped) type a
+# realistic prefix then fill the rest, so one pathological field can't blow the
+# 300s wall-clock budget.
+_TYPE_DELAY_MS = (40, 110)
+_TYPE_HUMAN_PREFIX = 40
+_TYPE_INSTANT_OVER = 120
+_THINK_BETWEEN_FIELDS = (0.25, 1.1)
+_THINK_BEFORE_SUBMIT = (0.8, 2.5)
 
 
 def _ok(msg: str) -> str:
@@ -27,6 +51,38 @@ def _ok(msg: str) -> str:
 
 def _err(msg: str) -> str:
     return f"error: {msg}"
+
+
+def _jitter(lo_hi: tuple[float, float]) -> float:
+    return random.uniform(lo_hi[0], lo_hi[1])
+
+
+def _human_hover(page: Page, loc) -> None:
+    """Move the pointer to the element along a short interpolated path. Pure
+    behavioral signal for the captcha scorer; best-effort, never raises."""
+    try:
+        box = loc.bounding_box(timeout=2000)
+    except Exception:
+        box = None
+    if not box:
+        return
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.mouse.move(x, y, steps=random.randint(6, 18))
+    time.sleep(_jitter((0.05, 0.22)))
+
+
+def _human_type(loc, value: str) -> None:
+    """Type like a person: focus with a real click, clear, then keystroke the
+    value with a jittered per-field cadence."""
+    loc.click(timeout=10000)
+    loc.fill("")  # clearing isn't a keystroke tell; keeps long re-fills cheap
+    delay = random.randint(*_TYPE_DELAY_MS)
+    if len(value) > _TYPE_INSTANT_OVER:
+        loc.press_sequentially(value[:_TYPE_HUMAN_PREFIX], delay=delay)
+        loc.press_sequentially(value[_TYPE_HUMAN_PREFIX:], delay=4)
+    else:
+        loc.press_sequentially(value, delay=delay)
 
 
 def _ref_locator(page: Page, ref: str):
@@ -175,6 +231,8 @@ def _click_with_overlay_fallback(page: Page, ref: str, timeout: int = 10000) -> 
     invisible hCaptcha over form controls, which made every radio click fail.
     """
     loc = _ref_locator(page, ref)
+    if _HUMANIZE:
+        _human_hover(page, loc)
     try:
         loc.click(timeout=timeout)
         return f"clicked {ref}"
@@ -199,7 +257,11 @@ def click(page: Page, ref: str) -> str:
 
 def fill(page: Page, ref: str, value: str) -> str:
     try:
-        _ref_locator(page, ref).fill(value, timeout=10000)
+        loc = _ref_locator(page, ref)
+        if _HUMANIZE:
+            _human_type(loc, value)
+        else:
+            loc.fill(value, timeout=10000)
         return _ok(f"filled {ref} ({len(value)} chars)")
     except Exception as e:
         return _err(f"fill {ref}: {type(e).__name__}: {e}")
@@ -207,11 +269,18 @@ def fill(page: Page, ref: str, value: str) -> str:
 
 def fill_many(page: Page, fields: list[dict[str, str]]) -> str:
     out = []
-    for f in fields:
+    for i, f in enumerate(fields):
         ref = f.get("ref", "")
         val = f.get("value", "")
         try:
-            _ref_locator(page, ref).fill(val, timeout=8000)
+            loc = _ref_locator(page, ref)
+            if _HUMANIZE:
+                _human_type(loc, val)
+                # Brief think-time between fields — but not after the last one.
+                if i < len(fields) - 1:
+                    time.sleep(_jitter(_THINK_BETWEEN_FIELDS))
+            else:
+                loc.fill(val, timeout=8000)
             out.append(f"  ok: {ref} ({len(val)} chars)")
         except Exception as e:
             out.append(f"  err: {ref} :: {type(e).__name__}: {e}")
@@ -421,12 +490,165 @@ _CAPTCHA_STATE_JS = r"""() => {
     };
 }"""
 
+# Post-submit email-verification wall (invisible-reCAPTCHA low-score fallback).
+# When Greenhouse scores a session as bot-like it doesn't hard-block — it emails
+# a one-time security code and injects an inline code field on the SAME page (no
+# navigation, no reCAPTCHA token), asking the applicant to "enter the code and
+# resubmit". Left unhandled, the old poll waited for a token/nav that never came,
+# timed out, and the model reported a phantom 'applied'. This JS both DETECTS the
+# wall and locates the code input + resubmit button (tagging them with refs) so
+# we can complete it in-session. HIGH PRECISION: require verify LANGUAGE and an
+# actual code input — a plain "thanks, check your email" page has neither.
+_VERIFY_WALL_JS = r"""() => {
+    const body = document.body ? document.body.innerText.toLowerCase() : '';
+    const phrases = [
+        'security code', 'verification code', 'enter the code',
+        'resubmit your application', 'verify your email', 'verify your identity',
+        'we sent a code', "we've sent a code", 'code we sent',
+    ];
+    const phrase = phrases.find(p => body.includes(p)) || null;
+    let input = document.querySelector(
+        'input[autocomplete="one-time-code"], input[name*="code" i], ' +
+        'input[id*="code" i], input[aria-label*="code" i], ' +
+        'input[placeholder*="code" i]'
+    );
+    if (!input) {
+        for (const lb of Array.from(document.querySelectorAll('label'))) {
+            if (/security code|verification code|\bcode\b/i.test(lb.innerText || '')) {
+                const forId = lb.getAttribute('for');
+                const cand = forId ? document.getElementById(forId) : lb.querySelector('input');
+                if (cand && cand.tagName === 'INPUT') { input = cand; break; }
+            }
+        }
+    }
+    let code_ref = null, submit_ref = null;
+    if (input) { input.setAttribute('data-applyd-ref', 'vcode'); code_ref = 'vcode'; }
+    const btn = Array.from(document.querySelectorAll('button, input[type=submit]'))
+        .find(b => /resubmit|submit|verify|confirm/i.test(b.innerText || b.value || '')
+                   && b.offsetParent !== null);
+    if (btn) { btn.setAttribute('data-applyd-ref', 'vsubmit'); submit_ref = 'vsubmit'; }
+    return { phrase: phrase, has_input: !!input, code_ref: code_ref, submit_ref: submit_ref };
+}"""
 
-def submit(page: Page, ref: str, test_mode: bool) -> str:
+
+def _detect_verification_wall(page: Page) -> dict | None:
+    """Return {phrase, code_ref, submit_ref} if the email-verification wall is
+    present, else None. Also dumps the DOM when APPLYD_DUMP_DOM_PATH is set."""
+    try:
+        st = page.evaluate(_VERIFY_WALL_JS)
+    except Exception:
+        return None
+    if not (st.get("phrase") and st.get("has_input")):
+        return None
+    dump = os.environ.get("APPLYD_DUMP_DOM_PATH")
+    if dump:
+        try:
+            with open(dump, "w") as f:
+                f.write(page.content())
+            print(f"[verify] dumped wall DOM to {dump} (url={page.url})", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[verify] dump failed: {e}", file=sys.stderr)
+    return st
+
+
+def _type_code(page: Page, loc, code: str) -> None:
+    """Type the security code as real keystrokes. Greenhouse's field is an
+    8-box OTP widget (`security-input-0..7`, each maxlength=1) that auto-advances
+    ONLY on key events — a plain .fill() would drop all but the first char, so
+    this path is keystroke-based regardless of APPLYD_HUMANIZE."""
+    loc.click(timeout=8000)
+    try:
+        loc.fill("")  # no-op on an empty OTP box; clears a single-input variant
+    except Exception:
+        pass
+    page.keyboard.type(code, delay=random.randint(55, 120))
+
+
+def complete_email_verification(page: Page, code: str, orig_ref: str | None = None) -> bool:
+    """Enter the emailed security code into the inline field and resubmit, in the
+    same live session. Returns True if the wall clears."""
+    info = _detect_verification_wall(page)
+    if not info or not info.get("code_ref"):
+        print("[verify] no code field to fill", file=sys.stderr)
+        return False
+    loc = _ref_locator(page, info["code_ref"])
+    _type_code(page, loc, code)
+    time.sleep(_jitter((0.3, 0.9)))
+    submit_ref = info.get("submit_ref") or orig_ref
+    clicked = False
+    if submit_ref:
+        try:
+            _click_with_overlay_fallback(page, submit_ref)
+            clicked = True
+        except Exception:
+            clicked = False
+    if not clicked:
+        try:
+            page.get_by_role(
+                "button", name=re.compile("resubmit|submit|verify|confirm", re.I)
+            ).first.click(timeout=8000)
+            clicked = True
+        except Exception:
+            clicked = False
+    if not clicked:
+        print("[verify] could not click resubmit", file=sys.stderr)
+        return False
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(3)
+        if _detect_verification_wall(page) is None:
+            print(f"[verify] wall cleared after code entry; url={page.url}", file=sys.stderr)
+            return True
+    print("[verify] wall still present after code entry (rejected/wrong field)", file=sys.stderr)
+    return False
+
+
+def _gated_wall_message(ref: str) -> str:
+    return (
+        f"submit {ref}: EMAIL VERIFICATION WALL detected. The ATS scored this "
+        f"session as a bot and emailed a security code to the applicant; the "
+        f"application is NOT finalized and no email reader is configured. Call "
+        f"report_done with status='gated:email_verification'."
+    )
+
+
+def _handle_wall(page: Page, ref: str, verify_ctx: dict | None, submitted_after) -> str:
+    """Wall is up. Complete it in-session if a code reader is configured;
+    otherwise report gated so the row isn't mislabeled 'applied'."""
+    reader = (verify_ctx or {}).get("code_reader")
+    company = (verify_ctx or {}).get("company")
+    if reader is None:
+        return _gated_wall_message(ref)
+    print(f"[verify] wall detected; fetching code for {company!r}", file=sys.stderr)
+    code = reader.fetch(company, submitted_after)
+    if not code:
+        return _err(
+            f"submit {ref}: email-verification wall, but no security code arrived "
+            f"in time. status='gated:email_verification'."
+        )
+    redacted = (code[:2] + "****") if len(code) > 2 else "****"
+    if complete_email_verification(page, code, orig_ref=ref):
+        return _ok(f"submitted via {ref} after email verification (code {redacted}); url={page.url}")
+    return _err(
+        f"submit {ref}: entered emailed code {redacted} but the wall did not clear. "
+        f"status='gated:email_verification'."
+    )
+
+
+def _post_submit_result(page: Page, ref: str, verify_ctx: dict | None, submitted_after) -> str:
+    if _detect_verification_wall(page) is not None:
+        return _handle_wall(page, ref, verify_ctx, submitted_after)
+    return _ok(f"submitted via {ref}; current url={page.url}")
+
+
+def submit(page: Page, ref: str, test_mode: bool, verify_ctx: dict | None = None) -> str:
     if test_mode:
         return _ok(f"test_mode=true; would have clicked {ref}")
     try:
+        if _HUMANIZE:
+            time.sleep(_jitter(_THINK_BEFORE_SUBMIT))
         start_url = page.url
+        submitted_after = datetime.now(timezone.utc)
         # Overlay fallback matters MOST here: Lever renders its invisible
         # hCaptcha widget over the submit button, so a bare click times out
         # (burned a fully-filled Palantir form, 2026-07-10). The JS-click
@@ -434,26 +656,31 @@ def submit(page: Page, ref: str, test_mode: bool) -> str:
         # hcaptcha.execute() — the captcha poll below then handles resolution.
         _click_with_overlay_fallback(page, ref)
 
-        state = page.evaluate(_CAPTCHA_STATE_JS)
-        if not state.get("present"):
-            # No captcha in play — a short settle is enough.
-            time.sleep(2)
-            return _ok(f"submitted via {ref}; current url={page.url}")
-
-        # Captcha present: poll for a resolution rather than bailing. Success is
-        # either the page navigating away (form accepted) or the captcha token
-        # being granted (solver won; auto-submit imminent).
+        # Poll for ANY of three outcomes, checking the email-verify wall FIRST
+        # every iteration (it appears inline with no navigation and no token, so
+        # the old token/nav-only loop timed out on it and mislabeled 'applied').
         deadline = time.time() + SUBMIT_CAPTCHA_WAIT_SECONDS
+        settled = False
         while time.time() < deadline:
             time.sleep(3)
+            if _detect_verification_wall(page) is not None:
+                return _handle_wall(page, ref, verify_ctx, submitted_after)
             if page.url.rstrip("/") != start_url.rstrip("/"):
-                return _ok(f"submitted via {ref}; page navigated to {page.url}")
+                return _post_submit_result(page, ref, verify_ctx, submitted_after)
             state = page.evaluate(_CAPTCHA_STATE_JS)
+            if not state.get("present"):
+                # No captcha widget and no wall — a plain submit; short settle
+                # then confirm.
+                if not settled:
+                    settled = True
+                    continue
+                return _post_submit_result(page, ref, verify_ctx, submitted_after)
             if state.get("token_len", 0) > 0:
                 time.sleep(3)  # let the form's auto-submit fire
-                return _ok(
-                    f"captcha token granted after submit via {ref}; url={page.url}"
-                )
+                return _post_submit_result(page, ref, verify_ctx, submitted_after)
+        # Timed out: last wall check, else report the stall.
+        if _detect_verification_wall(page) is not None:
+            return _handle_wall(page, ref, verify_ctx, submitted_after)
         return _err(
             f"submit {ref}: captcha did not resolve within "
             f"{SUBMIT_CAPTCHA_WAIT_SECONDS}s (no token, no navigation) — likely a "
@@ -465,7 +692,10 @@ def submit(page: Page, ref: str, test_mode: bool) -> str:
 
 # ── dispatcher ─────────────────────────────────────────────────────────────
 
-def dispatch(page: Page, name: str, args: dict[str, Any], *, test_mode: bool) -> str:
+def dispatch(
+    page: Page, name: str, args: dict[str, Any], *, test_mode: bool,
+    verify_ctx: dict | None = None,
+) -> str:
     if name == "navigate":
         return navigate(page, args["url"])
     if name == "snapshot":
@@ -487,7 +717,7 @@ def dispatch(page: Page, name: str, args: dict[str, Any], *, test_mode: bool) ->
     if name == "upload_file":
         return upload_file(page, args["ref"], args["file_path"])
     if name == "submit":
-        return submit(page, args["ref"], test_mode)
+        return submit(page, args["ref"], test_mode, verify_ctx=verify_ctx)
     return _err(f"unknown tool: {name}")
 
 

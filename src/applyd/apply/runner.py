@@ -26,6 +26,7 @@ from openai import OpenAI
 from ..config import load_env
 from ..llm_errors import is_transient_llm_error
 from .browser import BrowserConnectError, brightdata_page
+from .email_verify import build_code_reader
 from .prompts import SYSTEM_PROMPT, build_user_blocks
 from .tools import TOOL_DEFS, dispatch
 
@@ -51,7 +52,11 @@ MAX_TURNS = int(os.environ.get("APPLYD_APPLY_MAX_TURNS", "65"))
 # so one bad job can't hog the single-worker queue (a 30-min hang stalled ~14
 # tailored jobs behind it). Failing fast + MAX_APPLY_ATTEMPTS is cheaper than
 # grinding. Override with APPLYD_APPLY_MAX_SECONDS if a slow ATS needs it.
-MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "300"))
+# 420s (not 300) leaves room for the email-verification path: a wall-hitting
+# submit waits for the security code to arrive by email (~30s typical) then
+# resubmits in-session. Non-wall applies still return in ~95s — this only raises
+# the ceiling for the rare wall case, it doesn't slow the common path.
+MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "420"))
 # Grace on top of MAX_WALL_SECONDS before the hard watchdog kills the process.
 WATCHDOG_GRACE_SECONDS = 60
 
@@ -225,6 +230,13 @@ def run_apply(
         file=sys.stderr,
     )
 
+    # Email-verification context for submit(): if IMAP creds are configured, a
+    # low-score submit that hits Greenhouse's security-code wall is completed
+    # in-session (read the emailed code, enter it, resubmit). Unconfigured →
+    # code_reader is None → submit reports gated:email_verification (no false
+    # 'applied'). See apply/email_verify.py.
+    verify_ctx = {"company": company, "code_reader": build_code_reader()}
+
     watchdog_disarm = _start_hard_watchdog(
         MAX_WALL_SECONDS + WATCHDOG_GRACE_SECONDS, job_id
     )
@@ -307,7 +319,7 @@ def run_apply(
                         done = True
                         continue
 
-                    result = dispatch(page, name, args, test_mode=test_mode)
+                    result = dispatch(page, name, args, test_mode=test_mode, verify_ctx=verify_ctx)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
                 if done:

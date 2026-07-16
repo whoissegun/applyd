@@ -174,6 +174,15 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 - **Railway `restartPolicyMaxRetries` is a fixed per-deploy budget, not a rolling window.** The apply watchdog exits on purpose (hung CDP socket) and expects a restart; 10 watchdog exits marked the July 11 deploy CRASHED and the worker stayed down 5 days. Workers + API use `restartPolicyType = "ALWAYS"` — don't reintroduce a retry cap on long-running services.
 - **Persist the verdict before the browser closes.** `browser.close()` over a stalled CDP socket can outlive the hard watchdog; an unpersisted `applied` verdict gets requeued and would re-submit a form the company already received. `run_apply(on_verdict=...)` fires with the full result at `report_done`, and `apply_for_user` persists there — before close.
 
+### ATS anti-bot / reCAPTCHA email verification (2026-07-16)
+- **The "enter this security code" emails are invisible reCAPTCHA, not a rate problem.** Greenhouse's invisible reCAPTCHA scores each *session* (mouse movement + typing cadence, per Google's v3: 0.0 bot → 1.0 human, pass ≈ 0.5). On a low score it doesn't hard-block — it emails a one-time code and injects an inline code field, asking to "enter the code and resubmit". Instant `.fill()` (zero keystrokes) + a browser that never moves the pointer is a maximal bot signature. Slowing the apply cadence does **not** help — the score is per-session. Behavioral realism does.
+- **`APPLYD_HUMANIZE` (default true) is load-bearing, not cosmetic.** `apply/tools.py` types text fields with `press_sequentially` (jittered per-field cadence), moves the pointer before clicks, and adds think-time. Empirically: `humanize=false` scores so low reCAPTCHA won't even grant a token (submit hangs → 90s captcha timeout, no code wall); `humanize=true` gets a token but may still score low → the code wall appears (recoverable). So keep it on.
+- **The wall is completed IN-SESSION, deterministically — we don't fight the score, we satisfy it.** `apply/tools.py::submit` checks for the wall on every poll iteration (it appears with NO navigation and NO reCAPTCHA token, so the old token/nav-only loop timed out and mislabeled it `applied`). On detection: read the emailed code, type it, resubmit — all before the browser closes. The code is bound to the live session; you cannot resume it later (a fresh form load generates a new code).
+- **The code field is an 8-box OTP widget** (`security-input-0..7`, each `maxlength="1"`, auto-advancing). It MUST be filled with real keystrokes (`page.keyboard.type`) — `.fill()` drops all but the first char. `complete_email_verification` always keystrokes, independent of `APPLYD_HUMANIZE`. Verified end-to-end 2026-07-16 (Jump Trading → confirmation page).
+- **Email is read over IMAP in the worker** (`apply/email_verify.py`), NOT the claude.ai Gmail connector (that's agent-only; the Railway worker can't reach it). Config: `APPLYD_IMAP_USER` + `APPLYD_IMAP_PASSWORD` (a Gmail **App Password**, not the account pw). Unset → `build_code_reader()` returns None → wall falls back to `gated:email_verification` (no false `applied`), so the feature is dormant-but-safe until creds are added. Sender `no-reply@us.greenhouse-mail.io`, subject `Security code for your application to <Company>`, code is 8 alnum chars in an `<h1>`; matched by company-in-subject + timestamp-after-submit.
+- **Multi-tenant gap:** one global IMAP mailbox only works while every apply uses one contact email. Per-user email access (OAuth or platform +alias inbox) is the SaaS path — deferred.
+- **Pacing is cheap insurance, not the fix.** `worker/runner.py` adds jittered inter-apply gaps (`APPLYD_APPLY_JITTER_{MIN,MAX}_SECONDS`, default 8–25s) so the cadence isn't a metronome, and an optional `APPLYD_APPLY_DAILY_CAP` (default 0 = unlimited, preserving volume-first). The complex per-ATS/per-company selective-claim pacing was deliberately NOT built — walls are recoverable now, so it's low-value/higher-risk.
+
 ### Supabase
 - **New tables in `public` are not auto-exposed to the Data API** (breaking change 2026-04-28). Migrations must `GRANT` explicitly to `anon`/`authenticated`. Initial schema migration handles this; future tables must follow suit.
 - **`SECURITY DEFINER` functions don't go in `public`.** Put them in `internal` and `set search_path = ''`. The signup trigger function is in `internal.handle_new_auth_user()`.
@@ -238,6 +247,11 @@ Optional:
 - `SERPER_API_KEY` — fallback search
 - `SEARCH_PROVIDER=brave|serper` — override default
 - `BROAD_SEARCH_TTL_HOURS=6` — dork-result cache TTL
+- `APPLYD_IMAP_USER`, `APPLYD_IMAP_PASSWORD` — mailbox for reading ATS security codes (Gmail App Password). Unset → the reCAPTCHA email-verification wall falls back to `gated:email_verification`. `APPLYD_IMAP_HOST` (default `imap.gmail.com`), `APPLYD_IMAP_PORT` (993).
+- `APPLYD_HUMANIZE=true|false` (default true) — human-like typing/mouse/think-time in the apply browser. Load-bearing for reCAPTCHA scores AND for the OTP code field; only disable for debugging.
+- `APPLYD_APPLY_JITTER_MIN_SECONDS` / `APPLYD_APPLY_JITTER_MAX_SECONDS` (default 8/25) — randomized gap between applies.
+- `APPLYD_APPLY_DAILY_CAP` (default 0 = unlimited) — hard ceiling on applies/day.
+- `APPLYD_APPLY_MAX_SECONDS` (default 420) — per-apply wall-clock; raised from 300 to leave room for the in-session email-verification wait.
 
 External tools:
 - `tectonic` — LaTeX → PDF (`brew install tectonic`)

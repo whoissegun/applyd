@@ -111,6 +111,7 @@ environments", or anything that could appear verbatim on another application.
 | JD has hard requirements the candidate clearly can't meet (years of XP, citizenship, PhD, etc.) | skipped:jd_mismatch \| reason='<short>' |
 | Required field has no truthful answer in the profile | gated:missing_info |
 | Inline coding challenge or take-home | skipped:coding_challenge |
+| After submit: a "verify your email / enter the code we sent" screen with a code-entry box (the submit tool will tell you it detected this) | gated:email_verification |
 | Anything else weird | gated:unknown |
 
 For a skip: call report_done with status="skipped" and the matching note. No
