@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import random
 import signal
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from applyd.config import load_env
@@ -38,6 +41,35 @@ INFRA_BACKOFF_SECONDS = 120.0  # back-off after a transient (no-credits/rate-lim
 # attempt already burned cost and wrote an apply_attempts audit row. To retry
 # manually, flip the row back to 'tailored' in the DB.
 CLAIMABLE = ("tailored",)
+
+# Anti-burst pacing. Applications from one identity arriving in a tight, regular
+# cadence are a spam/fraud signal to ATS reCAPTCHA + blocklists (the reason we
+# were getting email-verification challenges). Behavioral realism in the browser
+# is the primary fix; these are cheap insurance on top.
+#   - jitter: a randomized gap after each apply so the cadence isn't a metronome
+#     (applies already take ~95s; this varies it, it doesn't add meaningful idle)
+#   - daily cap: a hard ceiling on applies/day as a runaway backstop
+# Both are env-tunable; the cap defaults to 0 (unlimited) to preserve the
+# volume-first strategy until a number is chosen.
+_APPLY_JITTER_MIN_S = float(os.environ.get("APPLYD_APPLY_JITTER_MIN_SECONDS", "8"))
+_APPLY_JITTER_MAX_S = float(os.environ.get("APPLYD_APPLY_JITTER_MAX_SECONDS", "25"))
+_APPLY_DAILY_CAP = int(os.environ.get("APPLYD_APPLY_DAILY_CAP", "0"))
+
+
+def _applied_today() -> int:
+    """Count applications that reached 'applied' since midnight UTC. Cheap single
+    indexed count; used only when a daily cap is configured."""
+    sb = get_client()
+    midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    res = (
+        sb.table("apply_attempts")
+        .select("id", count="exact")
+        .eq("status", "applied")
+        .gte("ended_at", midnight.isoformat())
+        .limit(0)
+        .execute()
+    )
+    return res.count or 0
 
 
 def _find_one_claimable() -> Optional[dict]:
@@ -58,6 +90,12 @@ def tick_once() -> Optional[dict]:
     Returns the result dict from `apply_for_user` on success, or None if
     nothing was claimable.
     """
+    if _APPLY_DAILY_CAP > 0:
+        done = _applied_today()
+        if done >= _APPLY_DAILY_CAP:
+            logger.info("[worker] daily apply cap reached (%d/%d) — pausing applies", done, _APPLY_DAILY_CAP)
+            return None
+
     candidate = _find_one_claimable()
     if candidate is None:
         return None
@@ -87,6 +125,10 @@ def tick_once() -> Optional[dict]:
         result.get("status"),
         result.get("cost_cents"),
     )
+    # Jitter after a real dispatch (any terminal outcome touched the ATS) so the
+    # apply cadence isn't a fixed metronome. Skipped for lost races / no-ops.
+    if _APPLY_JITTER_MAX_S > 0 and result.get("status") in {"applied", "skipped", "failed"}:
+        time.sleep(random.uniform(min(_APPLY_JITTER_MIN_S, _APPLY_JITTER_MAX_S), _APPLY_JITTER_MAX_S))
     return result
 
 
