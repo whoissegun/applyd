@@ -26,6 +26,7 @@ load_env()
 from applyd.api.auth import get_current_user_id  # noqa: E402
 from applyd.db import (  # noqa: E402
     ApplicationsRepo,
+    TailoredResumesRepo,
     UserProfilesRepo,
     UserResumesRepo,
     get_client,
@@ -89,6 +90,10 @@ def _resumes() -> UserResumesRepo:
 
 def _applications() -> ApplicationsRepo:
     return ApplicationsRepo(get_client())
+
+
+def _tailored() -> TailoredResumesRepo:
+    return TailoredResumesRepo(get_client())
 
 
 # ---------- endpoints ----------
@@ -257,6 +262,58 @@ def tailor_queue(
     # Idempotent — repeated calls just return the existing pending row.
     row = _applications().upsert_pending(user_id=user_id, job_id=body.job_id)
     return {"application": row}
+
+
+@app.get("/applications/{application_id}/resume")
+def get_application_resume(
+    application_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> dict:
+    """Signed, short-lived URL to the exact tailored resume this application was
+    submitted with. The `resumes` bucket is private, so the browser can't read
+    the storage path directly — this hands it a time-limited link."""
+    app_row = _applications().get(application_id)
+    if app_row is None or app_row.get("user_id") != user_id:
+        # Don't leak existence of other users' applications.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="application not found")
+
+    tailored = None
+    tr_id = app_row.get("tailored_resume_id")
+    if tr_id:
+        tailored = _tailored().get_by_id(tr_id)
+    if tailored is None and app_row.get("job_id"):
+        # Pre-versioning rows have no bound id — fall back to the newest version.
+        tailored = _tailored().get(user_id, app_row["job_id"])
+
+    path = (tailored or {}).get("pdf_storage_path")
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="no tailored resume for this application yet",
+        )
+
+    try:
+        signed = get_client().storage.from_(STORAGE_BUCKET).create_signed_url(path, 3600)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[resume] signing failed for %s", path)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"could not sign resume url: {type(exc).__name__}",
+        )
+    url = signed.get("signedURL") or signed.get("signedUrl") or signed.get("signed_url")
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="storage did not return a signed url",
+        )
+    return {
+        "application_id": application_id,
+        "tailored_resume_id": (tailored or {}).get("id"),
+        "url": url,
+        "expires_in": 3600,
+        "generated_at": (tailored or {}).get("generated_at"),
+        "model_used": (tailored or {}).get("model_used"),
+    }
 
 
 @app.post("/webhook/stripe")

@@ -228,7 +228,12 @@ def apply_for_user(user_id: str, application_id: str) -> dict[str, Any]:
         # failure. Requeue to 'pending' so the tailor worker produces the
         # resume. Releasing to 'failed' kept the row claimable (CLAIMABLE_FROM
         # includes 'failed') and one such row burned 734 attempts May–June 2026.
-        tailored_row = tailored.get(user_id, job_id)
+        # Bind to the EXACT version this application was tailored with (set by
+        # mark_tailored), so a later re-tailor of the same job can't swap the PDF
+        # out from under an in-flight apply. Fall back to the newest version if
+        # the id is missing (pre-versioning rows).
+        tr_id = claimed.get("tailored_resume_id")
+        tailored_row = (tailored.get_by_id(tr_id) if tr_id else None) or tailored.get(user_id, job_id)
         pdf_storage_path: str | None = (tailored_row or {}).get("pdf_storage_path")
         if tailored_row is None or not pdf_storage_path:
             reason = "no_tailored_resume" if tailored_row is None else "no_tailored_pdf"
