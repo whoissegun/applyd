@@ -99,6 +99,7 @@ Single-process Python today; the data layer is mid-migration to Supabase (Postgr
 - **Master resume is the sole source of truth.** No separate fact bank. Tailoring reorders/rephrases/drops but never invents.
 - **Profile Q&A bank** = a single freeform `profile_answers text` column on `user_profiles`. UI structures the questions; DB stores raw text. No separate Q&A table.
 - **`applications.job_id` is `ON DELETE SET NULL`**, not CASCADE. If we ever purge stale jobs, application history survives. Same for `tailored_resumes.job_id`.
+- **`tailored_resumes` is append-only** (as of the 2026-07-17 migration): every tailoring inserts a new row with its own uuid PDF path, so an application's `tailored_resume_id` always resolves to the exact resume submitted, even after re-tailor. Apply binds to that id (`get_by_id`), not "latest for job". `TailoredResumesRepo.get` returns the newest version; `create_version` has a transitional dup→update fallback so it's safe before the unique-index drop is applied. The signed-resume API is `GET /applications/{id}/resume` (private bucket → 60-min signed URL).
 - **Auto-provision on signup.** Trigger `on insert on auth.users` calls `internal.handle_new_auth_user()` (SECURITY DEFINER, locked search_path, lives in `internal` schema per Supabase security guidance) — creates `user_profiles` + `user_subscriptions` stub rows.
 
 ### Discovery

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import uuid
 from pathlib import Path
 
 from ..db import (
@@ -96,7 +97,9 @@ def compile_self_check() -> str | None:
 
 
 def _storage_path(user_id: str, job_id: str) -> str:
-    return f"{user_id}/tailored/{job_id}.pdf"
+    # Unique per tailoring so re-tailoring a job never overwrites the PDF an
+    # earlier application already submitted (append-only, see TailoredResumesRepo).
+    return f"{user_id}/tailored/{job_id}/{uuid.uuid4().hex}.pdf"
 
 
 def _upload_pdf(path: str, pdf_bytes: bytes) -> None:
@@ -273,7 +276,7 @@ def tailor_for_user(user_id: str, job_id: str) -> dict:
             return _fail(f"storage_error: {type(exc).__name__}: {exc}")
 
         # 9. Persist tailored_resumes row.
-        tailored_row = tailored_repo.upsert(
+        tailored_row = tailored_repo.create_version(
             user_id=user_id,
             job_id=job_id,
             latex_source=tailored_tex,
