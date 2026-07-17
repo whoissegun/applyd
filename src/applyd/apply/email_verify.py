@@ -26,7 +26,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from email.utils import parsedate_to_datetime
 from typing import Optional, Protocol
@@ -135,8 +135,13 @@ class ImapCodeReader:
         try:
             imap.login(self._user, self._password)
             imap.select("INBOX")
-            # IMAP SINCE is date-granular; time-filter precisely below.
-            since = after.strftime("%d-%b-%Y")
+            # IMAP SINCE is date-granular AND evaluated in the server's timezone,
+            # not UTC. An email that arrived at 00:59 UTC can still be "yesterday"
+            # on a server behind UTC, so `SINCE <utc-today>` silently excludes it
+            # (this dropped every code for applies in the ~00:00–08:00 UTC window).
+            # Subtract a day for margin; the precise `sent >= after` time-filter
+            # below still guarantees we never accept a stale pre-submit code.
+            since = (after - timedelta(days=1)).strftime("%d-%b-%Y")
             typ, data = imap.search(None, f'(FROM "{_SENDER}" SINCE "{since}")')
             if typ != "OK" or not data or not data[0]:
                 return None
