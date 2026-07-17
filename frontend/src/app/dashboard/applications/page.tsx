@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { isDevBypass, MOCK_APPLICATIONS } from "@/lib/devflags";
 import { LocalDateTime } from "@/components/LocalDateTime";
+import { ResumeLink } from "./resume-link";
 import Link from "next/link";
 import {
   BACKEND_FOR_USER_STATUS,
@@ -40,6 +41,7 @@ export default async function ApplicationsPage({
     last_attempt_at: string | null;
     applied_at: string | null;
     last_error: string | null;
+    tailored_resume_id: string | null;
     jobs: { title: string | null; url: string | null; companies: { canonical_name: string | null } | null } | null;
   };
 
@@ -53,7 +55,7 @@ export default async function ApplicationsPage({
     let query = supabase
       .from("applications")
       .select(
-        "id, status, job_id, reason, last_attempt_at, applied_at, last_error, jobs(title, url, companies(canonical_name))",
+        "id, status, job_id, reason, last_attempt_at, applied_at, last_error, tailored_resume_id, jobs(title, url, companies(canonical_name))",
       )
       .order("last_attempt_at", { ascending: false, nullsFirst: false })
       .limit(500);
@@ -128,6 +130,7 @@ export default async function ApplicationsPage({
                 <th>Company</th>
                 <th>Role</th>
                 <th>Reason</th>
+                <th style={{ width: 110 }}>Résumé</th>
                 <th style={{ width: 200 }}>Last attempt</th>
               </tr>
             </thead>
@@ -162,6 +165,13 @@ export default async function ApplicationsPage({
                     </td>
                     <td style={{ color: "var(--color-pebble)", maxWidth: 320 }}>
                       {skipReason ?? "—"}
+                    </td>
+                    <td>
+                      {r.tailored_resume_id ? (
+                        <ResumeLink applicationId={r.id} />
+                      ) : (
+                        <span style={{ color: "var(--color-pebble)" }}>—</span>
+                      )}
                     </td>
                     <td className="mono" style={{ color: "var(--color-cosmic)" }}>
                       <LocalDateTime iso={r.last_attempt_at} />
