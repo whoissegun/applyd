@@ -1,361 +1,169 @@
 # applyd
 
-Autonomous job-application engine for SWE/ML roles. Discovers openings, enriches them with full job descriptions, tailors your LaTeX resume per posting, and has a browser agent fill out the apply form for you. Self-hosted today; multi-tenant SaaS is the next step.
+Local-first, CLI-first job discovery and application automation. State stays in
+SQLite on your laptop. Hosted Kimi K2.6 is used only for job interpretation,
+resume tailoring, and application-form operation.
 
-> **Status (v0.1):** discovery + enrichment + tailor + apply all run end-to-end against real boards. The apply step is a stateless, library-shape direct runner — OpenAI SDK → OpenRouter + Playwright + Bright Data CDP — so the same code can scale from one user on a laptop to a multi-tenant service. See [CLAUDE.md](CLAUDE.md) for deeper architecture notes and rejected paths.
+The default apply browser is a persistent local Chrome profile. Bright Data is
+optional compatibility—not a requirement. Supabase and hosted workers are not
+part of the local runtime.
 
----
-
-## The pipeline
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  applyd discover                                                     │
-│  ├── SimplifyJobs aggregator       (~2,500 SWE postings, free)       │
-│  ├── Brave broad-search dorks      (6h TTL cache)                    │
-│  └── user-specified companies      (targets.json, resolved → ATS)    │
-└──────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  applyd enrich         (threaded fetch cascade, ThreadPoolExecutor)  │
-│  ├── Tier 1: ATS bulk API                  [free]                    │
-│  ├── Tier 2: httpx + trafilatura           [free]                    │
-│  ├── Tier 3a: spider.cloud smart           [~$0.0003/page]           │
-│  └── Tier 3b: spider.cloud chrome          [~$0.0005/page]           │
-└──────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  applyd tailor <job_id>                                              │
-│  ├── Claude Sonnet 4.6 (prompt-cached)                               │
-│  ├── Strict no-invention rewrite from resume_base.tex                │
-│  ├── Structural validator (no fabricated companies / metrics)        │
-│  ├── tectonic → PDF                                                  │
-│  └── writes out/<slug>/{resume.tex, resume.pdf, metadata.json}       │
-└──────────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  applyd apply (direct runner — `python -m applyd.apply.runner`)      │
-│  ├── Picks one job, loads profile + tailored resume + metadata       │
-│  ├── OpenAI SDK → OpenRouter (default model anthropic/claude-sonnet) │
-│  │   with prompt caching on system + static user blocks              │
-│  ├── Ref-based tools — snapshot() mints stable refs (r0, r1, ...)    │
-│  │   on interactive elements; agent never sees CSS selectors         │
-│  │   tools: navigate / snapshot / click / fill / fill_many /         │
-│  │          click_many / open_dropdown / pick_option /               │
-│  │          upload_file / submit / report_done                       │
-│  ├── Connects via CDP to Bright Data residential Chrome              │
-│  ├── Fills form, answers free-text grounded in resume + profile      │
-│  └── Writes status + note inline to the job store (no callback HTTP) │
-└──────────────────────────────────────────────────────────────────────┘
+```text
+discover -> enrich + extract -> evaluate -> tailor -> apply
+   HTTP       ATS/HTTP/Chrome      rules       Kimi     Kimi + Chrome
+                 + Kimi                       + LaTeX
+                           SQLite
 ```
 
----
+- ATS adapters normalize platform responses into one `Job` model.
+- Retrieval tries an ATS API, ordinary HTTP, then local Playwright.
+- Kimi extracts evidence-backed semantic facts.
+- Deterministic profile rules evaluate eligibility. Unknowns are eligible by
+  default so volume is not silently lost.
+- Kimi returns a structured resume edit plan; Python owns LaTeX and PDF output.
+- The apply agent can navigate only to the selected URL and upload only the
+  selected PDF. `applied` requires confirmed submit evidence.
 
-## What's shipped
+## Setup
 
-- [x] Discovery across 5 ATSes (Greenhouse, Lever, Ashby, Workable, SmartRecruiters) + SimplifyJobs + Brave search dorks
-- [x] Per-company resolver (company name → ATS + slug) with persistent cache
-- [x] 4-tier enrichment cascade with threaded concurrency
-- [x] Resume tailoring with strict no-invention rules + structured JSON metadata
-- [x] Apply-gate detection — excludes Workday/Oracle/LinkedIn/Wellfound/etc. from apply pile before Claude tokens are spent
-- [x] Filtering: `--level`, `--specialty`, `--location`, `--remote`, `--source`, `--company`, `--gated`/`--no-gated`
-- [x] Direct apply runner (stateless library-shape) — OpenAI SDK via OpenRouter + Playwright + Bright Data CDP, with prompt caching, idempotent navigate, batched `fill_many`/`click_many`, deterministic opener (forced `navigate` then `snapshot`), and inline writeback to the job store
-- [x] Ref-based tool design — `snapshot()` mints stable refs on interactive elements; `open_dropdown` + `pick_option` replace the brittle `select_combobox` and handle native `<select>` + ARIA comboboxes (react-select, Greenhouse, Workday) with one path
-- [x] Model swappability via OpenRouter — default `anthropic/claude-sonnet-4-6`; `--model deepseek/...` / `meta-llama/...` / `openai/...` for A/B tests
-- [x] Free-text answers grounded in the tailored resume + profile (no hallucinated projects/metrics)
-
-## What's not shipped yet
-
-Tracked as issues — see [the issue tracker](https://github.com/whoissegun/applyd/issues) for current status, priorities, and design notes:
-
-- [#2 Daily digest of applied/skipped/failed](https://github.com/whoissegun/applyd/issues/2)
-- [#3 Real-time skip pings (Telegram/Discord)](https://github.com/whoissegun/applyd/issues/3)
-- [#4 Cloud deployment (Docker + Hetzner/Fly/Railway)](https://github.com/whoissegun/applyd/issues/4)
-- Multi-tenant migration — Supabase-backed job store, per-tenant profiles, chat UI for end-users (the single biggest in-flight piece; replaces `data/jobs.json` and the local profile file with rows in a DB)
-- [#5 Contact discovery: Sema vs Apollo](https://github.com/whoissegun/applyd/issues/5)
-- [#6 Cold outreach email pipeline](https://github.com/whoissegun/applyd/issues/6)
-- [#7 Structured JD extraction at enrichment time](https://github.com/whoissegun/applyd/issues/7)
-
----
-
-## Single-user today, multi-tenant in flight
-
-The direct apply runner is library-shape — you call `python -m applyd.apply.runner <job_id>` and it returns inline. No daemon, no callback server, no workspace files. That's the shape we need for multi-tenant SaaS, where each apply is a stateless task triggered by a queue worker.
-
-Two things still tie applyd to a single user on a single machine:
-
-- **`data/jobs.json`** is one process's source of truth. Supabase Postgres schema + `JobsRepo` already exist (`src/applyd/db/`), but writers haven't been migrated yet. Per-user repos (`ApplicationsRepo`, `TailoredResumesRepo`, etc.) are also pending.
-- **Profile is read from a file** (`--profile <path>`, defaults to a holdover location). Multi-tenant means profiles become rows in `user_profiles.profile_answers`, passed into the runner per request.
-
-Both are scoped and partially scaffolded. If you're running applyd for yourself today, neither matters.
-
----
-
-## Install
-
-Requirements:
-
-- Python 3.9+
-- [tectonic](https://tectonic-typesetting.github.io/) — LaTeX → PDF (`brew install tectonic` on macOS)
-- Bright Data "Scraping Browser" zone — residential Chrome via CDP (handles stealth + captcha + IP rotation; the runner only sends CDP messages, no local Chrome needed)
-- API keys: Anthropic, Brave, spider.cloud (see [Configure](#configure))
+Requirements: Python 3.11+, Chrome or Playwright Chromium, and
+[`tectonic`](https://tectonic-typesetting.github.io/) for PDFs.
 
 ```bash
-git clone git@github.com:whoissegun/applyd.git
-cd applyd
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+playwright install chromium
+brew install tectonic poppler   # macOS
 ```
 
----
+Create `.env`:
 
-## Configure
-
-### 1. `.env` at repo root
-
-```bash
-# required — discovery + enrichment + tailor
-BRAVE_SEARCH_API_KEY=...
-SPIDER_API_KEY=...
-ANTHROPIC_API_KEY=...
-
-# required — apply runner (LLM via OpenRouter)
-OPENROUTER_API_KEY=sk-or-v1-...
-
-# required — apply step (Bright Data residential Chrome via CDP)
-BRIGHTDATA_CUSTOMER_ID=...
-BRIGHTDATA_ZONE=...
-BRIGHTDATA_ZONE_PASSWORD=...
-
-# strongly recommended while testing — agent fills but never clicks submit
+```dotenv
+OPENROUTER_API_KEY=...
+BRAVE_SEARCH_API_KEY=...       # optional: broad discovery and resolution
 APPLYD_TEST_MODE=true
-
-# optional
-SERPER_API_KEY=...                        # search fallback
-SEARCH_PROVIDER=brave                     # brave | serper (default brave)
-BROAD_SEARCH_TTL_HOURS=6
-BRIGHTDATA_HOST=brd.superproxy.io         # default
-BRIGHTDATA_CDP_PORT=9222                  # default
-
-# multi-tenant SaaS (in progress — only the data layer wires up so far)
-SUPABASE_URL=https://<ref>.supabase.co
-SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
-SUPABASE_SECRET_KEY=sb_secret_...
+APPLYD_BROWSER_HEADLESS=true
 ```
-
-### 2. Base resume — `resume_base.tex` at repo root
-
-Use the [Jake's Resume LaTeX template](https://www.overleaf.com/latex/templates/jakes-resume/syzfjbzwjncs). This file is **the single source of truth** for your experience. The tailor will reorder, rephrase, and drop content, but will never invent experiences, projects, metrics, or technologies not present here. Put everything you'd want any employer to potentially see — the tailor cuts what's irrelevant per job.
-
-Two gotchas specific to tectonic:
-
-- Remove `\input{glyphtounicode}` and `\pdfgentounicode=1` from the preamble — they're pdflatex-specific and break tectonic. Unicode copy-paste quality impact is negligible for ATS parsing.
-- Confirm you have a `\resumeSubHeadingListEnd` after the Experience section before `\section{Projects}`. A common copy-paste of Jake's template omits it and LaTeX won't fail until the end of the document.
-
-### 3. `targets.json` at repo root (companies you want tracked specifically)
-
-```json
-{
-  "companies": ["Stripe", "Anthropic", "Runway", "OpenAI", "Palantir"],
-  "broad_dorks": [
-    "software engineer new grad",
-    "ml engineer remote"
-  ]
-}
-```
-
-- `companies` — plain names. The resolver figures out the ATS + slug via a Brave dork and caches the mapping in `data/resolver_cache.json`.
-- `broad_dorks` (optional) — overrides the 6 default broad queries. Omit to use defaults.
-
-### 4. Profile — `--profile <path>`
-
-The apply runner reads a profile file as prose context for every invocation. Pass `--profile /path/to/your.md` or drop it at `./profile.md` (the default). In multi-tenant this becomes a DB row (`user_profiles.profile_answers`).
-
-The file should cover everything the agent needs to fill a form:
-
-- **Identity:** full legal name, preferred name, email, phone (with format hints), pronouns
-- **Location:** current city, region, country; whether open to relocation
-- **Links:** LinkedIn, GitHub, portfolio
-- **Education:** school, degree, graduation month/year, GPA if worth including
-- **Work authorization:** per-country (where you can work without sponsorship, where you need it). Be precise — the agent answers truthfully and refuses to fudge.
-- **Demographics:** race, gender, veteran/disability status in the exact wording forms use. Include "decline to self-identify" as a valid answer.
-- **Narrative hooks (optional but useful):** 3–5 bullets on "what I care about / what I'm curious about / the pattern of work I like." The agent uses these to anchor free-text answers like "Why us?" without slop.
-
-A starter template lives at [`profile.example.md`](profile.example.md).
-
----
-
-## Quickstart
 
 ```bash
-# 1. Discover jobs
-applyd discover
-#   → SimplifyJobs + Brave dorks + targets.json companies → data/jobs.json
+cp profile.example.json profile.json
+cp resume.example.json resume.json
+applyd init
+```
 
-# 2. Enrich JD text for jobs without descriptions
-applyd enrich --workers 8
+To import the former JSON catalog: `applyd init --import-legacy data/jobs.json`.
 
-# 3. Browse what's in the store
-applyd jobs --no-gated --level new_grad --specialty ml
+## Usage
 
-# 4. Tailor a resume for a specific job
+```bash
+applyd discover --limit 1000
+applyd enrich --workers 8 --batch-size 5
+applyd evaluate --profile profile.json --show-reasons
+applyd dedupe
+applyd match --top 50
+applyd verify-live --top 20
+applyd jobs --company Stripe --limit 20
 applyd tailor <job_id>
-#   → Claude tailors resume_base.tex
-#   → writes out/<slug>/{resume.tex, resume.pdf, metadata.json}
-#   → sets resume_pdf_path on the job
-
-# 5. Run the direct apply runner against one job
-python -m applyd.apply.runner <job_id> --test-mode=true
-#   → loads profile + tailored resume + JD metadata
-#   → connects to Bright Data CDP
-#   → Claude tool-loops through the form (navigate → read_form →
-#     fill_many → upload → click_many → submit → report_done)
-#   → writes status + note inline to data/jobs.json
-#   → returns 0 (applied) / 1 (skipped) / 2 (failed) / 3 (infra error)
-
-# Real submission — only after a few test-mode runs eyeballed
-python -m applyd.apply.runner <job_id> --test-mode=false
+applyd apply <job_id>                         # fills only; never submits
+applyd apply <job_id> --test-mode false       # permits a real submission
+applyd apply-batch --top 20 --test-mode false # serial, bounded real pilot
+applyd profile-gaps                           # unresolved required facts
+applyd trace <job_id>                         # redacted latest-attempt timeline
+applyd trace <job_id> --compare               # compare providers, turns, and cost
 ```
 
-`--test-mode=true` (or `APPLYD_TEST_MODE=true` in `.env`) means the agent reaches the submit tool but the click is a no-op. Use it to validate the form fill end-to-end without actually submitting.
+Discovery keeps only Greenhouse, Lever, Ashby, Workable, and SmartRecruiters by
+default because those are the application platforms the agent supports. Use
+`--include-unsupported-ats` only for retrieval research; unsupported platforms
+never enter the normal apply queue.
 
----
+Useful variants:
 
-## CLI reference
-
-| Command | Purpose |
-|---|---|
-| `applyd discover` | Pull from aggregators + broad search + user targets |
-| `applyd enrich [--limit N] [--workers N] [--dry-run] [--retry-failed] [--source X]` | Fetch full JD text for jobs missing descriptions |
-| `applyd tailor <job_id> [--no-compile] [--ignore-errors] [--model X] [--force]` | Generate tailored resume for a job (`--force` overrides gate check) |
-| `applyd jobs [--level] [--specialty] [--location] [--remote] [--source] [--company] [--gated] [--no-gated] [--limit] [--format]` | Query the job store |
-| `applyd resolve <company>` | Debug: company name → (ATS, slug) |
-| `python -m applyd.apply.runner <job_id> [--test-mode true\|false] [--profile PATH] [--model X]` | **The apply step.** Direct runner — drives the form via OpenAI SDK → OpenRouter + Playwright + Bright Data CDP. |
-
----
-
-## Cost breakdown (rough estimates — still measuring)
-
-These are ballparks pulled from a small handful of test runs against Ashby, plus our Bright Data dashboard (`Bandwidth - Browser API` line item). They will shift as we (a) cut the agent's wasted turns, (b) add rotating cache breakpoints across long conversations, and (c) hit ATSes with different DOM shapes (Greenhouse, Lever, Workable, Workday) where token + bandwidth profiles will differ. **Treat as directional, not contractual.**
-
-### Per applied job
-
-| Bucket | Estimate | Notes |
-|---|---|---|
-| LLM (Claude Sonnet 4.6 tool loop) | ~$0.22 | Cache-read of system + profile + resume × ~20 turns dominates. Fewer turns drops this proportionally. |
-| Bright Data bandwidth ($8/GB) | ~$0.012 | ~1.5 MB/apply with `block_heavy=True` (we abort image/media/font requests). |
-| Tailor (one-time per job, run separately) | ~$0.04 | Cached on the Job record. Re-applies for same job don't re-tailor. |
-| **Per applied job** | **~$0.27** | LLM is ~80% of the bill. |
-
-### Wall-clock
-
-~2.3 minutes per apply on a single worker (measured on Ashby/Notion). Slower forms (Workday) likely longer. The runner is stateless, so `N` workers = `N×` throughput.
-
-### Volume sketches
-
-| Volume | Est. monthly $ | Worker-time/day |
-|---|---|---|
-| 50 applies/day | ~$420 | ~2 hr |
-| 100 applies/day | ~$840 | ~4 hr (still fits one worker if you don't mind) |
-| 500 applies/day | ~$4,200 | needs ~4 parallel workers |
-
-### One-time / monthly fixed
-
-| Service | Cost |
-|---|---|
-| Brave Search API | free tier covers personal volume (~1,000 queries/mo) |
-| spider.cloud | ~$0.50 one-time to enrich a 3k-job corpus; ~$0.10/mo incremental |
-| Anthropic (tailor across ~50 jobs) | ~$0.50–$2/mo |
-
-### Where the numbers should drop next
-
-- **Turn count.** Currently averaging ~20 turns/apply; the prompt baseline target is ~12. Each turn ≈ $0.011 in cache-read + fresh-input. Going 20 → 12 saves ~$0.09/apply (~33% off the LLM bucket).
-- **Rotating cache breakpoints.** Right now only the static prefix (system + profile + resume) is cached; the growing conversation history is fresh on every turn. Adding a breakpoint every ~5 turns would cut fresh-input ~50% on long runs.
-- **Bandwidth doesn't matter much.** Bright Data is ~5% of per-apply cost; not worth optimizing until LLM is squeezed.
-
----
-
-## Repo layout
-
-```
-applyd/
-├── resume_base.tex            # YOUR base resume — the source of truth for tailoring
-├── targets.json               # companies you specifically want tracked
-├── profile.example.md         # starter template for the apply-runner profile
-├── requirements.txt           # pinned snapshot (pyproject.toml is the contract)
-├── supabase/                  # migrations + project link (CLI-managed)
-│   └── migrations/
-├── src/applyd/
-│   ├── cli.py                 # argparse + main() (lean — dispatch only)
-│   ├── config.py              # .env loader
-│   ├── models.py              # Pydantic Job model
-│   ├── store.py               # JSON file store + pending_apply filter
-│   ├── filters.py             # --level / --specialty / --gated filters
-│   ├── apply/                 # the apply step
-│   │   ├── browser.py         # Bright Data CDP URL builder + Playwright context
-│   │   ├── tools.py           # ref-based tools + TOOL_DEFS (OpenAI shape)
-│   │   ├── prompts.py         # system prompt + per-job user prompt builder
-│   │   └── runner.py          # OpenAI SDK → OpenRouter tool-use loop; entry
-│   ├── db/                    # Supabase data access layer (multi-tenant in flight)
-│   │   ├── client.py          # service-key singleton (workers bypass RLS)
-│   │   ├── companies_repo.py  # canonical_name upsert
-│   │   └── jobs_repo.py       # shared-catalog upsert/get/iter_pending_enrichment
-│   ├── commands/              # one CLI subcommand per file
-│   │   ├── discover.py
-│   │   ├── enrich.py
-│   │   ├── tailor.py
-│   │   ├── jobs.py
-│   │   └── resolve.py
-│   ├── discovery/
-│   │   ├── aggregators/       # simplifyjobs, broad_search
-│   │   ├── ats/               # greenhouse, lever, ashby, workable, smartrecruiters
-│   │   ├── search/            # brave, serper (swappable)
-│   │   ├── resolver.py        # company name → (ATS, slug)
-│   │   ├── cache.py           # resolver + broad-search caches
-│   │   └── routing.py         # URL → ATS detection + gate detection
-│   ├── enrichment/
-│   │   ├── fetcher.py         # 4-tier cascade
-│   │   └── spider.py          # spider.cloud client
-│   └── tailor/
-│       ├── prompts.py         # system prompt (strict no-invention)
-│       ├── render.py          # Anthropic SDK + prompt caching
-│       ├── validate.py        # structural diff (no fabricated companies / etc.)
-│       └── compile.py         # tectonic wrapper
-└── data/                      # NOT in git
-    ├── jobs.json              # the store (grows to ~100 MB at ~8k jobs)
-    ├── resolver_cache.json
-    └── broad_search_cache.json
+```bash
+applyd enrich --classify-backfill   # extract existing descriptions
+applyd enrich --no-browser          # ATS + HTTP only
+applyd enrich --no-extract          # retrieval only; no model cost
+applyd match --format json          # inspect full score components
+applyd match --rebuild-embeddings   # discard the local vector cache
+applyd tailor <job_id> --force      # bypass absent/ineligible evaluation
 ```
 
-Key files if you're reading the code cold:
+Matchmaking runs locally with a small ONNX embedding model. The first run
+downloads the model and embeds all eligible jobs; later runs reuse unchanged
+vectors. KNN similarity is reranked with explicit role, seniority, technology,
+recency, work-authorization, and ATS-readiness components stored in SQLite.
 
-- `src/applyd/apply/runner.py` — the Anthropic tool-use loop, prompt caching, idempotent navigate, deterministic opener
-- `src/applyd/apply/tools.py` — exactly which browser primitives the agent gets and what they return
-- `src/applyd/apply/prompts.py` — system prompt + per-job context assembly
-- `src/applyd/cli.py` — see every subcommand at a glance
-- `src/applyd/discovery/routing.py` — ATS detection + the gated-domain blocklist
-- `src/applyd/store.py` — the Job lifecycle & `pending_apply` filter (this is what gets swapped for Postgres in multi-tenant)
+`profile.json` contains identity, legal facts, and preferences. Legal answers
+must be exact; motivation/opinion answers may be composed from grounded context.
+Before changing each visible form step, the apply agent preflights every required
+question. Consequential unknowns are aggregated in SQLite for `profile-gaps` and
+the form is left for review; optional fields remain blank. Required referral
+source questions use the profile's authorized safe fallback list.
+`resume.json` is the canonical tailoring source. Generate it locally and
+deterministically from a Jake-style LaTeX resume with:
 
----
+```bash
+applyd import-resume resume_base.tex
+```
 
-## Known limitations
+Use `--profile another-profile.json` or `--output another-resume.json` when
+needed. The importer copies education, experience, projects, skills, dates,
+metrics, and bullets from TeX, assigns stable source IDs, and uses the profile
+for contact details. It makes no model call and costs nothing.
 
-- **`data/jobs.json` is single-process.** Fine for one user. Multi-tenant requires switching writers to `JobsRepo` (Supabase-backed). The interface is already abstract; migration is in flight, not complete.
-- **Profile is a file** (pass `--profile <path>`). Multi-tenant means profiles become rows in `user_profiles.profile_answers`.
-- **Apply step proven on Ashby; other ATS coverage unverified.** Greenhouse / Lever / Workable forms haven't been driven live yet — tools are generic but per-ATS quirks (react-select comboboxes, custom file inputs, multi-step Workday wizards) only surface on first contact.
-- **Ambiguous company names** (e.g. "Mercury" the bank vs "Mercury Logistics Group") can resolve to the wrong ATS. Inspect `data/resolver_cache.json` after first run; edit by hand.
-- **Stale aggregator URLs** (posting removed from the ATS between crawls) land in `fetch_tier="failed"`. Expected, not a bug.
-- **Gated domains pre-filtered, not smart.** Workday / Oracle / Taleo / LinkedIn / Wellfound / etc. are skipped before tailor spend. Occasionally miscategorizes a direct-apply Workday; we leave money on the table for ~17% of discovered jobs.
-- **SerpAPI deliberately unsupported** as default search provider (active Google DMCA lawsuit, Dec 2025). Brave is default; Serper kept only as a swappable fallback.
+The generated policy protects the newest experience and preserves the source
+experience order. Tailoring can remove less-relevant older content to fit one
+page, but it cannot silently drop the newest role or reorder employment dates.
 
----
+Tailoring may reorder, combine, shorten, style, and persuasively rephrase source
+bullets. It may not add employers, technologies, credentials, dates, metrics,
+or past events. The renderer validates source IDs, length, compilation, and
+one-page output without a second LLM call.
 
-## Credits
+## Browser and cost
 
-- Resume template: [Jake's Resume](https://github.com/jakegut/resume) by Jake Gutierrez (MIT).
-- Discovery inspiration: [SimplifyJobs/New-Grad-Positions](https://github.com/SimplifyJobs/New-Grad-Positions) maintainers.
-- Apply runner: Anthropic SDK + Playwright + Bright Data Scraping Browser.
+The persistent apply profile is `data/browser/apply-profile`; retrieval uses
+`data/browser/retrieval-profile`. Set `APPLYD_BROWSER_HEADLESS=false` to watch.
+Browser routing defaults to local Chrome, except Lever applications start with
+Bright Data because the pilot consistently encountered Lever CAPTCHA gates.
+SmartRecruiters jobs remain discoverable and rankable but `apply-batch` routes
+them to human review without tailoring or model calls: repeated pilots produced
+no confirmed submissions across independent employers.
+Override explicitly with `applyd apply <job_id> --browser local` or
+`--browser brightdata`.
+On Bright Data real submits, applyd invokes the provider's CAPTCHA CDP solver
+and still requires an ATS success marker, navigation, or closed form before it
+records `applied`; a provider-reported solve alone is not submission evidence.
+
+Apply traces store refs, action outcomes, turn counts, and costs in SQLite.
+Typed values and snapshot values are redacted. Use `--errors-only`, `--all`, or
+`--format json` for debugging and eval comparisons.
+
+`apply-batch` runs serially, limits attempts per ATS, stops an ATS
+after repeated platform failures, caps per-application and total model cost, and
+writes an atomic JSON report. `--captcha-fallback brightdata` retries only an
+explicit CAPTCHA once on non-Lever ATSes; Lever starts on Bright Data. Other
+failures stay local or enter human review. The default apply ceiling is 25 model
+turns; cost does not stop a run, but attempts above $0.10 are flagged in logs and
+batch reports. Wall-clock timeout remains a secondary hung-browser safeguard.
+
+HTTP, ATS APIs, SQLite, rules, LaTeX, and local Chrome are free. Measured Kimi
+K2.6 OpenRouter samples:
+
+- job extraction: about $0.0013/job in the five-job benchmark;
+- resume tailoring: about $0.005 for the tested resume;
+- application loop: $0.0054 on the local integration form, and about
+  $0.0087/application in the earlier two-application benchmark.
+
+Costs vary with input and form length. Models remain CLI options so a later
+local model can replace Kimi without changing pipeline boundaries.
+
+## Tests
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+The test fixture at `tests/fixtures/application.html` supports a live hosted-
+Kimi apply-loop check in non-submitting mode.

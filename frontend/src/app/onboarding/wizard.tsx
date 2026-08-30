@@ -355,7 +355,7 @@ function BasicsStep(props: {
             onChange={(e) => set("full_name", e.target.value)}
             required
             className="input"
-            placeholder="Divine Jojolola"
+            placeholder="Jane Example"
           />
         </div>
         <div>

@@ -1,12 +1,18 @@
 from .compile import compile_pdf, tectonic_available
-from .render import DEFAULT_MODEL, TailorClient
-from .validate import ValidationResult, validate
+from .structured import (
+    DEFAULT_MODEL,
+    StructuredTailorClient,
+    TailorPlanError,
+    load_resume,
+    render_latex,
+)
 
 __all__ = [
     "DEFAULT_MODEL",
-    "TailorClient",
-    "ValidationResult",
-    "validate",
+    "StructuredTailorClient",
+    "TailorPlanError",
     "compile_pdf",
+    "load_resume",
+    "render_latex",
     "tectonic_available",
 ]

@@ -6,13 +6,13 @@ import sys
 from typing import Optional
 
 from ..config import load_env
-from ..db import JobsRepo, get_client
+from ..local_store import get_local_store
 from ..filters import filter_jobs
 
 
 def cmd_jobs(args: argparse.Namespace) -> int:
     load_env()
-    repo = JobsRepo(get_client())
+    repo = get_local_store()
 
     # Filtering is local (regex/keyword matchers in filters.py); pull a
     # working window from the shared catalog. Hard ceiling prevents a

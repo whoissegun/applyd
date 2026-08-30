@@ -23,6 +23,7 @@ def fetch(company: str, client: Optional[httpx.Client] = None) -> list[Job]:
             json={},
             headers={"Content-Type": "application/json"},
             follow_redirects=True,
+            timeout=8.0,
         )
         if resp.status_code in (400, 404):
             return []

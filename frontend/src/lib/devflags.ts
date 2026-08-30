@@ -49,7 +49,7 @@ export const MOCK_PROFILE = {
 
 export const MOCK_RESUME = {
   resume_text:
-    "Divine Jojolola — Carleton CS, graduates Apr 2027.\n\nShopify (ML Infra Intern, Jan–Apr 2026)\n- Optimized similarity computation in Flink, cutting inference latency ~20% across 4 pipelines.\n- Built an Airflow DAG that reclaims stale ML data and syncs to GCS, freeing 6.9 TB across 61k files.\n\n(Dev preview — this content is mocked.)\n",
+    "Test User — Computer Science student, graduates Apr 2027.\n\nExample Company (Software Engineering Intern)\n- Improved a batch-processing pipeline and reduced median latency.\n- Automated stale-data cleanup and storage reporting.\n\n(Dev preview — this content is mocked.)\n",
   master_pdf_storage_path: "00000000-0000-0000-0000-000000000000/master.pdf",
   updated_at: new Date().toISOString(),
 };

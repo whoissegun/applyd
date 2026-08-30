@@ -1,0 +1,116 @@
+{
+  "first_name": "Jane",
+  "last_name": "Doe",
+  "full_name": "Jane Doe",
+  "email": "jane@example.com",
+  "phone": "+1-555-555-5555",
+  "address_city": "Ottawa",
+  "address_region": "Ontario",
+  "address_country": "Canada",
+  "address_country_code": "CA",
+  "linkedin_url": "https://www.linkedin.com/in/jane-doe/",
+  "github_url": "https://github.com/janedoe",
+  "school": "Carleton University",
+  "degree": "Bachelor of Computer Science",
+  "expected_grad_date": "2027-04",
+  "gpa": {
+    "value": 9.6,
+    "scale": 12,
+    "disclose": true,
+    "conversion_policy": "use_original_or_review_if_form_requires_another_scale"
+  },
+  "citizenships": [],
+  "over_18": true,
+  "security_clearances": [],
+  "years_professional_experience": 1,
+  "work_authorization": {
+    "CA": {
+      "authorized": true,
+      "requires_sponsorship": false,
+      "visa_status": "Canadian Work Permit"
+    },
+    "US": {
+      "authorized": false,
+      "requires_sponsorship": true,
+      "visa_status": null
+    },
+    "UK": {
+      "authorized": false,
+      "requires_sponsorship": true,
+      "visa_status": null,
+      "work_permit": false
+    }
+  },
+  "background_defaults": {
+    "never_employed_by_target_unless_listed_on_resume": true,
+    "no_immediate_family_at_target_company": true,
+    "no_immediate_family_in_government": true
+  },
+  "security_clearance": {
+    "US": {
+      "held": false,
+      "past_level": "none",
+      "eligible": false,
+      "basis": "not a U.S. citizen"
+    }
+  },
+  "export_control": {
+    "us_person": false,
+    "classification": "foreign_person",
+    "us_citizen": false,
+    "us_lawful_permanent_resident": false,
+    "us_protected_individual": false,
+    "most_recent_citizenship_or_permanent_residency": "non-U.S. country"
+  },
+  "preferences": {
+    "allowed_seniority": ["intern", "new_grad", "entry", "mid", "senior", "staff_plus", "manager"],
+    "allow_internships": true,
+    "exclude_title_patterns": [],
+    "unknown_policy": "eligible",
+    "fill_optional_free_text": false
+  },
+  "matchmaking": {
+    "target_role_families": [
+      "software_engineering",
+      "machine_learning",
+      "data"
+    ],
+    "preferred_seniority": ["intern", "new_grad", "entry"],
+    "stretch_seniority": ["mid"]
+  },
+  "employment_preferences": {
+    "employment_types": ["internship", "new_grad", "full_time", "contract"],
+    "willing_to_relocate": true,
+    "willing_to_work_onsite": true,
+    "willing_to_work_hybrid": true,
+    "willing_to_work_remote": true,
+    "willing_to_travel": true,
+    "excluded_titles": [],
+    "excluded_companies": [],
+    "excluded_locations": []
+  },
+  "application_policy": {
+    "optional_cover_letter": "skip",
+    "required_cover_letter": "generate_from_grounded_facts_and_upload",
+    "optional_free_text": "skip",
+    "missing_required_factual_answer": "review",
+    "ordinary_accuracy_attestation": "authorized",
+    "unusual_legal_attestation": "review",
+    "gpa_forced_conversion": "review",
+    "required_referral_source_fallbacks": [
+      "Company careers page",
+      "LinkedIn",
+      "Indeed",
+      "Other"
+    ]
+  },
+  "writing_style": {
+    "tone": ["human", "warm", "specific"],
+    "avoid": ["em_dash", "AI_sounding_phrasing", "jargon", "generic_cliches"],
+    "creative_opinions_allowed": true,
+    "creative_motivation_allowed": true,
+    "invented_factual_events_allowed": false
+  },
+  "narrative_hooks": [],
+  "story_bank": []
+}

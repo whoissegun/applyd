@@ -1,0 +1,56 @@
+{
+  "contact": {
+    "name": "Jane Doe",
+    "phone": "+1-555-555-5555",
+    "email": "jane@example.com",
+    "linkedin": "https://www.linkedin.com/in/jane-doe/",
+    "github": "https://github.com/janedoe"
+  },
+  "education": [
+    {
+      "id": "carleton-bcs",
+      "institution": "Carleton University",
+      "location": "Ottawa, ON",
+      "degree": "Bachelor of Computer Science",
+      "dates": "September 2022 – April 2027"
+    }
+  ],
+  "experience": [
+    {
+      "id": "example-company-engineer",
+      "title": "Software Engineer Intern",
+      "company": "Example Company",
+      "location": "Ottawa, ON",
+      "dates": "January 2026 – April 2026",
+      "bullets": [
+        {
+          "id": "example-company-engineer-1",
+          "text": "Built internal Python tooling that improved the reliability of production data workflows."
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "id": "example-project",
+      "name": "Example Project",
+      "url": "https://github.com/janedoe/example",
+      "technologies": ["Python", "FastAPI"],
+      "dates": "2026",
+      "bullets": [
+        {
+          "id": "example-project-1",
+          "text": "Developed an API service for processing structured application data."
+        }
+      ]
+    }
+  ],
+  "skills": {
+    "Languages": ["Python", "Java", "SQL"],
+    "Backend": ["FastAPI", "PostgreSQL"]
+  },
+  "tailoring_policy": {
+    "required_experience_ids": ["example-company-engineer"],
+    "preserve_experience_order": true
+  }
+}

@@ -10,10 +10,10 @@ from typing import Iterable, Optional
 import httpx
 
 from ..config import load_env
-from ..db import JobsRepo, get_client
+from ..local_store import get_local_store
 from ..discovery import ATS_MODULES, ResolverCache, aggregators, resolve
 from ..discovery.cache import BroadSearchCache
-from ..discovery.routing import detect_ats, extract_company_slug
+from ..discovery.routing import detect_ats, extract_company_slug, parse_ats_url
 from ..discovery.search import SearchProvider, make_provider
 from ..models import Job
 
@@ -43,9 +43,47 @@ def _seed_cache_from_jobs(cache: ResolverCache, jobs: Iterable[Job]) -> int:
     return seeded
 
 
+def _freshest_within_limit(
+    jobs: Iterable[Job], *, written: int, limit: int
+) -> list[Job]:
+    """Return the freshest remaining slice under a run-wide hard cap."""
+    values = list(jobs)
+    values.sort(
+        key=lambda job: job.posted_at.timestamp() if job.posted_at else 0,
+        reverse=True,
+    )
+    if limit <= 0:
+        return values
+    remaining = max(0, limit - written)
+    return values[:remaining]
+
+
+def _supported_jobs(jobs: Iterable[Job]) -> tuple[list[Job], int]:
+    """Keep jobs on ATS platforms supported by both retrieval and apply."""
+    supported: list[Job] = []
+    skipped = 0
+    for job in jobs:
+        parsed = parse_ats_url(job.url)
+        if parsed and parsed[0] in ATS_MODULES:
+            supported.append(job)
+        else:
+            skipped += 1
+    return supported, skipped
+
+
+def _attach_retrieval_route(job: Job, ats: str, slug: str) -> None:
+    """Preserve a branded apply URL while recording a parseable ATS API URL."""
+    if parse_ats_url(job.url):
+        return
+    if ats == "greenhouse":
+        job.raw["_applyd_retrieval_url"] = (
+            f"https://boards.greenhouse.io/{slug}/jobs/{job.external_id}"
+        )
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     load_env()
-    repo = JobsRepo(get_client())
+    repo = get_local_store()
 
     cache = ResolverCache(Path(args.cache))
     cache.load()
@@ -88,13 +126,22 @@ def cmd_discover(args: argparse.Namespace) -> int:
 
         print("→ aggregator: SimplifyJobs...", file=sys.stderr)
         try:
-            jobs = aggregators.simplifyjobs.fetch(client)
+            fetched_jobs = aggregators.simplifyjobs.fetch(client)
+            candidate_jobs = fetched_jobs
+            unsupported = 0
+            if not args.include_unsupported_ats:
+                candidate_jobs, unsupported = _supported_jobs(fetched_jobs)
+            jobs = _freshest_within_limit(
+                candidate_jobs, written=total_new + total_updated, limit=args.limit
+            )
             new, updated = repo.upsert(jobs)
             total_new += new
             total_updated += updated
             seeded = _seed_cache_from_jobs(cache, jobs)
             print(
-                f"  {len(jobs)} postings, +{new} new, {updated} updated, "
+                f"  {len(fetched_jobs)} fetched, {len(jobs)} kept, "
+                f"{unsupported} unsupported skipped, "
+                f"+{new} new, {updated} updated, "
                 f"{seeded} cache seeds",
                 file=sys.stderr,
             )
@@ -103,18 +150,23 @@ def cmd_discover(args: argparse.Namespace) -> int:
             errors.append(msg)
             print(f"  ✗ {msg}", file=sys.stderr)
 
-        if run_broad:
+        if run_broad and (not args.limit or total_new + total_updated < args.limit):
             ttl_hours = float(os.environ.get("BROAD_SEARCH_TTL_HOURS", "6"))
             broad_cache = BroadSearchCache(Path(args.broad_cache), ttl_hours=ttl_hours)
             broad_cache.load()
             print(f"\n→ aggregator: broad_search (provider={provider_name}, "
                   f"ttl={ttl_hours}h)...", file=sys.stderr)
             try:
-                jobs, stats = aggregators.broad_search.discover(
+                fetched_jobs, stats = aggregators.broad_search.discover(
                     provider=provider,
                     keyword_queries=broad_dorks,
                     client=client,
                     cache=broad_cache,
+                )
+                jobs = _freshest_within_limit(
+                    fetched_jobs,
+                    written=total_new + total_updated,
+                    limit=args.limit,
                 )
                 new, updated = repo.upsert(jobs)
                 total_new += new
@@ -152,6 +204,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             for company in companies:
+                if args.limit and total_new + total_updated >= args.limit:
+                    break
                 resolved = cache.get(company)
                 if not resolved:
                     if provider is None:
@@ -184,7 +238,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
                     continue
                 print(f"→ {ats}:{slug} ({company})...", file=sys.stderr)
                 try:
-                    jobs = module.fetch(slug, client)
+                    fetched_jobs = module.fetch(slug, client)
+                    for job in fetched_jobs:
+                        _attach_retrieval_route(job, ats, slug)
+                    jobs = _freshest_within_limit(
+                        fetched_jobs,
+                        written=total_new + total_updated,
+                        limit=args.limit,
+                    )
                     new, updated = repo.upsert(jobs)
                     total_new += new
                     total_updated += updated

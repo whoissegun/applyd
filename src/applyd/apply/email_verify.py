@@ -9,7 +9,7 @@ The deployed worker CANNOT use the claude.ai Gmail connector (that's only in the
 agent's session), so mail is read over IMAP. Config via env:
   APPLYD_IMAP_HOST      (default imap.gmail.com)
   APPLYD_IMAP_PORT      (default 993)
-  APPLYD_IMAP_USER      the applicant's mailbox (for Divine: his Gmail address)
+  APPLYD_IMAP_USER      the applicant's mailbox address
   APPLYD_IMAP_PASSWORD  a Gmail *App Password* (16 chars), NOT the account pw
 If user/password are unset, `build_code_reader()` returns None and the caller
 falls back to gated:email_verification (today's behavior) — nothing breaks.

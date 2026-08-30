@@ -20,9 +20,13 @@ build/
 .env.*
 data/
 out/
+tmp/
 supabase/.temp/
 profile.json
 profile.md
+resume.json
+resume_base.tex
+pasted-text.txt
 *.log
 npm-debug.log*
 yarn-debug.log*

@@ -9,7 +9,6 @@ from ..discovery._base import http_client
 from ..discovery.ats import ATS_MODULES
 from ..discovery.routing import parse_ats_url
 from ..models import Job
-from .spider import SpiderClient
 
 
 # session-level type alias: {(ats, company_slug): [Job, ...]}
@@ -189,8 +188,8 @@ def _lever_posting_page_live(url: str, client: Optional[httpx.Client]) -> Option
     """Confirm a board-absent Lever posting against its HTML page.
 
     Returns:
-      None  — page still serves a submittable form (treat as live; do NOT mark
-              the shared row dead on an unconfirmed signal)
+      True  — page still serves a submittable form
+      None  — request was inconclusive; do not mark the row dead
       False — page confirms the posting is closed / gone
     """
     base = url.split("?")[0].rstrip("/")
@@ -211,53 +210,42 @@ def _lever_posting_page_live(url: str, client: Optional[httpx.Client]) -> Option
         return False
     # Live Lever posting pages carry the apply submit control.
     if "template-btn-submit" in body or "postings-btn" in body or "/apply" in body:
-        return None
+        return True
     return False
-
-
-def _tier3_spider(url: str, spider: SpiderClient, chrome: bool) -> Optional[str]:
-    try:
-        content = spider.scrape(url, chrome=chrome)
-    except Exception:
-        return None
-    return content if len(content) >= MIN_USEFUL_CHARS else None
 
 
 def fetch_text(
     url: str,
-    spider: Optional[SpiderClient] = None,
     client: Optional[httpx.Client] = None,
     board_cache: Optional[AtsBoardCache] = None,
 ) -> tuple[str, str, Optional[str]]:
     """
-    Cascade: ATS bulk API → httpx+trafilatura → spider smart → spider chrome → failed.
+    Free cascade: ATS bulk API → local Chrome for known-ATS misses. Ordinary
+    HTTP remains available only for explicitly included custom sites.
+    The command-level orchestrator sends failures through one persistent local
+    Playwright context after threaded HTTP retrieval finishes.
     Returns (text, tier, error). tier is one of:
-      "ats" | "http" | "spider" | "spider-chrome" | "failed"
+      "ats" | "http" | "failed"
     """
     if board_cache is None:
         board_cache = {}
+
+    parsed = parse_ats_url(url)
 
     # Tier 1: ATS API (free, usually fastest on second hit per board)
     text = _tier1_ats_api(url, client, board_cache)
     if text:
         return text, "ats", None
 
-    # Tier 2: plain httpx + trafilatura (free)
+    # For a known ATS, an API miss usually means the public posting is a
+    # JavaScript shell (not useful to trafilatura). Route it directly to the
+    # command's local-Chrome fallback instead of paying another HTTP timeout.
+    if parsed and parsed[0] in ATS_MODULES:
+        return "", "failed", "supported ATS API returned no description"
+
+    # Tier 2: plain HTTP is retained only for explicitly included custom sites.
     text = _tier2_httpx(url, client)
     if text:
         return text, "http", None
 
-    if spider is None:
-        return "", "failed", "tier 1/2 empty and no spider fallback"
-
-    # Tier 3a: spider.cloud smart (paid, cheap)
-    text = _tier3_spider(url, spider, chrome=False)
-    if text:
-        return text, "spider", None
-
-    # Tier 3b: spider.cloud chrome (paid, slower, renders full SPA)
-    text = _tier3_spider(url, spider, chrome=True)
-    if text:
-        return text, "spider-chrome", None
-
-    return "", "failed", "all tiers returned empty or too-short content"
+    return "", "failed", "ATS and ordinary HTTP returned empty or too-short content"

@@ -55,21 +55,21 @@ TINY_PDF_BYTES = (
     b"startxref\n172\n%%EOF\n"
 )
 
-# Minimal but truthful profile prose — Divine's actual details (per CLAUDE.md context).
+# Fictional profile data for the legacy SaaS smoke test.
 PROFILE_PROSE = """\
 # applyd profile
 
 ## Identity
-- Full legal name: Divine Jojolola
-- Email: jojololadivine05@gmail.com
-- Phone: +1 613-555-0142 (smoke test placeholder)
+- Full legal name: Jane Example
+- Email: jane@example.invalid
+- Phone: +1 555-555-0100
 
 ## Location
 Ottawa, Ontario, Canada.
 
 ## Links
-- LinkedIn: https://www.linkedin.com/in/divine-jojolola
-- GitHub: https://github.com/whoissegun
+- LinkedIn: https://www.linkedin.com/in/jane-example
+- GitHub: https://github.com/jane-example
 
 ## Education
 - Carleton University, Bachelor of Computer Science
@@ -194,7 +194,7 @@ def main() -> int:
 
         # 2. Set profile_answers prose.
         admin.table("user_profiles").update(
-            {"profile_answers": PROFILE_PROSE, "full_name": "Divine Jojolola"}
+            {"profile_answers": PROFILE_PROSE, "full_name": "Jane Example"}
         ).eq("id", user_id).execute()
         prof = (
             admin.table("user_profiles")

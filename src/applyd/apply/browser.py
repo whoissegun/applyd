@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
 
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
@@ -138,3 +139,82 @@ def local_page(headless: bool = False, slow_mo_ms: int = 250) -> Iterator[Page]:
             yield page
         finally:
             browser.close()
+
+
+@contextmanager
+def persistent_local_page(
+    *,
+    profile_dir: str | Path | None = None,
+    headless: bool | None = None,
+) -> Iterator[Page]:
+    """Open the dedicated persistent Chrome profile used for real local applies."""
+    if profile_dir is None:
+        profile_dir = os.environ.get(
+            "APPLYD_BROWSER_PROFILE", "data/browser/apply-profile"
+        )
+    if headless is None:
+        headless = os.environ.get("APPLYD_BROWSER_HEADLESS", "true").lower() != "false"
+    profile = Path(profile_dir)
+    profile.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        try:
+            context = p.chromium.launch_persistent_context(
+                str(profile),
+                channel="chrome",
+                headless=headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            try:
+                context = p.chromium.launch_persistent_context(
+                    str(profile),
+                    headless=headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+            except Exception as exc:
+                raise BrowserConnectError(
+                    f"could not launch local Chrome: {type(exc).__name__}: {exc}"
+                ) from exc
+        try:
+            # A persistent profile may restore the tab from the previous run,
+            # including its already-filled DOM. Reusing context.pages[0] made
+            # a test-mode rerun appear to pass without exercising any fields.
+            # Keep cookies/session state, but isolate every application in a
+            # brand-new document.
+            restored_pages = list(context.pages)
+            page = context.new_page()
+            for old_page in restored_pages:
+                try:
+                    old_page.close()
+                except Exception:
+                    pass
+            yield page
+        finally:
+            context.close()
+
+
+@contextmanager
+def browser_page(
+    provider: str | None = None, *, test_mode: bool = True
+) -> Iterator[Page]:
+    """Select the local default or optional Bright Data compatibility path.
+
+    Test runs remain headless by default. Real local submissions use visible
+    Chrome unless APPLYD_BROWSER_HEADLESS explicitly overrides it: Ashby
+    rejected the same completed form as spam headless and accepted it headed.
+    """
+    provider = (provider or os.environ.get("APPLYD_BROWSER_PROVIDER", "local")).lower()
+    if provider == "local":
+        headless = None
+        if not test_mode and "APPLYD_BROWSER_HEADLESS" not in os.environ:
+            headless = False
+        with persistent_local_page(headless=headless) as page:
+            setattr(page, "_applyd_browser_provider", "local")
+            yield page
+        return
+    if provider == "brightdata":
+        with brightdata_page(block_heavy=True) as page:
+            setattr(page, "_applyd_browser_provider", "brightdata")
+            yield page
+        return
+    raise BrowserConnectError(f"unknown browser provider: {provider!r}")
