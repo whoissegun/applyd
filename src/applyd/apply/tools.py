@@ -415,7 +415,7 @@ def _grounded_fill_value(
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
     if any(phrase in normalized for phrase in (
         "when can you start", "available to start", "availability date",
-        "employment start date", "job start date",
+        "employment start date", "job start date", "earliest possible start date",
     )):
         grounded = datetime.now().date().isoformat()
         return grounded, f"grounded start date from profile: {grounded}"

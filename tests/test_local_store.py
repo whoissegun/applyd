@@ -86,6 +86,12 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(trace[0]["sequence"], 1)
         self.assertEqual(trace[0]["payload"]["args"]["value_chars"], 10)
 
+        refreshed_hash = self.store.set_profile({"name": "Updated Candidate"})
+        self.store.set_evaluation(job.id, "eligible", [], refreshed_hash)
+        self.assertEqual(
+            self.store.get_application_by_job(job.id)["status"], "tested"
+        )
+
     def test_infra_error_returns_application_to_tailored(self) -> None:
         job = make_job()
         self.store.upsert([job])
@@ -113,6 +119,12 @@ class LocalStoreTests(unittest.TestCase):
         self.assertEqual(application["status"], "review")
         self.assertEqual(application["reason"], "manual_only_ats:smartrecruiters")
         self.assertIsNone(application["tailored_resume_id"])
+
+        profile_hash = self.store.set_profile({"name": "Updated Candidate"})
+        self.store.set_evaluation(job.id, "eligible", [], profile_hash)
+        application = self.store.get_application_by_job(job.id)
+        self.assertEqual(application["status"], "review")
+        self.assertEqual(application["reason"], "manual_only_ats:smartrecruiters")
 
     def test_profile_question_gaps_are_aggregated(self) -> None:
         self.store.record_profile_question_gap(

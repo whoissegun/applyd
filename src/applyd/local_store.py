@@ -573,8 +573,22 @@ class LocalStore:
                        VALUES(?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET
                        status=CASE
                            WHEN applications.status IN ('applied','in_progress','tailored')
+                             OR (applications.status='review'
+                                 AND applications.reason LIKE 'manual_only_ats:%')
+                             OR EXISTS(
+                                 SELECT 1 FROM apply_attempts aa
+                                 WHERE aa.application_id=applications.id
+                             )
                            THEN applications.status ELSE 'eligible' END,
-                       reason=NULL,
+                       reason=CASE
+                           WHEN applications.status='review'
+                             AND applications.reason LIKE 'manual_only_ats:%'
+                           THEN applications.reason
+                           WHEN EXISTS(
+                               SELECT 1 FROM apply_attempts aa
+                               WHERE aa.application_id=applications.id
+                           )
+                           THEN applications.reason ELSE NULL END,
                        updated_at=excluded.updated_at""",
                     (uuid.uuid4().hex, job_id, "eligible", _utcnow()),
                 )

@@ -107,6 +107,9 @@ the first snapshot is canonical for the run; refs stay valid.
   conversion, not missing information.
   If the form asks for a full graduation date and the profile only has YYYY-MM,
   use the first day of that month in MM/01/YYYY format.
+- GPA: use the original value and scale when accepted. Convert arithmetically
+  only when the profile's conversion policy explicitly permits it. Never guess
+  a class/rank equivalence such as First, 2:1, or Pass from a numeric GPA.
 - Availability/start dates: if `earliest_start_date` is immediately/now and a
   date is required, use today's real date from the application context. Never
   invent a proxy date or reuse an old graduation/internship date.

@@ -17,6 +17,8 @@ from applyd.apply.tools import (
     submit,
 )
 from applyd.apply.runner import (
+    _max_turns_verdict,
+    _missing_info_labels,
     _sanitize_tool_args,
     _sanitize_tool_result,
     _tool_signature,
@@ -53,6 +55,27 @@ class _WaitPage:
 
 
 class ApplyToolBindingTests(unittest.TestCase):
+    def test_final_turn_confirmation_enters_review_not_failed(self) -> None:
+        status, note = _max_turns_verdict(24, 25)
+        self.assertEqual(status, "review")
+        self.assertIn("submission_confirmation_unacknowledged", note)
+        self.assertEqual(
+            _max_turns_verdict(None, 25),
+            ("failed", "hit MAX_TURNS=25 without report_done"),
+        )
+
+    def test_missing_info_labels_are_extracted_for_profile_guard(self) -> None:
+        self.assertEqual(
+            _missing_info_labels("review:missing_info | field='GPA'"),
+            ["GPA"],
+        )
+        self.assertEqual(
+            _missing_info_labels(
+                "review:missing_info | fields=Country of residence; Which state are you located in?"
+            ),
+            ["Country of residence", "Which state are you located in?"],
+        )
+
     def test_trace_redacts_typed_values_and_snapshot_values(self) -> None:
         args = _sanitize_tool_args(
             "fill_many",
@@ -147,6 +170,26 @@ class ApplyToolBindingTests(unittest.TestCase):
     def test_structured_profile_overrides_false_city_gap(self) -> None:
         self.assertTrue(_profile_already_answers(
             "Location (City)*", {"address_city": "Ottawa"}
+        ))
+
+    def test_structured_profile_overrides_country_and_region_gaps(self) -> None:
+        profile = {"address_country": "Canada", "address_region": "Ontario"}
+        self.assertTrue(_profile_already_answers(
+            "Country (field0 dropdown): current residence", profile
+        ))
+        self.assertTrue(_profile_already_answers(
+            "Which state are you located in?", profile
+        ))
+
+    def test_location_specific_visa_question_uses_job_region(self) -> None:
+        profile = {"work_authorization": {
+            "UK": {"authorized": False, "requires_sponsorship": True}
+        }}
+        self.assertTrue(_profile_already_answers(
+            "Would you now or in the future require a visa for employment "
+            "for where this job is based?",
+            profile,
+            job_locations=["London, United Kingdom"],
         ))
 
     def test_resume_overrides_false_employment_history_gap(self) -> None:

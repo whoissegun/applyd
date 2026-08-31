@@ -537,6 +537,32 @@ def run_apply(
 
                     if name == "report_done":
                         requested_status = args.get("status", "failed")
+                        requested_note = str(args.get("note", ""))
+                        missing_labels = _missing_info_labels(requested_note)
+                        if missing_labels and all(
+                            _profile_already_answers(
+                                label,
+                                profile_context,
+                                job_locations=job_locations,
+                                resume_text=resume_tex,
+                                company=company,
+                            )
+                            for label in missing_labels
+                        ):
+                            result = (
+                                "error: cannot report missing_info; the structured "
+                                "profile already answers: "
+                                + "; ".join(missing_labels)
+                                + ". Use the exact profile values and continue."
+                            )
+                            messages.append({
+                                "role": "tool", "tool_call_id": tc.id, "content": result
+                            })
+                            _emit(
+                                "tool_result", turn=turn, name=name,
+                                payload={"result": result},
+                            )
+                            continue
                         # The agent must observe submit's result before it may
                         # report applied. This rejects a single assistant turn
                         # that batches submit + report_done and blindly assumes
@@ -552,7 +578,7 @@ def run_apply(
                                 "role": "tool", "tool_call_id": tc.id, "content": result
                             })
                             continue
-                        final_note = args.get("note", "")
+                        final_note = requested_note
                         final_status = _normalize_report_status(
                             requested_status, final_note
                         )
@@ -653,8 +679,9 @@ def run_apply(
                             )
                     break
             else:
-                final_status = "failed"
-                final_note = f"hit MAX_TURNS={MAX_TURNS} without report_done"
+                final_status, final_note = _max_turns_verdict(
+                    submit_confirmed_turn, MAX_TURNS
+                )
     except Exception as e:
         # Transient infra (no credits, rate limit, provider outage, Bright Data
         # refusing the CDP connect) is not this job's fault — surface a distinct
@@ -740,6 +767,33 @@ def _terminal_tool_verdict(name: str, result: str) -> tuple[str, str] | None:
     return None
 
 
+def _max_turns_verdict(
+    submit_confirmed_turn: int | None, max_turns: int,
+) -> tuple[str, str]:
+    if submit_confirmed_turn is not None:
+        return (
+            "review",
+            "review:submission_confirmation_unacknowledged | "
+            f"submit confirmed on final turn before MAX_TURNS={max_turns}",
+        )
+    return "failed", f"hit MAX_TURNS={max_turns} without report_done"
+
+
+def _missing_info_labels(note: str) -> list[str]:
+    if "missing_info" not in note.casefold():
+        return []
+    match = re.search(r"\bfields?\s*=\s*(.+)$", note, re.I)
+    if not match:
+        return []
+    raw = match.group(1).strip().strip("[]")
+    labels = []
+    for value in raw.split(";"):
+        label = value.strip().strip("'\"")
+        if label:
+            labels.append(label)
+    return labels
+
+
 def _profile_already_answers(
     label: str,
     profile: dict[str, Any],
@@ -818,7 +872,8 @@ def _profile_already_answers(
             "authorized to work", "authorised to work", "work authorization",
             "work authorisation", "immigration sponsorship", "visa sponsorship",
             "require sponsorship", "requires sponsorship", "legal right to work",
-            "legally permitted to work", "work permit",
+            "legally permitted to work", "work permit", "require a visa",
+            "requires a visa", "visa for employment",
         )
     )
     if auth_question and region is None and job_locations:
@@ -874,6 +929,8 @@ def _profile_already_answers(
         (("citizenship", "citizen of"), "citizenships"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),
         (("location city", "current city", "city of residence"), "address_city"),
+        (("current residence", "country of residence", "current country"), "address_country"),
+        (("state are you located", "state province", "province territory"), "address_region"),
     )
     if any(
         any(phrase in text for phrase in phrases) and profile.get(key) is not None

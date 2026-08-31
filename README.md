@@ -266,13 +266,15 @@ In the latest 20-job live validation batch, recorded OpenRouter usage was:
 
 | Component | Total | Average per selected job |
 | --- | ---: | ---: |
-| Resume tailoring | $0.3193 | $0.0160 |
-| Application agent | $0.6764 | $0.0338 |
-| **Combined** | **$0.9957** | **$0.0498** |
+| Resume tailoring | $0.1956 | $0.0098 |
+| Application agent | $0.4315 | $0.0216 |
+| **Combined** | **$0.6271** | **$0.0314** |
 
 This is a sample, not a price guarantee. Form length, retries, cache behavior,
 model pricing, and output size change the result. The figures exclude Bright
-Data charges and any interrupted request that could not be persisted.
+Data charges and any interrupted request that could not be persisted. In this
+batch, 17 jobs required tailoring while three SmartRecruiters jobs went directly
+to zero-cost manual review.
 
 ## Configuration
 
