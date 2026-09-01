@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import unittest
+from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from applyd.apply.tools import (
     TOOL_DEFS,
     _grounded_fill_value,
+    fill_autocomplete,
+    open_dropdown,
     _profile_click_guard,
     _select_profile_guard,
     _match_option,
@@ -25,6 +30,7 @@ from applyd.apply.runner import (
     _normalize_report_status,
     _profile_already_answers,
     _terminal_tool_verdict,
+    run_apply,
 )
 from applyd.discovery.routing import preferred_apply_url
 
@@ -172,6 +178,21 @@ class ApplyToolBindingTests(unittest.TestCase):
             "Location (City)*", {"address_city": "Ottawa"}
         ))
 
+    def test_motivation_and_hourly_rate_are_not_false_profile_gaps(self) -> None:
+        self.assertTrue(_profile_already_answers(
+            "Why do you want to join LiveFlow?", {}
+        ))
+        self.assertTrue(_profile_already_answers(
+            "What is your expected hourly rate?*",
+            {"salary_expectation": {
+                "strategy": "use_posted_range_or_negotiable",
+                "fallback": "Negotiable",
+            }},
+        ))
+        self.assertFalse(_profile_already_answers(
+            "Upload a video explaining why you want to join us", {}
+        ))
+
     def test_structured_profile_overrides_country_and_region_gaps(self) -> None:
         profile = {"address_country": "Canada", "address_region": "Ontario"}
         self.assertTrue(_profile_already_answers(
@@ -254,6 +275,21 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertNotEqual(value, "2025-06-01")
         self.assertIn("grounded start date", note or "")
 
+    def test_when_are_you_available_is_runner_grounded(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = "When are you available to begin?"
+        value, note = _grounded_fill_value(
+            page, "r12", "Eventually", {"earliest_start_date": "now"}
+        )
+        self.assertRegex(value, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertIn("grounded start date", note or "")
+        self.assertTrue(_profile_already_answers(
+            "When are you available to begin?",
+            {"earliest_start_date": "now"},
+        ))
+
     def test_ambiguous_start_date_is_not_treated_as_availability(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -305,6 +341,125 @@ class ApplyToolBindingTests(unittest.TestCase):
             {"ref": "o1", "text": "Yes, later"},
         ], "Yes"))
 
+    def test_dropdown_matching_handles_safe_ats_wording_variants(self) -> None:
+        self.assertEqual(_match_option([
+            {"ref": "o0", "text": "Associate's Degree"},
+            {"ref": "o1", "text": "Bachelor's Degree"},
+            {"ref": "o2", "text": "Doctor of Philosophy (Ph.D.)"},
+        ], "Bachelor of Computer Science")["ref"], "o1")
+        self.assertEqual(_match_option([
+            {"ref": "o0", "text": "Employee Referral"},
+            {"ref": "o1", "text": "SharkNinja Career Website"},
+        ], "Company careers page")["ref"], "o1")
+        self.assertEqual(_match_option([
+            {"ref": "o0", "text": "Male"},
+            {"ref": "o1", "text": "Decline To Self Identify"},
+        ], "Prefer not to say")["ref"], "o1")
+
+    @patch("applyd.apply.tools._ref_locator")
+    def test_open_dropdown_is_idempotent_when_options_are_visible(
+        self, ref_locator
+    ) -> None:
+        locator = MagicMock()
+        locator.evaluate.return_value = "input"
+        locator.get_attribute.return_value = "1"
+        ref_locator.return_value = locator
+        page = MagicMock()
+        page.evaluate.return_value = [{"ref": "o0", "text": "Carleton University"}]
+        result = open_dropdown(page, "r16")
+        self.assertIn("already open", result)
+        locator.click.assert_not_called()
+
+    @patch("applyd.apply.tools.pick_option", return_value="ok: picked o7")
+    @patch("applyd.apply.tools._read_options")
+    @patch("applyd.apply.tools.open_dropdown")
+    @patch("applyd.apply.tools._ref_locator")
+    def test_select_option_reuses_open_greenhouse_options(
+        self, ref_locator, open_mock, read_options, _pick
+    ) -> None:
+        locator = MagicMock()
+        locator.get_attribute.return_value = "1"
+        ref_locator.return_value = locator
+        read_options.return_value = [
+            {"ref": "o7", "text": "Carleton University"}
+        ]
+        result = select_option(MagicMock(), "r16", "Carleton University")
+        self.assertIn("selected 'Carleton University'", result)
+        open_mock.assert_not_called()
+
+    @patch("applyd.apply.tools.pick_option", return_value="ok: picked o0")
+    @patch("applyd.apply.tools._ref_locator")
+    def test_fill_autocomplete_accepts_react_picked_value(
+        self, ref_locator, _pick
+    ) -> None:
+        locator = MagicMock()
+        locator.evaluate.side_effect = [False, None, "Ottawa, Ontario, Canada"]
+        ref_locator.return_value = locator
+        page = MagicMock()
+        page.evaluate.return_value = [
+            {"ref": "o0", "text": "Ottawa, Ontario, Canada"}
+        ]
+        result = fill_autocomplete(page, "r9", "Ottawa")
+        self.assertIn("picked", result)
+
+    def test_accepted_report_done_stops_later_batched_tool_calls(self) -> None:
+        def response(*calls):
+            tool_calls = [
+                SimpleNamespace(
+                    id=f"call-{index}",
+                    function=SimpleNamespace(
+                        name=name, arguments=json.dumps(arguments)
+                    ),
+                )
+                for index, (name, arguments) in enumerate(calls)
+            ]
+            message = MagicMock()
+            message.tool_calls = tool_calls
+            message.content = None
+            message.model_dump.return_value = {"role": "assistant"}
+            return SimpleNamespace(
+                usage=SimpleNamespace(cost=0),
+                choices=[SimpleNamespace(message=message)],
+            )
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            response(("navigate", {})),
+            response(("snapshot", {})),
+            response(
+                ("report_done", {
+                    "status": "review", "note": "review:manual_artifact"
+                }),
+                ("fill", {"ref": "r1", "value": "must not execute"}),
+            ),
+        ]
+
+        @contextmanager
+        def fake_browser(*_args, **_kwargs):
+            yield MagicMock()
+
+        with patch("applyd.apply.runner._make_client", return_value=client), patch(
+            "applyd.apply.runner.browser_page", fake_browser
+        ), patch(
+            "applyd.apply.runner.dispatch",
+            side_effect=["ok: loaded", "r1: [input/text *] 'Name'"],
+        ) as dispatch_mock, patch(
+            "applyd.apply.runner._start_hard_watchdog"
+        ) as watchdog, patch(
+            "applyd.apply.runner.load_env"
+        ), patch(
+            "applyd.apply.runner.build_code_reader", return_value=None
+        ):
+            watchdog.return_value.set.return_value = None
+            result = run_apply(
+                job_id="job-1", company="Example", title="Engineer",
+                job_url="https://example.test/job", resume_pdf_path="resume.pdf",
+                profile_md="{}", test_mode=False,
+            )
+
+        self.assertEqual(result["status"], "review")
+        self.assertEqual(dispatch_mock.call_count, 2)
+
     @patch("applyd.apply.tools.pick_option", return_value="ok: picked o1")
     @patch("applyd.apply.tools._ref_locator")
     @patch("applyd.apply.tools._read_options")
@@ -318,7 +473,7 @@ class ApplyToolBindingTests(unittest.TestCase):
         ]
         result = select_option(MagicMock(), "r4", "Yes")
         self.assertIn("selected 'Yes'", result)
-        ref_locator.assert_not_called()
+        ref_locator.return_value.fill.assert_not_called()
         pick_option_mock.assert_called_once()
 
     @patch("applyd.apply.tools.pick_option", return_value="ok: picked o8")
@@ -373,6 +528,22 @@ class ApplyToolBindingTests(unittest.TestCase):
             page, "r23", "No", {"work_authorization": {}}, "", ["London, UK"]
         )
         self.assertIn("not in the structured profile", result or "")
+
+    def test_foreign_resident_cannot_select_a_fabricated_us_state(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.return_value = "Which US state are you located in?"
+        profile = {
+            "address_region": "Ontario",
+            "address_country": "Canada",
+            "address_country_code": "CA",
+        }
+        result = _select_profile_guard(page, "r24", "Idaho", profile, "", [])
+        self.assertIn("refused fabricated U.S. state", result or "")
+        self.assertIsNone(_select_profile_guard(
+            page, "r24", "Not in the US", profile, "", []
+        ))
 
     def test_known_uk_authorization_is_answerable(self) -> None:
         profile = {"work_authorization": {

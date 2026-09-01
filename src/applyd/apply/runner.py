@@ -588,7 +588,10 @@ def run_apply(
                             payload={"result": "ok: recorded"},
                         )
                         done = True
-                        continue
+                        # A verdict is a hard boundary. Kimi can emit several
+                        # tool calls in one response; do not execute anything
+                        # that happens to follow an accepted report_done.
+                        break
 
                     result = dispatch(
                         page,
@@ -804,6 +807,21 @@ def _profile_already_answers(
 ) -> bool:
     """Reject false model gaps only when the structured profile has the fact."""
     text = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
+
+    # These prompts are explicitly delegated composition, not missing facts.
+    # Manual artifacts and historical explanations remain grounded/human.
+    if not any(phrase in text for phrase in (
+        "record a video", "video response", "video introduction",
+        "link to your video", "video link", "why did you leave",
+        "reason for leaving",
+    )) and any(phrase in text for phrase in (
+        "why do you want to join", "why do you want to work",
+        "why are you applying", "why do you want this role",
+        "why this company", "why this role", "why us",
+        "what interests you about", "what excites you about",
+        "why are you interested in", "motivation for applying",
+    )):
+        return True
     country_code = str(profile.get("address_country_code", "")).upper()
     country_name = str(profile.get("address_country", "")).casefold()
     if (
@@ -923,8 +941,14 @@ def _profile_already_answers(
         (("hispanic", "latino"), "hispanic_latino"),
         (("gender",), "gender"),
         (("gpa", "grade point"), "gpa"),
-        (("salary", "compensation", "pay expectation"), "salary_expectation"),
-        (("start date", "available to start"), "earliest_start_date"),
+        ((
+            "salary", "compensation", "pay expectation", "pay rate",
+            "hourly rate", "expected rate", "desired rate",
+        ), "salary_expectation"),
+        ((
+            "start date", "available to start", "when are you available",
+            "when would you be available", "availability date",
+        ), "earliest_start_date"),
         (("contact your previous", "contact previous employer"), "previous_employers_may_be_contacted"),
         (("citizenship", "citizen of"), "citizenships"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),

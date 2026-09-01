@@ -415,6 +415,7 @@ def _grounded_fill_value(
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
     if any(phrase in normalized for phrase in (
         "when can you start", "available to start", "availability date",
+        "when are you available", "when would you be available",
         "employment start date", "job start date", "earliest possible start date",
     )):
         grounded = datetime.now().date().isoformat()
@@ -545,20 +546,33 @@ def fill_autocomplete(page: Page, ref: str, value: str) -> str:
                 f"fill_autocomplete {ref}: picked Lever location "
                 f"{selected['name']!r} with hidden selection"
             )
+        # Mark the active control so pick_option can persist the chosen label
+        # on React comboboxes whose visible <input> is cleared after selection.
+        loc.evaluate(
+            """el => {
+                document.querySelectorAll('[data-applyd-combobox-open]')
+                    .forEach(e => e.removeAttribute('data-applyd-combobox-open'));
+                el.setAttribute('data-applyd-combobox-open', '1');
+            }"""
+        )
         loc.click(timeout=5000)
         loc.fill("", timeout=5000)
         loc.press_sequentially(value, delay=80, timeout=20000)
         page.wait_for_timeout(1500)  # let async suggestions render
         options = page.evaluate(_OPTIONS_JS)
         if options:
-            _ref_locator(page, options[0]["ref"]).click(timeout=5000)
+            selected = pick_option(page, options[0]["ref"])
+            if selected.startswith("error:"):
+                return selected.replace("pick_option", "fill_autocomplete", 1)
             picked = repr(options[0]["text"])
         else:
             loc.press("ArrowDown")
             loc.press("Enter")
             picked = "keyboard ArrowDown+Enter (no suggestion list detected)"
         page.wait_for_timeout(500)
-        final = (loc.evaluate("el => el.value") or "").strip()
+        final = (loc.evaluate(
+            "el => el.value || el.getAttribute('data-applyd-picked') || ''"
+        ) or "").strip()
         if not final:
             return _err(
                 f"fill_autocomplete {ref}: field is empty after picking — "
@@ -617,6 +631,17 @@ def open_dropdown(page: Page, ref: str) -> str:
                 return _err(f"open_dropdown {ref}: native <select> has no options")
             lines = "\n".join(f"  {o['ref']}: {o['text']}" for o in options)
             return f"opened {ref} (native select), {len(options)} options:\n{lines}"
+
+        # A prior select_option/open_dropdown may have deliberately left this
+        # combobox open after returning unmatched real choices. Clicking the
+        # trigger again closes React/Greenhouse lists, which caused the model
+        # to burn several turns trying fill/open/click fallbacks. Treat open as
+        # idempotent while this control still owns a visible option list.
+        if loc.get_attribute("data-applyd-combobox-open") == "1":
+            options = page.evaluate(_OPTIONS_JS)
+            if options:
+                lines = "\n".join(f"  {o['ref']}: {o['text']}" for o in options)
+                return f"opened {ref} (already open), {len(options)} options:\n{lines}"
 
         # ARIA combobox: click to expand, then read options. Mark this control
         # as the one being opened so pick_option can stamp the chosen value
@@ -694,6 +719,30 @@ def _normalize_option_text(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
 
 
+def _option_semantic(value: str) -> str | None:
+    """Map common ATS wording variants to a conservative shared meaning."""
+    text = _normalize_option_text(value)
+    if re.search(r"\bbachelor(?:s)?\b", text):
+        return "degree:bachelor"
+    if re.search(r"\bmaster(?:s)?\b", text):
+        return "degree:master"
+    if re.search(r"\bassociate(?:s)?\b", text):
+        return "degree:associate"
+    if re.search(r"\b(phd|doctor of philosophy)\b", text):
+        return "degree:phd"
+    if (
+        any(phrase in text for phrase in ("company career", "company careers"))
+        and any(term in text for term in ("page", "site", "website"))
+    ) or "career website" in text:
+        return "source:company-careers"
+    if any(phrase in text for phrase in (
+        "prefer not to say", "decline to self identify", "decline to answer",
+        "do not wish to answer",
+    )):
+        return "neutral:decline"
+    return None
+
+
 def _match_option(options: list[dict[str, str]], desired: str) -> dict[str, str] | None:
     """Choose an exact label, or one uniquely compatible partial label.
 
@@ -712,7 +761,17 @@ def _match_option(options: list[dict[str, str]], desired: str) -> dict[str, str]
         text = _normalize_option_text(option.get("text", ""))
         if wanted in text or text in wanted:
             compatible.append(option)
-    return compatible[0] if len(compatible) == 1 else None
+    if len(compatible) == 1:
+        return compatible[0]
+    semantic = _option_semantic(desired)
+    if semantic:
+        equivalent = [
+            option for option in options
+            if _option_semantic(option.get("text", "")) == semantic
+        ]
+        if len(equivalent) == 1:
+            return equivalent[0]
+    return None
 
 
 def _read_options(page: Page) -> list[dict[str, str]]:
@@ -745,6 +804,43 @@ def _select_profile_guard(
     )
     desired = _normalize_option_text(value)
     location_text = " ".join(job_locations or []).casefold()
+
+    # Never let a conditional U.S.-state control fabricate residence. Some
+    # Greenhouse forms leave the field required even after Canada is selected;
+    # Kimi once picked Idaho simply to satisfy it. A foreign resident may use
+    # an explicit N/A option, otherwise the job must remain in review.
+    region_question = any(term in label for term in (
+        "which us state", "which u s state", "state are you located",
+        "state do you live", "state of residence", "state province",
+        "province territory", "current state",
+    ))
+    if region_question:
+        profile_region = _normalize_option_text(str(profile.get("address_region") or ""))
+        country_code = str(profile.get("address_country_code") or "").upper()
+        country_name = _normalize_option_text(str(profile.get("address_country") or ""))
+        outside_us = country_code not in {"", "US"} or (
+            country_name not in {"", "united states", "united states of america"}
+        )
+        neutral = any(term in desired for term in (
+            "not applicable", "not in the us", "outside the us", "none"
+        ))
+        matches_profile = bool(profile_region) and (
+            desired == profile_region
+            or profile_region in desired
+            or desired in profile_region
+        )
+        if outside_us and "state" in label and not neutral and not matches_profile:
+            return _err(
+                f"select_option {ref}: refused fabricated U.S. state {value!r}; "
+                f"profile residence is {profile.get('address_region')!r}, "
+                f"{profile.get('address_country')!r}. Choose an explicit Not "
+                "Applicable/Not in the US option or send to review."
+            )
+        if profile_region and not matches_profile and not neutral:
+            return _err(
+                f"select_option {ref}: refused location {value!r}; structured "
+                f"profile region is {profile.get('address_region')!r}"
+            )
     uk_question = (
         any(term in label for term in (" uk ", "united kingdom", "britain"))
         or any(term in location_text for term in ("united kingdom", " uk", "london"))
@@ -799,13 +895,21 @@ def select_option(
         )
         if guard:
             return guard
-        opened = open_dropdown(page, ref)
-        if opened.startswith("error:"):
-            return opened.replace("open_dropdown", "select_option", 1)
+        loc = _ref_locator(page, ref)
+        initial_options: list[dict[str, str]] = []
+        if loc.get_attribute("data-applyd-combobox-open") == "1":
+            # Reuse choices exposed by the previous turn instead of toggling
+            # the same Greenhouse control closed.
+            page.evaluate(_OPTIONS_JS)
+            initial_options = _read_options(page)
+        if not initial_options:
+            opened = open_dropdown(page, ref)
+            if opened.startswith("error:"):
+                return opened.replace("open_dropdown", "select_option", 1)
+            initial_options = _read_options(page)
         # Inspect what the component actually rendered before typing anything.
         # Most answer dropdowns are short, and an exact/unique compatible choice
         # should be selected directly from their real labels.
-        initial_options = _read_options(page)
         options = initial_options
         matched = _match_option(options, value)
 
@@ -815,7 +919,6 @@ def select_option(
         # the filtered real options again.
         searched = False
         if matched is None:
-            loc = _ref_locator(page, ref)
             tag = loc.evaluate("el => el.tagName.toLowerCase()", timeout=8000)
             role = loc.get_attribute("role")
             if tag == "input" and role == "combobox":
