@@ -188,6 +188,14 @@ class ApplyToolBindingTests(unittest.TestCase):
             "Location (City)*", {"address_city": "Ottawa"}
         ))
 
+    def test_structured_profile_overrides_street_and_current_company_gaps(self) -> None:
+        profile = {
+            "address_line1": "123 Main Street",
+            "current_company": "Carleton University (student)",
+        }
+        self.assertTrue(_profile_already_answers("Street Address:*", profile))
+        self.assertTrue(_profile_already_answers("Current company", profile))
+
     def test_preferred_first_name_uses_profile_first_name(self) -> None:
         self.assertTrue(_profile_already_answers(
             "Preferred First Name*", {"first_name": "Jane"}
@@ -916,6 +924,55 @@ class ApplyToolBindingTests(unittest.TestCase):
             "requires_sponsorship": True,
         }}}
         self.assertIsNone(_profile_click_guard(page, "r11", profile))
+
+    def test_lambda_sponsorship_question_is_not_treated_as_authorization(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        question = (
+            "Lambda may agree to sponsor individuals to obtain work authorization "
+            "such as H-1B, TN, or O-1 status. "
+            "Will you now or in the future require sponsorship from Lambda to "
+            "maintain employment authorization?"
+        )
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-option": "Yes",
+            "data-applyd-label": f"{question} — Yes",
+        }.get(name)
+        self.assertIsNone(_profile_click_guard(page, "r18", profile))
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-option": "No",
+            "data-applyd-label": f"{question} — No",
+        }.get(name)
+        self.assertIn(
+            "no-sponsorship claim",
+            _profile_click_guard(page, "r19", profile) or "",
+        )
+
+    def test_grounded_address_and_current_company_fill_values(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        profile = {
+            "address_line1": "123 Main Street",
+            "current_company": "Carleton University (student)",
+        }
+        locator.evaluate.return_value = "Street Address:*"
+        self.assertEqual(
+            _grounded_fill_value(page, "r1", "invented", profile)[0],
+            "123 Main Street",
+        )
+        locator.evaluate.return_value = "Current company"
+        self.assertEqual(
+            _grounded_fill_value(page, "r2", "invented", profile)[0],
+            "Carleton University (student)",
+        )
 
     def test_plain_text_sponsorship_answer_is_runner_grounded(self) -> None:
         page = MagicMock()

@@ -1020,9 +1020,12 @@ def _profile_already_answers(
         (("citizenship", "citizen of"), "citizenships"),
         (("language", "languages do you speak"), "spoken_languages"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),
+        (("street address", "address line 1", "mailing address"), "address_line1"),
         (("location city", "current city", "city of residence"), "address_city"),
         (("current residence", "country of residence", "current country"), "address_country"),
         (("state are you located", "state province", "province territory"), "address_region"),
+        (("postal code", "zip code", "zip postal"), "postal_code"),
+        (("current company",), "current_company"),
     )
     if any(
         any(phrase in text for phrase in phrases) and profile.get(key) is not None
@@ -1031,7 +1034,7 @@ def _profile_already_answers(
         return True
 
     if resume_text.strip() and any(phrase in text for phrase in (
-        "current employer", "previous employer", "current or previous employer",
+        "current employer", "current company", "previous employer", "current or previous employer",
         "current job title", "previous job title", "current or previous job title",
     )):
         return True

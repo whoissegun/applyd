@@ -432,6 +432,18 @@ def _grounded_fill_value(
     )
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
 
+    if any(phrase in normalized for phrase in (
+        "street address", "address line 1", "mailing address",
+    )):
+        address = str(profile.get("address_line1") or "").strip()
+        if address:
+            return address, "grounded street address from profile"
+
+    if "current company" in normalized:
+        current_company = str(profile.get("current_company") or "").strip()
+        if current_company:
+            return current_company, "grounded current affiliation from profile"
+
     # Some Greenhouse forms render a required Yes/No sponsorship question as
     # a plain text input. Bind it to the regional structured record instead of
     # accepting model-authored text.
@@ -1223,7 +1235,7 @@ def _select_profile_guard(
             "dependent on sponsorship",
         ))
     )
-    authorization_question = any(term in question for term in (
+    authorization_question = not sponsorship_question and any(term in question for term in (
         "legally permitted to work", "right to work", "authorized to work", "authorised to work",
         "work authorization", "work authorisation", "work permit", "need a visa",
     ))

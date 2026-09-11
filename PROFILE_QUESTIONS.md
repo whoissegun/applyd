@@ -48,8 +48,9 @@ secrets in the file and do not run a real application.
 
 ### 2. Current location and links
 
-6. What city, state/province/region, country, and two-letter country code are
-   your current residence?
+6. What street address, city, state/province/region, postal code, country, and
+   two-letter country code are your current residence? Street address and
+   postal code may be omitted, but required forms will then enter review.
 7. What are your LinkedIn, GitHub, portfolio, and personal-site URLs? Which
    optional link fields should be left blank?
 
@@ -64,6 +65,9 @@ secrets in the file and do not run a real application.
     application enter review?
 12. Are there other schools, degrees, certifications, licenses, or academic
     distinctions that may be submitted? They should also appear in the resume.
+    If you are currently a student without an employer, what exact grounded
+    value should a required “Current company” field use (for example,
+    `School Name (student)` or `N/A`)?
 
 ### 4. Languages
 
