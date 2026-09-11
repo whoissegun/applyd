@@ -90,13 +90,22 @@ def _ats_failure_total(failures: Counter[tuple[str, str]], ats: str) -> int:
     )
 
 
+def _candidate_scan_limit(top: int) -> int:
+    """Scan past a mature catalog's dense prefix of prior attempts."""
+    return max(2000, top * 20)
+
+
+def _eligible_evaluation(evaluation: dict[str, Any] | None) -> bool:
+    return bool(evaluation and evaluation.get("decision") == "eligible")
+
+
 def cmd_apply_batch(args: argparse.Namespace) -> int:
     """Tailor and apply serially, with one CAPTCHA-only Bright Data fallback."""
     load_env()
     store = get_local_store()
     ranked = list(
         store.iter_ranked_matches(
-            limit=max(200, args.top * 20), minimum_score=args.minimum_score
+            limit=_candidate_scan_limit(args.top), minimum_score=args.minimum_score
         )
     )
     if not ranked:
@@ -147,6 +156,8 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         ):
             break
         job_id = row["job_id"]
+        if not _eligible_evaluation(store.get_evaluation(job_id)):
+            continue
         company_key = str(row["company"]).casefold()
         if company_key in used_companies:
             continue

@@ -370,6 +370,30 @@ def _profile_click_guard(
         ).split()
     )
 
+    residence_question = any(phrase in question for phrase in (
+        "are you located in", "are you based in", "do you live in",
+        "do you reside in", "currently reside in",
+    ))
+    if residence_question and option:
+        profile_places = [
+            " ".join(re.sub(r"[^a-z0-9]+", " ", str(profile.get(key) or "").casefold()).split())
+            for key in ("address_city", "address_region", "address_country")
+        ]
+        profile_places = [place for place in profile_places if place]
+        question_matches_profile = any(place in question for place in profile_places)
+        says_yes = option in {"yes", "true"} or option.startswith("yes ")
+        says_no = option in {"no", "false"} or option.startswith("no ")
+        if says_yes and not question_matches_profile:
+            return _err(
+                f"click {ref}: refused unsupported residence claim {option!r}; "
+                "the named place is not the structured profile city, region, or country"
+            )
+        if says_no and question_matches_profile:
+            return _err(
+                f"click {ref}: refused false residence denial {option!r}; "
+                "the question matches the structured profile location"
+            )
+
     # Radio/checkbox options carry the same consequential claims as dropdown
     # options. Route them through the structured authorization/location guard
     # before clicking; otherwise a ref remap can turn the intended truthful
@@ -416,6 +440,7 @@ def click(
 
 def _grounded_fill_value(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None,
+    resume_text: str = "",
 ) -> tuple[str, str | None]:
     """Bind consequential text fields to profile data, not model guesses."""
     if not profile:
@@ -431,6 +456,82 @@ def _grounded_fill_value(
         timeout=3000,
     )
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
+    evidence = " ".join(
+        re.sub(
+            r"[^a-z0-9]+", " ",
+            (resume_text + " " + str(profile)).casefold(),
+        ).split()
+    )
+    answer = " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+    if any(phrase in normalized for phrase in (
+        "taught yourself", "self taught", "learned on your own",
+    )) and not any(phrase in evidence for phrase in (
+        "taught myself", "self taught", "learned on my own",
+    )):
+        raise ValueError(
+            "self-directed learning history is not in the profile/resume; "
+            "send this application to review"
+        )
+    if any(phrase in normalized for phrase in (
+        "how do you stay current", "how do you keep current",
+        "how do you keep up with", "stay up to date",
+    )) and not profile.get("professional_learning_sources"):
+        raise ValueError(
+            "professional learning sources are not in the structured profile; "
+            "send this application to review"
+        )
+    if any(phrase in normalized for phrase in (
+        "live production issue", "production incident", "client incident",
+    )) and not any(phrase in evidence for phrase in (
+        "production issue", "production incident", "on call", "client issue",
+        "incident response",
+    )):
+        raise ValueError(
+            "live production/client incident history is not in the profile/resume; "
+            "send this application to review"
+        )
+    historical_prompt = any(phrase in normalized for phrase in (
+        "your experience", "example of a time", "describe a time",
+        "technical topic", "project you", "system you", "issue you",
+    ))
+    unsupported_history_markers = (
+        "daily", "every day", "weekly", "monthly", "last summer", "last year",
+        "on call", "i follow", "i regularly", "recently",
+    )
+    if historical_prompt:
+        unsupported = [
+            phrase for phrase in unsupported_history_markers
+            if phrase in answer and phrase not in evidence
+        ]
+        if unsupported:
+            raise ValueError(
+                "historical response contains unsupported chronology, frequency, "
+                f"or habit claims {unsupported!r}; use only profile/resume facts "
+                "or send to review"
+            )
+
+    if any(phrase in normalized for phrase in (
+        "experience using ai tools", "ai tools", "code generation", "copilot",
+    )):
+        named_tools = (
+            "claude code", "claude api", "github copilot", "chatgpt",
+            "cursor", "gemini", "windsurf",
+        )
+        unsupported_tools = [
+            tool for tool in named_tools if tool in answer and tool not in evidence
+        ]
+        unsupported_frequency = [
+            phrase for phrase in ("daily", "every day", "weekly", "monthly")
+            if phrase in answer and phrase not in evidence
+        ]
+        if unsupported_tools or unsupported_frequency:
+            unsupported = unsupported_tools + unsupported_frequency
+            raise ValueError(
+                "AI-tool experience contains unsupported historical claims "
+                f"{unsupported!r}; use only product names and frequencies stated "
+                "in the profile/resume, or send to review"
+            )
 
     if any(phrase in normalized for phrase in (
         "street address", "address line 1", "mailing address",
@@ -506,6 +607,7 @@ def _grounded_fill_value(
 
 def fill(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None = None,
+    resume_text: str = "",
 ) -> str:
     try:
         loc = _ref_locator(page, ref)
@@ -514,7 +616,9 @@ def fill(
                 f"fill {ref}: comboboxes require open_dropdown/pick_option or "
                 "fill_autocomplete so the hidden selection is preserved"
             )
-        value, grounding_note = _grounded_fill_value(page, ref, value, profile)
+        value, grounding_note = _grounded_fill_value(
+            page, ref, value, profile, resume_text
+        )
         if _should_humanize(page):
             _human_type(loc, value)
         else:
@@ -527,6 +631,7 @@ def fill(
 
 def fill_many(
     page: Page, fields: list[dict[str, str]], profile: dict[str, Any] | None = None,
+    resume_text: str = "",
 ) -> str:
     out = []
     for i, f in enumerate(fields):
@@ -540,7 +645,9 @@ def fill_many(
                     "or fill_autocomplete"
                 )
                 continue
-            val, grounding_note = _grounded_fill_value(page, ref, val, profile)
+            val, grounding_note = _grounded_fill_value(
+                page, ref, val, profile, resume_text
+            )
             if _should_humanize(page):
                 _human_type(loc, val)
                 # Brief think-time between fields — but not after the last one.
@@ -1170,6 +1277,82 @@ def _select_profile_guard(
     desired = _normalize_option_text(value)
     location_text = " ".join(job_locations or []).casefold()
 
+    years_question = bool(
+        re.search(r"\bhow many years\b", question)
+        and "experience" in question
+    )
+    if years_question:
+        known_years: float | int | None = None
+        source_name = ""
+        if "professional" in question:
+            candidate = profile.get("years_professional_experience")
+            if isinstance(candidate, (int, float)):
+                known_years = candidate
+                source_name = "years_professional_experience"
+        else:
+            technology_years = profile.get("technology_experience_years") or {}
+            if isinstance(technology_years, dict):
+                for technology, candidate in technology_years.items():
+                    normalized_technology = _normalize_option_text(str(technology))
+                    if (
+                        normalized_technology
+                        and normalized_technology in question
+                        and isinstance(candidate, (int, float))
+                    ):
+                        known_years = candidate
+                        source_name = f"technology_experience_years.{technology}"
+                        break
+        if known_years is None:
+            return _err(
+                f"select_option {ref}: experience duration is not grounded in "
+                "the structured profile; send to review instead of selecting "
+                f"{value!r}"
+            )
+        numbers = [float(number) for number in re.findall(r"\d+(?:\.\d+)?", desired)]
+        matches = True
+        if len(numbers) >= 2:
+            matches = numbers[0] <= known_years <= numbers[1]
+        elif numbers:
+            boundary = numbers[0]
+            if any(token in desired for token in ("less than", "under", "below")):
+                matches = known_years < boundary
+            elif any(token in desired for token in ("more than", "over", "above", "+")):
+                matches = known_years >= boundary
+            else:
+                matches = known_years == boundary
+        if not matches:
+            return _err(
+                f"select_option {ref}: refused experience range {value!r}; "
+                f"structured {source_name}={known_years}"
+            )
+
+    degree_question = any(phrase in question for phrase in (
+        "degree", "qualification",
+    )) and not any(phrase in question for phrase in (
+        "field of study", "discipline", "major",
+    ))
+    profile_degree = _normalize_option_text(str(profile.get("degree") or ""))
+    if degree_question and profile_degree:
+        generic_bachelor = desired in {
+            "bachelor", "bachelors", "bachelor s", "bachelor degree",
+            "undergraduate", "undergraduate degree",
+        }
+        generic_master = desired in {
+            "master", "masters", "master s", "master degree", "graduate degree",
+        }
+        compatible = (
+            desired == profile_degree
+            or desired in profile_degree
+            or profile_degree in desired
+            or (generic_bachelor and profile_degree.startswith("bachelor"))
+            or (generic_master and profile_degree.startswith("master"))
+        )
+        if not compatible:
+            return _err(
+                f"select_option {ref}: refused credential substitution {value!r}; "
+                f"structured profile degree is {profile.get('degree')!r}"
+            )
+
     event_guard = _recruitment_event_profile_guard(
         question, value, profile, company, error_prefix=f"select_option {ref}"
     )
@@ -1300,7 +1483,10 @@ def _select_profile_guard(
                     "authorization; structured profile says authorized=true"
                 )
 
-        if sponsorship_question:
+        # Some ATSes place sponsorship semantics only in the option text under
+        # a generic work-authorization question. Enforce those claims too.
+        option_sponsorship_claim = "sponsor" in desired
+        if sponsorship_question or option_sponsorship_claim:
             requires = auth_record.get("requires_sponsorship")
             says_yes = desired in {"yes", "true"} or any(
                 phrase in desired for phrase in ("require sponsorship", "need sponsorship")
@@ -1462,6 +1648,46 @@ def select_option(
 
 
 # ── upload ─────────────────────────────────────────────────────────────────
+
+def _resume_upload_guard(page: Page, ref: str) -> str | None:
+    """Allow the runner-owned resume only in an explicitly labeled resume field."""
+    loc = _ref_locator(page, ref)
+    label = str(loc.get_attribute("data-applyd-label") or "").strip()
+    details = loc.evaluate(
+        """el => {
+            const direct = el.id ? document.querySelector(`label[for="${el.id}"]`) : null;
+            const scope = el.closest(
+                'fieldset, .field, .application-field, [data-field], [class*="field"]'
+            );
+            return {
+                id: el.id || '', name: el.getAttribute('name') || '',
+                aria: el.getAttribute('aria-label') || '',
+                direct: direct?.innerText || el.closest('label')?.innerText || '',
+                context: (scope?.innerText || '').slice(0, 500)
+            };
+        }""",
+        timeout=3000,
+    )
+    if not isinstance(details, dict):
+        details = {}
+    local_identity = " ".join(str(details.get(key) or "") for key in (
+        "id", "name", "aria", "direct",
+    ))
+    combined = " ".join((label, local_identity, str(details.get("context") or "")))
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", combined.casefold()).split())
+    prohibited = re.search(
+        r"\b(?:transcript|portfolio|writing sample|video|photo|assessment)\b",
+        normalized,
+    )
+    resume_target = re.search(r"\b(?:resume|cv|curriculum vitae)\b", normalized)
+    if prohibited or not resume_target:
+        return _err(
+            f"upload_resume {ref}: refused non-resume upload target {label!r}; "
+            "required transcripts, portfolios, writing samples, videos, and "
+            "other artifacts must enter review"
+        )
+    return None
+
 
 def upload_file(page: Page, ref: str, file_path: str) -> str:
     p = Path(file_path)
@@ -1924,9 +2150,9 @@ def dispatch(
     if name == "click":
         return click(page, args["ref"], profile)
     if name == "fill":
-        return fill(page, args["ref"], args["value"], profile)
+        return fill(page, args["ref"], args["value"], profile, resume_text)
     if name == "fill_many":
-        return fill_many(page, args["fields"], profile)
+        return fill_many(page, args["fields"], profile, resume_text)
     if name == "fill_autocomplete":
         return fill_autocomplete(page, args["ref"], args["value"])
     if name == "click_many":
@@ -1943,6 +2169,9 @@ def dispatch(
             company,
         )
     if name == "upload_resume":
+        guard = _resume_upload_guard(page, args["ref"])
+        if guard:
+            return guard
         result = upload_file(page, args["ref"], resume_pdf_path)
         if result.startswith("ok:"):
             # Resume autofill commonly re-renders Ashby/Greenhouse forms and
@@ -2090,7 +2319,7 @@ TOOL_DEFS = [
     ),
     _fn(
         "upload_resume",
-        "Upload the runner-bound tailored resume. The ref can point to a file input or visible drop-zone.",
+        "Upload the runner-bound tailored resume only to a field explicitly labeled Resume or CV. Required transcripts, portfolios, writing samples, videos, and other artifacts must enter review.",
         {"ref": {"type": "string"}},
         required=["ref"],
     ),

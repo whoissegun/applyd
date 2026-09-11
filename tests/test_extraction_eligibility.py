@@ -21,6 +21,25 @@ def job(title: str = "Software Engineer", locations: list[str] | None = None) ->
 
 
 class ExtractionEligibilityTests(unittest.TestCase):
+    def test_language_specialist_title_requires_profile_language(self) -> None:
+        role = job(title="French Language Specialist - Freelance AI Trainer")
+        result = evaluate_job(
+            role,
+            {},
+            {"spoken_languages": ["English"], "preferences": {}},
+        )
+        self.assertEqual(result.decision, "ineligible")
+        self.assertEqual(result.reasons[0]["code"], "spoken_language_required_title")
+
+    def test_programming_language_title_is_not_a_spoken_language_blocker(self) -> None:
+        role = job(title="Python Developer")
+        result = evaluate_job(
+            role,
+            {},
+            {"spoken_languages": ["English"], "preferences": {}},
+        )
+        self.assertEqual(result.decision, "eligible")
+
     def test_credit_budget_error_detection(self) -> None:
         class CreditError(Exception):
             status_code = 402

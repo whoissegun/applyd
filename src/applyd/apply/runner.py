@@ -1025,12 +1025,21 @@ def _profile_already_answers(
         (("current residence", "country of residence", "current country"), "address_country"),
         (("state are you located", "state province", "province territory"), "address_region"),
         (("postal code", "zip code", "zip postal"), "postal_code"),
+        (("graduation date", "graduate date", "expected graduation"), "expected_grad_date"),
         (("current company",), "current_company"),
     )
     if any(
         any(phrase in text for phrase in phrases) and profile.get(key) is not None
         for phrases, key in known_fields
     ):
+        return True
+
+    if any(phrase in text for phrase in (
+        "are you located in", "are you based in", "do you live in",
+        "do you reside in", "currently reside in",
+    )) and any(profile.get(key) for key in (
+        "address_city", "address_region", "address_country",
+    )):
         return True
 
     if resume_text.strip() and any(phrase in text for phrase in (

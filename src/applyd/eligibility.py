@@ -33,6 +33,17 @@ _EU_COUNTRY_CODES = {
     "PT", "RO", "SE", "SI", "SK",
 }
 
+_HUMAN_LANGUAGES = {
+    "arabic", "cantonese", "chinese", "dutch", "english", "french",
+    "german", "greek", "hebrew", "hindi", "italian", "japanese",
+    "korean", "mandarin", "polish", "portuguese", "punjabi", "russian",
+    "spanish", "swedish", "tamil", "turkish", "ukrainian", "urdu",
+}
+_LANGUAGE_ROLE = re.compile(
+    r"\b(?:language|linguist|translator|translation|interpreter|localization)\b",
+    re.IGNORECASE,
+)
+
 
 def _fact(facts: dict[str, Any], name: str, default: Any = None) -> Any:
     field = facts.get(name)
@@ -83,6 +94,32 @@ def evaluate_job(
     preferences = profile.get("preferences") or {}
     blockers: list[dict[str, Any]] = []
     uncertainties: list[dict[str, Any]] = []
+
+    # Titles such as "French Language Specialist" are themselves authoritative
+    # evidence of the required spoken language. Keep this deliberately narrow so
+    # programming-language roles and generic NLP titles are not excluded.
+    title_words = {
+        word.casefold() for word in re.findall(r"[A-Za-z]+", job.title)
+    }
+    required_title_languages = sorted(title_words.intersection(_HUMAN_LANGUAGES))
+    spoken_languages = {
+        str(value).strip().casefold()
+        for value in profile.get("spoken_languages") or []
+        if str(value).strip()
+    }
+    if (
+        required_title_languages
+        and _LANGUAGE_ROLE.search(job.title)
+        and not set(required_title_languages).intersection(spoken_languages)
+    ):
+        blockers.append(
+            {
+                "code": "spoken_language_required_title",
+                "job_evidence": job.title,
+                "required": required_title_languages,
+                "user_fact": sorted(spoken_languages),
+            }
+        )
 
     for pattern in preferences.get("exclude_title_patterns") or []:
         try:

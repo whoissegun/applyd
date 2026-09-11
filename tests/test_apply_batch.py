@@ -5,6 +5,8 @@ import unittest
 from applyd.commands.apply_batch import (
     MANUAL_ONLY_ATS,
     _captcha_gate,
+    _candidate_scan_limit,
+    _eligible_evaluation,
     _ats_failure_total,
     _failure_category,
     _matches_prior_role,
@@ -14,6 +16,15 @@ from applyd.commands.apply_batch import (
 
 
 class ApplyBatchPolicyTests(unittest.TestCase):
+    def test_small_batch_scans_past_dense_prior_attempt_prefix(self) -> None:
+        self.assertEqual(_candidate_scan_limit(13), 2000)
+        self.assertEqual(_candidate_scan_limit(150), 3000)
+
+    def test_batch_requires_current_eligible_evaluation(self) -> None:
+        self.assertTrue(_eligible_evaluation({"decision": "eligible"}))
+        self.assertFalse(_eligible_evaluation({"decision": "ineligible"}))
+        self.assertFalse(_eligible_evaluation(None))
+
     def test_smartrecruiters_is_manual_only(self) -> None:
         self.assertIn("smartrecruiters", MANUAL_ONLY_ATS)
 

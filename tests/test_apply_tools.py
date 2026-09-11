@@ -17,6 +17,7 @@ from applyd.apply.tools import (
     open_dropdown,
     pick_option,
     _profile_click_guard,
+    _resume_upload_guard,
     _select_profile_guard,
     _match_option,
     _solve_brightdata_captcha,
@@ -195,6 +196,18 @@ class ApplyToolBindingTests(unittest.TestCase):
         }
         self.assertTrue(_profile_already_answers("Street Address:*", profile))
         self.assertTrue(_profile_already_answers("Current company", profile))
+
+    def test_profile_answers_graduation_date_and_remote_city_question(self) -> None:
+        profile = {
+            "expected_grad_date": "2027-04",
+            "address_city": "Ottawa",
+            "address_region": "Ontario",
+            "address_country": "Canada",
+        }
+        self.assertTrue(_profile_already_answers("What is your graduation date?", profile))
+        self.assertTrue(_profile_already_answers(
+            "Are you located in the greater Seattle area?", profile
+        ))
 
     def test_preferred_first_name_uses_profile_first_name(self) -> None:
         self.assertTrue(_profile_already_answers(
@@ -955,6 +968,115 @@ class ApplyToolBindingTests(unittest.TestCase):
             _profile_click_guard(page, "r19", profile) or "",
         )
 
+    def test_authorization_dropdown_blocks_no_sponsorship_option(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "Are you authorized to work lawfully in the United States?"
+            ),
+            "data-applyd-label": (
+                "Are you authorized to work lawfully in the United States?"
+            ),
+        }.get(name)
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        result = _select_profile_guard(
+            page,
+            "r24",
+            "No, I do not require sponsorship either now OR in the future",
+            profile,
+            "",
+            ["Seattle, WA, USA"],
+        )
+        self.assertIn("no-sponsorship claim", result or "")
+
+    def test_residence_radio_blocks_false_remote_city_claim(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        profile = {
+            "address_city": "Ottawa",
+            "address_region": "Ontario",
+            "address_country": "Canada",
+        }
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "Are you located in the greater Seattle area?",
+            "data-applyd-option": "Yes",
+            "data-applyd-label": "Are you located in the greater Seattle area? — Yes",
+        }.get(name)
+        self.assertIn(
+            "refused unsupported residence claim",
+            _profile_click_guard(page, "r1", profile) or "",
+        )
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "Are you located in Ottawa?",
+            "data-applyd-option": "No",
+            "data-applyd-label": "Are you located in Ottawa? — No",
+        }.get(name)
+        self.assertIn(
+            "refused false residence denial",
+            _profile_click_guard(page, "r2", profile) or "",
+        )
+
+    def test_experience_range_requires_structured_years(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "How many years of Python experience do you have?",
+            "data-applyd-label": "How many years of Python experience do you have?",
+        }.get(name)
+        self.assertIn(
+            "experience duration is not grounded",
+            _select_profile_guard(
+                page, "r1", "3-5 years", {"first_name": "Jane"}, "", []
+            ) or "",
+        )
+
+    def test_experience_range_must_match_structured_years(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "How many years of professional software engineering experience do you have?"
+            ),
+            "data-applyd-label": (
+                "How many years of professional software engineering experience do you have?"
+            ),
+        }.get(name)
+        profile = {"years_professional_experience": 1}
+        self.assertIsNone(
+            _select_profile_guard(page, "r1", "1-3 years", profile, "", [])
+        )
+        self.assertIn(
+            "refused experience range",
+            _select_profile_guard(page, "r1", "3-5 years", profile, "", []) or "",
+        )
+
+    def test_degree_selection_allows_generic_level_but_blocks_substitution(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "Degree",
+            "data-applyd-label": "Degree",
+        }.get(name)
+        profile = {"degree": "Bachelor of Computer Science"}
+        self.assertIsNone(
+            _select_profile_guard(page, "r1", "Bachelor's", profile, "", [])
+        )
+        self.assertIn(
+            "refused credential substitution",
+            _select_profile_guard(
+                page, "r1", "Bachelor of Science", profile, "", []
+            ) or "",
+        )
+
     def test_grounded_address_and_current_company_fill_values(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -973,6 +1095,71 @@ class ApplyToolBindingTests(unittest.TestCase):
             _grounded_fill_value(page, "r2", "invented", profile)[0],
             "Carleton University (student)",
         )
+
+    def test_ai_tool_experience_rejects_unsupported_product_and_frequency(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = "Please tell us about your experience using AI tools"
+        with self.assertRaisesRegex(ValueError, "unsupported .*claims"):
+            _grounded_fill_value(
+                page,
+                "r1",
+                "I use Claude Code daily.",
+                {"first_name": "Jane"},
+                "Built resume tooling with the Claude API.",
+            )
+
+    def test_ai_tool_experience_allows_resume_grounded_product(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = "Please tell us about your experience using AI tools"
+        value = "I built resume tooling with the Claude API."
+        self.assertEqual(
+            _grounded_fill_value(
+                page, "r1", value, {"first_name": "Jane"},
+                "Built resume tooling with the Claude API.",
+            )[0],
+            value,
+        )
+
+    def test_self_taught_history_requires_explicit_evidence(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = (
+            "What is the last technical topic you taught yourself on your own time?"
+        )
+        with self.assertRaisesRegex(ValueError, "self-directed learning history"):
+            _grounded_fill_value(
+                page, "r1", "I taught myself Go last summer.",
+                {"first_name": "Jane"}, "Built webhook handlers in Go.",
+            )
+
+    def test_learning_sources_require_structured_profile(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = "How do you stay current with AI advancements?"
+        with self.assertRaisesRegex(ValueError, "learning sources"):
+            _grounded_fill_value(
+                page, "r1", "I follow several technical blogs.",
+                {"first_name": "Jane"}, "Built an ML service.",
+            )
+
+    def test_live_production_story_requires_resume_evidence(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = (
+            "Give an example of a live production issue with a client."
+        )
+        with self.assertRaisesRegex(ValueError, "production/client incident history"):
+            _grounded_fill_value(
+                page, "r1", "I was on call when a client system failed.",
+                {"first_name": "Jane"}, "Optimized a data pipeline.",
+            )
 
     def test_plain_text_sponsorship_answer_is_runner_grounded(self) -> None:
         page = MagicMock()
@@ -1174,13 +1361,41 @@ class ApplyToolBindingTests(unittest.TestCase):
 
     def test_upload_uses_runner_bound_resume(self) -> None:
         page = object()
-        with patch("applyd.apply.tools.upload_file", return_value="ok") as upload:
+        with patch(
+            "applyd.apply.tools._resume_upload_guard", return_value=None
+        ), patch("applyd.apply.tools.upload_file", return_value="ok") as upload:
             result = dispatch(
                 page, "upload_resume", {"ref": "r4", "path": "/tmp/wrong"},
                 test_mode=True, resume_pdf_path="/safe/resume.pdf",
             )
         self.assertEqual(result, "ok")
         upload.assert_called_once_with(page, "r4", "/safe/resume.pdf")
+
+    def test_resume_upload_rejects_transcript_field(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.return_value = "Transcript"
+        result = _resume_upload_guard(page, "r18")
+        self.assertIn("refused non-resume upload target", result or "")
+
+    def test_resume_upload_accepts_explicit_resume_field(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.return_value = "Resume/CV"
+        self.assertIsNone(_resume_upload_guard(page, "r7"))
+
+    def test_resume_upload_accepts_greenhouse_attach_with_resume_name(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.return_value = "Attach"
+        locator.evaluate.return_value = {
+            "id": "resume", "name": "resume", "aria": "",
+            "direct": "Attach", "context": "Resume Attach",
+        }
+        self.assertIsNone(_resume_upload_guard(page, "r11"))
 
     def test_failed_submit_returns_fresh_snapshot(self) -> None:
         page = _WaitPage()
