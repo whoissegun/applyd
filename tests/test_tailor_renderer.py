@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import signal
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
-from applyd.tailor.structured import TailorPlanError, escape_latex, render_latex
+from applyd.tailor.structured import (
+    StructuredTailorClient,
+    TailorCallTimeout,
+    TailorPlanError,
+    escape_latex,
+    render_latex,
+)
 
 
 RESUME = {
@@ -51,6 +59,19 @@ def plan() -> dict:
 
 
 class TailorRendererTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(signal, "SIGALRM"), "requires SIGALRM")
+    def test_openrouter_call_has_total_wall_clock_deadline(self) -> None:
+        client = StructuredTailorClient.__new__(StructuredTailorClient)
+        client.model = "test-model"
+        client.call_timeout_seconds = 60
+        client.client = MagicMock()
+        client.client.chat.completions.create.side_effect = (
+            lambda **_kwargs: signal.raise_signal(signal.SIGALRM)
+        )
+
+        with self.assertRaisesRegex(TailorCallTimeout, "exceeded 60s"):
+            client._call([])
+
     def test_escape_and_styled_render(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             template = Path(temp) / "template.tex"

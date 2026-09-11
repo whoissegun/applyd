@@ -835,6 +835,14 @@ def _profile_already_answers(
     """Reject false model gaps only when the structured profile has the fact."""
     text = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
 
+    # The resume path is runner-bound. A model-generated generic attachment
+    # gap is not a missing candidate fact, especially on Greenhouse pages that
+    # expose several unlabeled optional `Attach` inputs.
+    if text in {
+        "resume", "resume cv", "cv", "file upload area", "file upload areas",
+    } and resume_text.strip():
+        return True
+
     # These prompts are explicitly delegated composition, not missing facts.
     # Manual artifacts and historical explanations remain grounded/human.
     if not any(phrase in text for phrase in (
@@ -859,6 +867,23 @@ def _profile_already_answers(
         return True
 
     background = profile.get("background_defaults") or {}
+    recruitment_events = background.get("recruitment_events") or {}
+    company_events = next((
+        events for event_company, events in recruitment_events.items()
+        if str(event_company).casefold() == company.casefold()
+    ), None) if isinstance(recruitment_events, dict) and company else None
+    if any(phrase in text for phrase in (
+        "recruitment event", "event you attended", "which event",
+    )) and isinstance(company_events, list):
+        return True
+
+    application_policy = profile.get("application_policy") or {}
+    if (
+        "privacy notice" in text
+        and application_policy.get("ordinary_accuracy_attestation") == "authorized"
+    ):
+        return True
+
     if any(phrase in text for phrase in (
         "immediate family", "family member", "member of your family", "relative",
     )):
@@ -916,7 +941,8 @@ def _profile_already_answers(
         phrase in text for phrase in (
             "authorized to work", "authorised to work", "work authorization",
             "work authorisation", "immigration sponsorship", "visa sponsorship",
-            "require sponsorship", "requires sponsorship", "legal right to work",
+            "require sponsorship", "requires sponsorship", "sponsor",
+            "legal right to work",
             "right to work", "legally permitted to work", "work permit", "require a visa",
             "requires a visa", "visa for employment",
         )
@@ -960,6 +986,15 @@ def _profile_already_answers(
                 )
             return True
 
+    if text in {"name", "full name", "legal name"}:
+        return bool(
+            str(profile.get("full_name", "")).strip()
+            or (
+                str(profile.get("first_name", "")).strip()
+                and str(profile.get("last_name", "")).strip()
+            )
+        )
+
     known_fields = (
         (("preferred first name", "preferred name", "nickname"), "first_name"),
         (("name pronunciation", "name pronounciation", "phonetic spelling"), "name_pronunciation"),
@@ -1002,17 +1037,36 @@ def _profile_already_answers(
         return True
 
     preferences = profile.get("employment_preferences") or {}
+    if (
+        any(phrase in text for phrase in (
+            "what role are you applying for", "which role are you applying for",
+            "which roles are you applying for", "which program are you applying for",
+            "which programme are you applying for",
+        ))
+        and preferences.get("accept_any_role_option") is True
+    ):
+        return True
     preference_questions = (
         (("relocate", "relocation"), "willing_to_relocate"),
-        (("work onsite", "work on site", "onsite work"), "willing_to_work_onsite"),
+        ((
+            "work onsite", "work on site", "onsite work", "work from our office",
+            "work from the office", "in office", "in-office", "office days",
+        ), "willing_to_work_onsite"),
         (("hybrid",), "willing_to_work_hybrid"),
         (("work remote", "remote work"), "willing_to_work_remote"),
         (("travel",), "willing_to_travel"),
     )
-    return any(
+    if any(
         any(phrase in text for phrase in phrases)
         and isinstance(preferences.get(key), bool)
         for phrases, key in preference_questions
+    ):
+        return True
+    return (
+        preferences.get("willing_to_work_any_onsite_schedule") is True
+        and any(phrase in text for phrase in (
+            "days a week", "days per week", "office schedule", "onsite schedule",
+        ))
     )
 
 

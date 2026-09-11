@@ -404,6 +404,16 @@ Add only genuinely known facts to `profile.json`, re-run `applyd init`, and
 retry. Manual videos, assessments, unsupported ATSes, and unresolved CAPTCHAs
 should remain human work.
 
+### Tailoring appears stuck on an OpenRouter response
+
+Each individual tailoring request has a 180-second whole-call deadline in
+addition to ordinary network inactivity timeouts. Override it only when a model
+provider is known to need longer:
+
+```dotenv
+APPLYD_TAILOR_CALL_MAX_SECONDS=240
+```
+
 ### Reset local state
 
 `data/applyd.sqlite3` is the database. Back it up before removing or replacing

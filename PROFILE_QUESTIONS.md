@@ -124,16 +124,21 @@ These are consequential legal facts. Unknown answers must go to review.
     record an exception?
 31. Are there target-company clients, vendors, loans, accounts, referrals, or
     conflicts that should be recorded rather than answered “No” or “Not
-    applicable” by default?
+    applicable” by default? Also list any target-company recruitment events you
+    attended; an explicitly empty company entry means you attended none.
 
 ### 9. Availability and job preferences
 
 32. What is your earliest start date?
-33. Which employment types are acceptable: internship, new graduate,
-    full-time, contract, or part-time?
+33. Which employment types are acceptable: internship, placement, new
+    graduate, full-time, contract, or part-time? If a form lists multiple role
+    or program options, may applyd select every listed option you are willing
+    to consider, or only the option that most closely matches the posting title?
 34. Which role families are you targeting, and which seniority levels are
     preferred versus acceptable stretches?
-35. Are you willing to work onsite, hybrid, and remote?
+35. Are you willing to work onsite, hybrid, and remote? Are you willing to
+    follow any required onsite schedule from zero through five office days per
+    week, or is there a maximum number of office days you will accept?
 36. Are you willing to relocate and travel? Are there limits on frequency,
     distance, or countries?
 37. Which titles, companies, industries, locations, schedules, or job features
@@ -204,7 +209,8 @@ Before running `applyd init`, confirm:
   source resume;
 - language proficiency is not inferred;
 - demographics reflect your choice;
-- relocation, onsite, travel, compensation, and exclusion policies are yours;
+- role-option, relocation, onsite-frequency, travel, compensation, and
+  exclusion policies are yours;
 - creative writing is allowed only for opinions and motivation, never factual
   history;
 - unknown consequential facts route to review;

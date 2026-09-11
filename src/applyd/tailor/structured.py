@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ from openai import OpenAI
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_CALL_TIMEOUT_SECONDS = 180
 
 SYSTEM_PROMPT = """You tailor a structured resume for one job.
 
@@ -66,6 +70,39 @@ class TailorPlanError(ValueError):
     pass
 
 
+class TailorCallTimeout(RuntimeError):
+    """One OpenRouter tailoring response exceeded its total wall-clock budget."""
+
+
+class _TailorDeadlineSignal(BaseException):
+    """Bypass SDK retry handlers so the outer call can enforce a true deadline."""
+
+
+@contextmanager
+def _tailor_call_deadline(seconds: int):
+    """Enforce a whole-call deadline, not merely socket inactivity timeouts."""
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    def _raise(_signum, _frame):
+        # OpenAI retries ordinary Exceptions. BaseException is deliberate here:
+        # it crosses the SDK unchanged and is converted immediately outside.
+        raise _TailorDeadlineSignal()
+
+    old_handler = signal.signal(signal.SIGALRM, _raise)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 def load_resume(path: str | Path) -> dict[str, Any]:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -106,6 +143,9 @@ class StructuredTailorClient:
         if not key:
             raise RuntimeError("OPENROUTER_API_KEY not set")
         self.model = model
+        self.call_timeout_seconds = int(os.environ.get(
+            "APPLYD_TAILOR_CALL_MAX_SECONDS", str(DEFAULT_CALL_TIMEOUT_SECONDS)
+        ))
         self.client = OpenAI(
             base_url=OPENROUTER_BASE_URL,
             api_key=key,
@@ -117,17 +157,24 @@ class StructuredTailorClient:
         )
 
     def _call(self, messages: list[dict[str, Any]], max_tokens: int = 4000) -> TailorResult:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.25,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-            extra_body={
-                "usage": {"include": True},
-                "reasoning": {"effort": "none"},
-            },
-            messages=messages,
-        )
+        try:
+            with _tailor_call_deadline(self.call_timeout_seconds):
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    temperature=0.25,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},
+                    extra_body={
+                        "usage": {"include": True},
+                        "reasoning": {"effort": "none"},
+                    },
+                    messages=messages,
+                )
+        except _TailorDeadlineSignal as exc:
+            raise TailorCallTimeout(
+                f"OpenRouter tailoring call exceeded "
+                f"{self.call_timeout_seconds}s wall clock"
+            ) from exc
         raw = (response.choices[0].message.content or "{}").strip()
         plan = json.loads(raw)
         if not isinstance(plan, dict):

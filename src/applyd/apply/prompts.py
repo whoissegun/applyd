@@ -47,6 +47,9 @@ After EVERY snapshot, read the entire returned control list before changing the
 form. Your first tool call must be preflight:
 - Put every visible required label you can answer in answerable_required_labels.
 - Put only truly missing consequential facts in missing_fields.
+- Only report a missing field using an exact required label from snapshot.
+  Unstarred or generically labeled attachment controls are optional, and the
+  runner-bound resume is already available for a required Resume/CV upload.
 - Do not fill, click, select, or upload before preflight succeeds.
 - If missing_fields is non-empty, the runner records those questions for the
   profile and ends untouched at review.
@@ -108,6 +111,12 @@ the first snapshot is canonical for the run; refs stay valid.
 - Current residence is not the same as onsite willingness. When the profile
   says willing to relocate and willing to work onsite, answer Yes to being able
   to work from the role's named office, even if the current city is elsewhere.
+- When `willing_to_work_any_onsite_schedule` is true, answer Yes to any required
+  office frequency from zero through five days per week.
+- When `accept_any_role_option` is true and a required checkbox group asks
+  which listed roles or program tracks are acceptable, select every option that
+  does not contradict a grounded eligibility fact. Otherwise prefer the option
+  that most closely matches the posting title.
 - A required conditional question whose premise is false from the profile
   (for example, "If located in the US" for a Canadian resident) is answerable:
   enter "Not applicable". It is not a missing profile fact.
@@ -118,13 +127,21 @@ the first snapshot is canonical for the run; refs stay valid.
   conversion, not missing information.
   If the form asks for a full graduation date and the profile only has YYYY-MM,
   use the first day of that month in MM/01/YYYY format.
+  Dropdown choices must match the grounded graduation month/year. Never choose
+  a nearby cohort date. If the exact grounded date is unavailable, send the
+  application to review without submitting.
 - GPA: use the original value and scale when accepted. Convert arithmetically
   only when the profile's conversion policy explicitly permits it. Never guess
   a class/rank equivalence such as First, 2:1, or Pass from a numeric GPA.
 - Availability/start dates: if `earliest_start_date` is immediately/now and a
   date is required, use today's real date from the application context. Never
-  invent a proxy date or reuse an old graduation/internship date.
-- Work authorization: answer truthfully from the profile. Do not fudge.
+  invent a proxy date, select a past cohort date, or reuse an old
+  graduation/internship date.
+- Work authorization: answer truthfully from the profile. Do not fudge. A Yes
+  answer to "require sponsorship" is not a Yes claim of current work
+  authorization. If the truthful authorization answer is No, use No and
+  continue even when it may be disqualifying; a known unfavorable answer is
+  not a missing fact.
 - Employment-history questions about the target company: when the profile's
   background default is enabled, answer No unless that company is actually in
   the resume. Do not treat an absent company as a gap.
@@ -141,7 +158,9 @@ the first snapshot is canonical for the run; refs stay valid.
   missing fact. Optional referral questions remain blank.
 - Demographics: use profile values; if no exact match, pick the closest neutral
   option ("decline to self-identify"). If no neutral option exists, SKIP.
-- Resume: call upload_resume. The runner owns the file path; you cannot change it.
+- Resume: call upload_resume. The runner owns the file path; you cannot change
+  it. Upload tools remint every DOM ref, so call an upload alone at the end of a
+  model turn and use only the refreshed refs returned by that tool afterward.
 - Cover letter: skip unless mandatory. For a required text box, write a grounded
   150-250 word letter. For a required file upload, call upload_cover_letter with
   the grounded prose; the runner creates and binds the PDF.

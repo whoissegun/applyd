@@ -3,15 +3,19 @@ from __future__ import annotations
 import json
 import unittest
 from contextlib import contextmanager
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from applyd.apply.tools import (
+    _SNAPSHOT_JS,
     TOOL_DEFS,
+    _date_profile_guard,
     _grounded_fill_value,
     fill_autocomplete,
     inspect_dropdowns,
     open_dropdown,
+    pick_option,
     _profile_click_guard,
     _select_profile_guard,
     _match_option,
@@ -170,6 +174,10 @@ class ApplyToolBindingTests(unittest.TestCase):
             job_locations=["Boston, MA"],
         ))
         self.assertTrue(_profile_already_answers(
+            "Do you require employer sponsorship to work in the United States?",
+            profile,
+        ))
+        self.assertTrue(_profile_already_answers(
             "Do you currently have the legal right to work in one of these locations?",
             profile,
             job_locations=["Toronto, Canada", "New York, NY"],
@@ -183,6 +191,14 @@ class ApplyToolBindingTests(unittest.TestCase):
     def test_preferred_first_name_uses_profile_first_name(self) -> None:
         self.assertTrue(_profile_already_answers(
             "Preferred First Name*", {"first_name": "Jane"}
+        ))
+
+    def test_full_name_gap_uses_grounded_profile_name(self) -> None:
+        self.assertTrue(_profile_already_answers(
+            "Full name", {"first_name": "Jane", "last_name": "Doe"}
+        ))
+        self.assertFalse(_profile_already_answers(
+            "Full name", {"first_name": "Jane"}
         ))
 
     def test_education_labels_use_structured_profile(self) -> None:
@@ -324,6 +340,66 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(value, "2022")
         self.assertIsNone(note)
 
+    def test_instabase_cohort_dates_cannot_replace_grounded_dates(self) -> None:
+        profile = {
+            "expected_grad_date": "2027-04",
+            "earliest_start_date": "immediately",
+        }
+        self.assertIn("contradicts grounded graduation date", _date_profile_guard(
+            "Graduation Date", "July 2026", profile,
+            today=date(2026, 9, 10),
+        ) or "")
+        self.assertIsNone(_date_profile_guard(
+            "Graduation Date", "April 2027", profile,
+            today=date(2026, 9, 10),
+        ))
+        self.assertIn("before the current month", _date_profile_guard(
+            "Target Start Date", "June 2026", profile,
+            today=date(2026, 9, 10),
+        ) or "")
+        self.assertIsNone(_date_profile_guard(
+            "Target Start Date", "October 2026", profile,
+            today=date(2026, 9, 10),
+        ))
+        self.assertIn("contradicts grounded graduation date", _date_profile_guard(
+            "Are you graduating Summer of 2027?", "Yes", profile,
+            today=date(2026, 9, 10),
+        ) or "")
+        self.assertIsNone(_date_profile_guard(
+            "Are you graduating Summer of 2027?", "No", profile,
+            today=date(2026, 9, 10),
+        ))
+
+    def test_maven_boolean_start_date_uses_date_in_question(self) -> None:
+        profile = {"earliest_start_date": "immediately"}
+        label = "Are you available to start from Monday 6th September 2027?"
+        self.assertIsNone(_date_profile_guard(
+            label, "Yes", profile, today=date(2026, 9, 10),
+        ))
+        self.assertIn("contradicts grounded availability", _date_profile_guard(
+            label, "No", profile, today=date(2026, 9, 10),
+        ) or "")
+        self.assertIn("contradicts grounded availability", _date_profile_guard(
+            "Are you available to start 6th September 2025?",
+            "Yes",
+            profile,
+            today=date(2026, 9, 10),
+        ) or "")
+
+    @patch("applyd.apply.tools._ref_locator")
+    def test_raw_pick_option_cannot_bypass_date_guard(self, ref_locator) -> None:
+        locator = MagicMock()
+        locator.evaluate.return_value = "div"
+        locator.inner_text.return_value = "July 2026"
+        ref_locator.return_value = locator
+        page = MagicMock()
+        page.evaluate.return_value = "Graduation Date"
+        result = pick_option(page, "o3", {
+            "expected_grad_date": "2027-04",
+        })
+        self.assertIn("contradicts grounded graduation date", result)
+        locator.click.assert_not_called()
+
     def test_name_pronunciation_cannot_be_invented(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -355,6 +431,31 @@ class ApplyToolBindingTests(unittest.TestCase):
         })
         self.assertIn("refused contradictory option", result or "")
 
+    def test_office_frequency_and_any_role_preflight_use_profile_preferences(self) -> None:
+        profile = {"employment_preferences": {
+            "willing_to_work_onsite": True,
+            "willing_to_work_any_onsite_schedule": True,
+            "accept_any_role_option": True,
+        }}
+        self.assertTrue(_profile_already_answers(
+            "Are you happy to work from our office at least 3 days a week?",
+            profile,
+        ))
+        self.assertTrue(_profile_already_answers(
+            "What role are you applying for?",
+            profile,
+        ))
+
+    def test_generic_optional_upload_gap_is_overridden_by_runner_resume(self) -> None:
+        self.assertTrue(_profile_already_answers(
+            "File upload areas", {}, resume_text="grounded resume latex"
+        ))
+
+    def test_exact_resume_gap_is_overridden_by_runner_resume(self) -> None:
+        self.assertTrue(_profile_already_answers(
+            "Resume", {}, resume_text="grounded resume latex"
+        ))
+
     def test_structured_profile_overrides_false_relocation_gap(self) -> None:
         profile = {
             "employment_preferences": {"willing_to_relocate": True}
@@ -385,6 +486,10 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(_match_option([
             {"ref": "o0", "text": "Employee Referral"},
             {"ref": "o1", "text": "SharkNinja Career Website"},
+        ], "Company careers page")["ref"], "o1")
+        self.assertEqual(_match_option([
+            {"ref": "o0", "text": "Referral"},
+            {"ref": "o1", "text": "ID.me Careers page"},
         ], "Company careers page")["ref"], "o1")
         self.assertEqual(_match_option([
             {"ref": "o0", "text": "Male"},
@@ -579,7 +684,7 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(result["status"], "applied")
         self.assertIn("submission_confirmed", result["note"])
 
-    @patch("applyd.apply.tools.pick_option", return_value="ok: picked o1")
+    @patch("applyd.apply.tools.pick_option", return_value="ok: picked o0")
     @patch("applyd.apply.tools._ref_locator")
     @patch("applyd.apply.tools._read_options")
     @patch("applyd.apply.tools.open_dropdown", return_value="opened r4")
@@ -621,6 +726,31 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(read_options.call_count, 2)
         pick_option_mock.assert_called_once()
 
+    @patch("applyd.apply.tools.pick_option")
+    @patch("applyd.apply.tools._ref_locator")
+    @patch("applyd.apply.tools._read_options")
+    @patch("applyd.apply.tools.open_dropdown", return_value="opened r4")
+    def test_failed_greenhouse_catalog_search_clears_filter_for_fallback(
+        self, _open, read_options, ref_locator, pick_option_mock
+    ) -> None:
+        read_options.side_effect = [
+            [{"ref": "o0", "text": "Abertay University"}],
+            [],
+        ]
+        locator = MagicMock()
+        locator.evaluate.return_value = "input"
+        locator.get_attribute.return_value = "combobox"
+        ref_locator.return_value = locator
+        page = MagicMock()
+
+        result = select_option(page, "r29", "Carleton University")
+
+        self.assertIn("no unambiguous match", result)
+        self.assertEqual(locator.fill.call_count, 2)
+        locator.fill.assert_called_with("", timeout=8000)
+        page.wait_for_timeout.assert_any_call(500)
+        pick_option_mock.assert_not_called()
+
     def test_snapshot_surfaces_blocking_captcha_frame(self) -> None:
         page = MagicMock()
         frame = MagicMock()
@@ -639,6 +769,10 @@ class ApplyToolBindingTests(unittest.TestCase):
             "required": True, "value": "",
         }]
         self.assertIn("GATE DETECTED: MANUAL ARTIFACT", snapshot(page))
+
+    def test_snapshot_recovers_lever_custom_question_labels(self) -> None:
+        self.assertIn("li.application-question", _SNAPSHOT_JS)
+        self.assertIn(".application-label", _SNAPSHOT_JS)
 
     def test_unknown_uk_authorization_selection_is_blocked(self) -> None:
         page = MagicMock()
@@ -698,6 +832,139 @@ class ApplyToolBindingTests(unittest.TestCase):
             ["United States"],
         ))
 
+    def test_sponsorship_yes_is_not_misread_as_authorization_yes(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "Will you now or in the future require employer sponsorship "
+                "to work in the United States?"
+            ),
+            "data-applyd-label": (
+                "Will you now or in the future require employer sponsorship "
+                "to work in the United States? — Yes"
+            ),
+        }.get(name)
+        page.locator.return_value.first = locator
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        self.assertIsNone(_select_profile_guard(
+            page, "r30", "Yes", profile, "", ["United States"]
+        ))
+        self.assertIn("no-sponsorship claim", _select_profile_guard(
+            page, "r30", "No", profile, "", ["United States"]
+        ) or "")
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "Will you now or in the future require employer sponsorship "
+                "to work in the United States?"
+            ),
+            "data-applyd-option": "Yes",
+            "data-applyd-label": (
+                "Will you now or in the future require employer sponsorship "
+                "to work in the United States? — Yes"
+            ),
+        }.get(name)
+        self.assertIsNone(_profile_click_guard(page, "r30", profile))
+
+    def test_pylon_short_no_option_uses_full_question_for_us_guard(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "Will you now or in the future require sponsorship for employment "
+                "visa status (e.g., H-1B visa status)?"
+            ),
+            "data-applyd-option": "No",
+            "data-applyd-label": "No",
+        }.get(name)
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        result = _profile_click_guard(page, "r15", profile)
+        self.assertIn("no-sponsorship claim", result or "")
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": (
+                "Will you now or in the future require sponsorship for employment "
+                "visa status (e.g., H-1B visa status)?"
+            ),
+            "data-applyd-option": "Yes",
+            "data-applyd-label": "Yes",
+        }.get(name)
+        self.assertIsNone(_profile_click_guard(page, "r14", profile))
+
+    def test_authorization_question_can_mention_sponsorship_help(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        question = (
+            "Are you currently authorized to work in the United States? "
+            "Retell AI DOES assist with visa sponsorship, so please feel free "
+            "to share your current status."
+        )
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-option": "No",
+            "data-applyd-label": f"{question} — No",
+        }.get(name)
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        self.assertIsNone(_profile_click_guard(page, "r11", profile))
+
+    def test_plain_text_sponsorship_answer_is_runner_grounded(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        locator.evaluate.return_value = (
+            "Do you now or will you in the future require employer "
+            "sponsorship to work in the United States?"
+        )
+        page.locator.return_value.first = locator
+        value, note = _grounded_fill_value(page, "r21", "No", {
+            "work_authorization": {"US": {
+                "authorized": False,
+                "requires_sponsorship": True,
+            }}
+        })
+        self.assertEqual(value, "Yes")
+        self.assertIn("grounded US sponsorship", note or "")
+
+    @patch("applyd.apply.tools.pick_option", return_value="ok: picked o1")
+    @patch("applyd.apply.tools._read_options")
+    @patch("applyd.apply.tools.open_dropdown", return_value="opened r44")
+    @patch("applyd.apply.tools._ref_locator")
+    def test_referral_dropdown_uses_configured_fallback(
+        self, ref_locator, _open, read_options, pick_option_mock
+    ) -> None:
+        locator = MagicMock()
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-label": "How did you hear about us?",
+            "data-applyd-combobox-open": None,
+            "role": "combobox",
+        }.get(name)
+        ref_locator.return_value = locator
+        read_options.return_value = [
+            {"ref": "o0", "text": "LinkedIn"},
+            {"ref": "o1", "text": "Indeed"},
+        ]
+        page = MagicMock()
+        result = select_option(
+            page, "r44", "Company careers page",
+            profile={"application_policy": {
+                "required_referral_source_fallbacks": [
+                    "Company careers page", "LinkedIn", "Indeed", "Other",
+                ]
+            }},
+        )
+        self.assertIn("selected 'LinkedIn'", result)
+        pick_option_mock.assert_called_once()
+        self.assertEqual(pick_option_mock.call_args.args[:2], (page, "o0"))
+
     def test_uk_radio_cannot_claim_a_temporary_work_visa(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -752,6 +1019,68 @@ class ApplyToolBindingTests(unittest.TestCase):
             profile,
             job_locations=["London, United Kingdom"],
         ))
+
+    def test_maven_recruitment_event_answer_is_grounded(self) -> None:
+        profile = {
+            "background_defaults": {
+                "recruitment_events": {"Maven Securities": []},
+            },
+            "application_policy": {
+                "ordinary_accuracy_attestation": "authorized",
+            },
+        }
+        self.assertTrue(_profile_already_answers(
+            "Have you attended a Maven recruitment event this year?",
+            profile,
+            company="Maven Securities",
+        ))
+        self.assertTrue(_profile_already_answers(
+            "Please select which event you attended or select N/A",
+            profile,
+            company="Maven Securities",
+        ))
+        self.assertTrue(_profile_already_answers(
+            "Recruitment Privacy Notice",
+            profile,
+            company="Maven Securities",
+        ))
+
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-label": (
+                "Have you attended a Maven recruitment event this year?"
+            ),
+            "data-applyd-question": (
+                "Have you attended a Maven recruitment event this year?"
+            ),
+        }.get(name)
+        self.assertIsNone(_select_profile_guard(
+            page, "r32", "No", profile, "", [], "Maven Securities"
+        ))
+        self.assertIn("refused recruitment-event answer", _select_profile_guard(
+            page, "r32", "Yes", profile, "", [], "Maven Securities"
+        ) or "")
+
+    @patch("applyd.apply.tools._ref_locator")
+    def test_raw_event_pick_cannot_invent_attendance(self, ref_locator) -> None:
+        locator = MagicMock()
+        locator.evaluate.return_value = "div"
+        locator.inner_text.return_value = "Yes"
+        ref_locator.return_value = locator
+        page = MagicMock()
+        page.evaluate.return_value = (
+            "Have you attended a Maven recruitment event this year?"
+        )
+        profile = {"background_defaults": {
+            "recruitment_events": {"Maven Securities": []},
+        }}
+        result = pick_option(
+            page, "o0", profile, company="Maven Securities"
+        )
+        self.assertIn("refused recruitment-event answer", result)
+        locator.click.assert_not_called()
 
     def test_unsupported_excel_yes_is_blocked(self) -> None:
         page = MagicMock()

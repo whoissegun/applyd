@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -200,6 +200,14 @@ _SNAPSHOT_JS = r"""() => {
                 questionEl = questionScope.querySelector(':scope > .ashby-application-form-question-title');
                 if (questionEl) break;
             }
+        }
+        if (!questionEl) {
+            // Lever custom questions keep their prompt in a sibling
+            // `.application-label`; the control itself only exposes an opaque
+            // `cards[uuid][fieldN]` name. Recover the visible prompt so
+            // preflight and filling are grounded in the actual question.
+            const leverQuestion = el.closest('li.application-question');
+            questionEl = leverQuestion?.querySelector('.application-label') || null;
         }
         const question = (questionEl?.innerText || '').trim();
         const ph = el.getAttribute('placeholder') || '';
@@ -423,6 +431,42 @@ def _grounded_fill_value(
         timeout=3000,
     )
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
+
+    # Some Greenhouse forms render a required Yes/No sponsorship question as
+    # a plain text input. Bind it to the regional structured record instead of
+    # accepting model-authored text.
+    sponsorship_yes_no = (
+        "sponsor" in normalized
+        and re.search(
+            r"\b(?:require|requires|required|need|needs)\b"
+            r"(?:\s+\w+){0,5}\s+sponsor\w*",
+            normalized,
+        )
+        and not any(phrase in normalized for phrase in (
+            "explain", "provide details", "describe", "what type", "which visa",
+        ))
+    )
+    if sponsorship_yes_no:
+        padded = f" {normalized} "
+        region = None
+        if any(term in padded for term in (
+            " united states ", " u s ", " usa ", " h1b ", " h 1b ",
+        )):
+            region = "US"
+        elif "canada" in normalized or "canadian" in normalized:
+            region = "CA"
+        elif any(term in padded for term in (
+            " uk ", " united kingdom ", " britain ", " british ",
+        )):
+            region = "UK"
+        elif "european union" in normalized or " eu " in padded:
+            region = "EU"
+        record = (profile.get("work_authorization") or {}).get(region or "")
+        if isinstance(record, dict) and isinstance(
+            record.get("requires_sponsorship"), bool
+        ):
+            grounded = "Yes" if record["requires_sponsorship"] else "No"
+            return grounded, f"grounded {region} sponsorship answer from profile"
     if any(phrase in normalized for phrase in (
         "name pronunciation", "name pronounciation", "pronunciation of your name",
         "pronounce your name", "phonetic spelling",
@@ -736,11 +780,36 @@ def inspect_dropdowns(page: Page, refs: list[str]) -> str:
     return f"inspected {len(results)} dropdowns:\n" + "\n".join(results)
 
 
-def pick_option(page: Page, option_ref: str) -> str:
+def pick_option(
+    page: Page,
+    option_ref: str,
+    profile: dict[str, Any] | None = None,
+    company: str = "",
+) -> str:
     """Click an option previously surfaced by open_dropdown."""
     try:
         loc = _ref_locator(page, option_ref)
         tag = loc.evaluate("el => el.tagName.toLowerCase()", timeout=2000)
+        option_text = (
+            loc.inner_text(timeout=2000) or loc.get_attribute("value") or ""
+        ).strip()[:80]
+        target_label = page.evaluate(
+            """() => {
+                const el = document.querySelector('[data-applyd-combobox-open]');
+                return el?.getAttribute('data-applyd-label') || '';
+            }"""
+        )
+        date_guard = _date_profile_guard(target_label, option_text, profile)
+        if date_guard:
+            return date_guard.replace(
+                "error: ", f"error: pick_option {option_ref}: ", 1
+            )
+        event_guard = _recruitment_event_profile_guard(
+            target_label, option_text, profile, company,
+            error_prefix=f"pick_option {option_ref}",
+        )
+        if event_guard:
+            return event_guard
         if tag == "option":
             # Native <option>: set parent <select> value + dispatch events
             loc.evaluate(
@@ -752,7 +821,6 @@ def pick_option(page: Page, option_ref: str) -> str:
                 }"""
             )
             return _ok(f"picked native option {option_ref}")
-        option_text = (loc.inner_text(timeout=2000) or "").strip()[:80]
         loc.click(timeout=5000)
         # Stamp the chosen value on the combobox open_dropdown marked, so the
         # next snapshot reports the field as filled. React comboboxes keep the
@@ -780,6 +848,221 @@ def _normalize_option_text(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
 
 
+def _recruitment_event_profile_guard(
+    label: str,
+    value: str,
+    profile: dict[str, Any] | None,
+    company: str,
+    *,
+    error_prefix: str,
+) -> str | None:
+    """Ground target-company recruitment-event answers, including raw picks."""
+    question = _normalize_option_text(label)
+    if not any(phrase in question for phrase in (
+        "recruitment event", "event you attended", "which event",
+    )):
+        return None
+    background = (profile or {}).get("background_defaults") or {}
+    recruitment_events = background.get("recruitment_events") or {}
+    company_events = next((
+        events for event_company, events in recruitment_events.items()
+        if str(event_company).casefold() == company.casefold()
+    ), None) if isinstance(recruitment_events, dict) and company else None
+    if not isinstance(company_events, list):
+        return _err(
+            f"{error_prefix}: target-company recruitment-event history is not "
+            "in the structured profile; send to review"
+        )
+
+    desired = _normalize_option_text(value)
+    says_yes = desired in {"yes", "true"}
+    says_no = desired in {"no", "false"}
+    if (says_yes or says_no) and says_yes != bool(company_events):
+        return _err(
+            f"{error_prefix}: refused recruitment-event answer {value!r}; "
+            f"structured profile records {len(company_events)} attended event(s)"
+        )
+    if not company_events and not (says_no or desired in {
+        "n a", "na", "not applicable", "none",
+    }):
+        return _err(
+            f"{error_prefix}: refused invented recruitment event {value!r}; "
+            "structured profile records none attended"
+        )
+    if company_events and not (says_yes or any(
+        _normalize_option_text(str(event)) == desired for event in company_events
+    )):
+        return _err(
+            f"{error_prefix}: refused unrecorded recruitment event {value!r}"
+        )
+    return None
+
+
+_MONTH_NUMBERS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _month_year(value: str) -> tuple[int, int | None] | None:
+    """Parse conservative year/month dropdown labels without guessing seasons."""
+    text = _normalize_option_text(value)
+    iso = re.fullmatch(r"(20\d{2})(?:\s+(0?[1-9]|1[0-2]))?", text)
+    if iso:
+        return int(iso.group(1)), int(iso.group(2)) if iso.group(2) else None
+    match = re.fullmatch(r"([a-z]+)\s+(20\d{2})", text)
+    if match and match.group(1) in _MONTH_NUMBERS:
+        return int(match.group(2)), _MONTH_NUMBERS[match.group(1)]
+    return None
+
+
+def _question_date(value: str) -> tuple[int, int, int | None] | None:
+    """Parse an explicit day/month/year embedded in a question label."""
+    text = _normalize_option_text(value)
+    months = "|".join(sorted(_MONTH_NUMBERS, key=len, reverse=True))
+    match = re.search(
+        rf"\b(?:(\d{{1,2}})(?:st|nd|rd|th)?\s+)?({months})\s+(20\d{{2}})\b",
+        text,
+    )
+    if not match:
+        return None
+    day = int(match.group(1)) if match.group(1) else None
+    return int(match.group(3)), _MONTH_NUMBERS[match.group(2)], day
+
+
+def _date_profile_guard(
+    label: str,
+    value: str,
+    profile: dict[str, Any] | None,
+    *,
+    today: date | None = None,
+) -> str | None:
+    """Reject dropdown dates that contradict grounded education/availability."""
+    if not profile:
+        return None
+    field = _normalize_option_text(label)
+    chosen = _normalize_option_text(value)
+    selected = _month_year(value)
+    expected_raw = str(profile.get("expected_grad_date") or "").strip()
+    expected = _month_year(expected_raw)
+
+    season_question = re.search(
+        r"\bgraduat\w*\s+(spring|summer|fall|autumn|winter)(?:\s+of)?\s+(20\d{2})\b",
+        field,
+    )
+    if season_question and expected and chosen in {"yes", "true", "no", "false"}:
+        season = season_question.group(1)
+        season_months = {
+            "spring": {3, 4, 5},
+            "summer": {6, 7, 8},
+            "fall": {9, 10, 11},
+            "autumn": {9, 10, 11},
+            "winter": {12, 1, 2},
+        }
+        matches = (
+            expected[0] == int(season_question.group(2))
+            and expected[1] in season_months[season]
+        )
+        says_yes = chosen in {"yes", "true"}
+        if says_yes != matches:
+            return _err(
+                f"date selection blocked: {value!r} contradicts grounded "
+                f"graduation date {expected_raw!r} for {season} "
+                f"{season_question.group(2)}"
+            )
+
+    if any(phrase in field for phrase in (
+        "graduation date", "expected graduation", "graduation month",
+        "graduation year",
+    )):
+        if not expected:
+            return _err(
+                "date selection blocked: expected graduation date is not in "
+                "the structured profile"
+            )
+        if not selected:
+            return _err(
+                f"date selection blocked: cannot prove {value!r} matches "
+                f"grounded graduation date {expected_raw!r}"
+            )
+        exact_year = selected[0] == expected[0]
+        exact_month = selected[1] is None or selected[1] == expected[1]
+        if not (exact_year and exact_month):
+            return _err(
+                f"date selection blocked: {value!r} contradicts grounded "
+                f"graduation date {expected_raw!r}"
+            )
+
+    if any(phrase in field for phrase in (
+        "target start date", "employment start date", "job start date",
+        "available to start", "availability date",
+    )):
+        earliest_raw = str(profile.get("earliest_start_date") or "").strip()
+        boolean_choice = chosen in {"yes", "true", "no", "false"}
+        question_date = _question_date(label)
+        if boolean_choice and question_date:
+            question_year, question_month, question_day = question_date
+            current = today or date.today()
+            if earliest_raw.casefold() in {"now", "immediately", "available now"}:
+                if question_day is None:
+                    available = (question_year, question_month) >= (
+                        current.year, current.month
+                    )
+                else:
+                    available = date(
+                        question_year, question_month, question_day
+                    ) >= current
+            else:
+                earliest = _month_year(earliest_raw)
+                if not earliest:
+                    return _err(
+                        "date selection blocked: earliest start date is not in "
+                        "the structured profile"
+                    )
+                available = (question_year, question_month) >= (
+                    earliest[0], earliest[1] or 1
+                )
+            says_yes = chosen in {"yes", "true"}
+            if says_yes != available:
+                return _err(
+                    f"date selection blocked: {value!r} contradicts grounded "
+                    f"availability {earliest_raw!r} for the date in {label!r}"
+                )
+            return None
+        if earliest_raw.casefold() in {"now", "immediately", "available now"}:
+            if chosen in {
+                "now", "immediately", "available now", "as soon as possible",
+            }:
+                return None
+            if not selected:
+                return _err(
+                    f"date selection blocked: cannot prove {value!r} is a "
+                    "valid future start date"
+                )
+            current = today or date.today()
+            selected_month = selected[1] or 1
+            if (selected[0], selected_month) < (current.year, current.month):
+                return _err(
+                    f"date selection blocked: {value!r} is before the current "
+                    f"month {current:%Y-%m}"
+                )
+        else:
+            earliest = _month_year(earliest_raw)
+            if earliest and selected:
+                earliest_month = earliest[1] or 1
+                selected_month = selected[1] or 1
+                if (selected[0], selected_month) < (earliest[0], earliest_month):
+                    return _err(
+                        f"date selection blocked: {value!r} is before grounded "
+                        f"earliest start date {earliest_raw!r}"
+                    )
+    return None
+
+
 def _option_semantic(value: str) -> str | None:
     """Map common ATS wording variants to a conservative shared meaning."""
     text = _normalize_option_text(value)
@@ -794,7 +1077,9 @@ def _option_semantic(value: str) -> str | None:
     if (
         any(phrase in text for phrase in ("company career", "company careers"))
         and any(term in text for term in ("page", "site", "website"))
-    ) or "career website" in text:
+    ) or "career website" in text or re.search(
+        r"\bcareers?\s+(?:page|site|website)\b", text
+    ):
         return "source:company-careers"
     if any(phrase in text for phrase in (
         "prefer not to say", "decline to self identify", "decline to answer",
@@ -852,6 +1137,7 @@ def _select_profile_guard(
     profile: dict[str, Any] | None,
     resume_text: str,
     job_locations: list[str] | None,
+    company: str = "",
 ) -> str | None:
     """Reject consequential dropdown claims unsupported by structured facts."""
     if not profile:
@@ -863,8 +1149,26 @@ def _select_profile_guard(
             str(loc.get_attribute("data-applyd-label") or "").casefold(),
         ).split()
     )
+    question = " ".join(
+        re.sub(
+            r"[^a-z0-9]+", " ",
+            str(loc.get_attribute("data-applyd-question") or label).casefold(),
+        ).split()
+    )
     desired = _normalize_option_text(value)
     location_text = " ".join(job_locations or []).casefold()
+
+    event_guard = _recruitment_event_profile_guard(
+        question, value, profile, company, error_prefix=f"select_option {ref}"
+    )
+    if event_guard:
+        return event_guard
+
+    date_guard = _date_profile_guard(label, value, profile)
+    if date_guard:
+        return date_guard.replace(
+            "error: ", f"error: select_option {ref}: ", 1
+        )
 
     # Never let a conditional U.S.-state control fabricate residence. Some
     # Greenhouse forms leave the field required even after Canada is selected;
@@ -902,32 +1206,45 @@ def _select_profile_guard(
                 f"select_option {ref}: refused location {value!r}; structured "
                 f"profile region is {profile.get('address_region')!r}"
             )
+    legal_context = f"{question} {label}".strip()
     uk_question = (
-        any(term in f" {label} " for term in (" uk ", " united kingdom ", " britain "))
+        any(term in f" {legal_context} " for term in (
+            " uk ", " united kingdom ", " britain ",
+        ))
         or any(term in location_text for term in ("united kingdom", " uk", "london"))
     )
-    legal_question = any(term in label for term in (
+    sponsorship_question = bool(
+        re.search(
+            r"\b(?:require|requires|required|need|needs)\b.{0,30}\bsponsorship\b",
+            question,
+        )
+        or any(phrase in question for phrase in (
+            "sponsor you", "sponsor me", "be sponsored",
+            "dependent on sponsorship",
+        ))
+    )
+    authorization_question = any(term in question for term in (
         "legally permitted to work", "right to work", "authorized to work", "authorised to work",
         "work authorization", "work authorisation", "work permit", "need a visa",
-        "require sponsorship", "visa sponsorship",
     ))
+    legal_question = authorization_question or sponsorship_question
 
     # Work authorization is a consequential legal claim, so enforce it from
     # the structured profile rather than trusting the model's interpretation
     # of long ATS option labels. In particular, an option mentioning H-1B/F-1
     # can still assert that the applicant is *currently authorized*; merely
     # intending to need H-1B sponsorship does not make that statement true.
-    padded_label = f" {label} "
+    padded_label = f" {legal_context} "
     region = None
     if any(term in padded_label for term in (
         " united states ", " u s ", " usa ", " h1b ", " h 1b ",
     )):
         region = "US"
-    elif "canada" in label or "canadian" in label:
+    elif "canada" in legal_context or "canadian" in legal_context:
         region = "CA"
     elif uk_question:
         region = "UK"
-    elif "european union" in label or " eu " in padded_label:
+    elif "european union" in legal_context or " eu " in padded_label:
         region = "EU"
     if legal_question and region is None:
         if any(term in location_text for term in ("united states", "usa", "u.s.")):
@@ -943,34 +1260,35 @@ def _select_profile_guard(
 
     auth_record = (profile.get("work_authorization") or {}).get(region or "")
     if legal_question and isinstance(auth_record, dict):
-        says_not_authorized = any(phrase in desired for phrase in (
-            "not currently authorized", "not authorized", "not authorised",
-            "do not have work authorization", "no work authorization",
-            "do not have the right to work", "no right to work",
-        )) or desired in {"no", "false"}
-        says_authorized = (
-            desired in {"yes", "true"}
-            or any(phrase in desired for phrase in (
-                "i am authorized", "i am authorised", "authorized to work",
-                "authorised to work", "right to work",
-                "citizen or lawful permanent resident",
-                "green card holder", "valid work permit",
-            ))
-        ) and not says_not_authorized
-        authorized = auth_record.get("authorized")
-        if authorized is False and says_authorized:
-            return _err(
-                f"select_option {ref}: refused unsupported {region} work "
-                f"authorization claim {value!r}; structured profile says "
-                "authorized=false"
-            )
-        if authorized is True and says_not_authorized:
-            return _err(
-                f"select_option {ref}: refused false denial of {region} work "
-                "authorization; structured profile says authorized=true"
-            )
+        if authorization_question:
+            says_not_authorized = any(phrase in desired for phrase in (
+                "not currently authorized", "not authorized", "not authorised",
+                "do not have work authorization", "no work authorization",
+                "do not have the right to work", "no right to work",
+            )) or desired in {"no", "false"}
+            says_authorized = (
+                desired in {"yes", "true"}
+                or any(phrase in desired for phrase in (
+                    "i am authorized", "i am authorised", "authorized to work",
+                    "authorised to work", "right to work",
+                    "citizen or lawful permanent resident",
+                    "green card holder", "valid work permit",
+                ))
+            ) and not says_not_authorized
+            authorized = auth_record.get("authorized")
+            if authorized is False and says_authorized:
+                return _err(
+                    f"select_option {ref}: refused unsupported {region} work "
+                    f"authorization claim {value!r}; structured profile says "
+                    "authorized=false"
+                )
+            if authorized is True and says_not_authorized:
+                return _err(
+                    f"select_option {ref}: refused false denial of {region} work "
+                    "authorization; structured profile says authorized=true"
+                )
 
-        if "sponsor" in label:
+        if sponsorship_question:
             requires = auth_record.get("requires_sponsorship")
             says_yes = desired in {"yes", "true"} or any(
                 phrase in desired for phrase in ("require sponsorship", "need sponsorship")
@@ -1025,6 +1343,7 @@ def select_option(
     profile: dict[str, Any] | None = None,
     resume_text: str = "",
     job_locations: list[str] | None = None,
+    company: str = "",
 ) -> str:
     """Open a dropdown, deterministically match ``value``, and select it.
 
@@ -1034,7 +1353,7 @@ def select_option(
     """
     try:
         guard = _select_profile_guard(
-            page, ref, value, profile, resume_text, job_locations
+            page, ref, value, profile, resume_text, job_locations, company
         )
         if guard:
             return guard
@@ -1055,6 +1374,25 @@ def select_option(
         # should be selected directly from their real labels.
         options = initial_options
         matched = _match_option(options, value)
+        if matched is None and profile:
+            field_label = " ".join(
+                re.sub(
+                    r"[^a-z0-9]+", " ",
+                    str(loc.get_attribute("data-applyd-label") or "").casefold(),
+                ).split()
+            )
+            if any(phrase in field_label for phrase in (
+                "how did you hear", "referral source", "source did you hear",
+            )):
+                fallbacks = (
+                    (profile.get("application_policy") or {}).get(
+                        "required_referral_source_fallbacks"
+                    ) or []
+                )
+                for fallback in fallbacks:
+                    matched = _match_option(options, str(fallback))
+                    if matched is not None:
+                        break
 
         # Searchable React/Greenhouse lists virtualize thousands of choices;
         # clicking alone exposes only the first screen (Aalborg, Aalto, ...),
@@ -1079,6 +1417,15 @@ def select_option(
                 matched = _match_option(options, value)
                 searched = True
         if matched is None:
+            # A failed Greenhouse catalog search leaves the combobox filtered
+            # to zero options. Restore the unfiltered catalog before returning
+            # so the next turn can safely choose a real fallback such as
+            # ``Other``. Without this reset, clicking the toggle closes the
+            # empty list and every subsequent open/select call fails.
+            if searched:
+                loc.fill("", timeout=8000)
+                page.wait_for_timeout(500)
+                page.evaluate(_OPTIONS_JS)
             visible = ", ".join(repr(o.get("text", "")) for o in initial_options[:30])
             filtered = ", ".join(repr(o.get("text", "")) for o in options[:30])
             search_note = f"; filtered options after search: {filtered}" if searched else ""
@@ -1088,7 +1435,7 @@ def select_option(
                 "Inspect these labels and call open_dropdown on the next turn "
                 "before choosing a different answer."
             )
-        result = pick_option(page, matched["ref"])
+        result = pick_option(page, matched["ref"], profile, company)
         if result.startswith("error:"):
             return result.replace("pick_option", "select_option", 1)
         # Dropdown components normally rerender only themselves. Do not call
@@ -1577,10 +1924,11 @@ def dispatch(
     if name == "inspect_dropdowns":
         return inspect_dropdowns(page, args["refs"])
     if name == "pick_option":
-        return pick_option(page, args["option_ref"])
+        return pick_option(page, args["option_ref"], profile, company)
     if name == "select_option":
         return select_option(
-            page, args["ref"], args["value"], profile, resume_text, job_locations
+            page, args["ref"], args["value"], profile, resume_text, job_locations,
+            company,
         )
     if name == "upload_resume":
         result = upload_file(page, args["ref"], resume_pdf_path)
@@ -1628,7 +1976,7 @@ def _fn(name: str, description: str, properties: dict, required: list[str] | Non
 TOOL_DEFS = [
     _fn(
         "preflight",
-        "Before changing a freshly snapshotted form, confirm you inspected every visible required question. List all required labels that are answerable and any consequential factual labels that are truly missing. Creative/motivation questions and referral-source questions are never missing facts.",
+        "Before changing a freshly snapshotted form, confirm you inspected every visible required question. List all required labels that are answerable and only exact required labels from snapshot whose consequential facts are truly missing. Unstarred attachments are optional; the runner-bound resume is available. Creative/motivation questions and referral-source questions are never missing facts.",
         {
             "answerable_required_labels": {
                 "type": "array", "items": {"type": "string"},

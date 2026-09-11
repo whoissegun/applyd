@@ -331,6 +331,7 @@ starter budget and documents the available hard cost caps.
 | `APPLYD_BROWSER_HEADLESS` | No | Force headed or headless local browser behavior |
 | `APPLYD_BROWSER_PROFILE` | No | Persistent application Chrome profile path |
 | `APPLYD_RETRIEVAL_PROFILE` | No | Persistent retrieval Chrome profile path |
+| `APPLYD_TAILOR_CALL_MAX_SECONDS` | No | Whole-request tailoring deadline; defaults to `180` |
 | `APPLYD_APPLY_MAX_TURNS` | No | Application model-turn ceiling; defaults to `25` |
 | `APPLYD_APPLY_MAX_SECONDS` | No | Secondary application wall-clock ceiling |
 | `APPLYD_IMAP_USER` | No | Mailbox for supported verification-code retrieval |
