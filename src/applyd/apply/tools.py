@@ -353,12 +353,6 @@ def _profile_click_guard(
 ) -> str | None:
     if not profile:
         return None
-    preferences = profile.get("employment_preferences") or {}
-    if not (
-        preferences.get("willing_to_relocate") is True
-        and preferences.get("willing_to_work_onsite") is True
-    ):
-        return None
     loc = _ref_locator(page, ref)
     question = str(loc.get_attribute("data-applyd-question") or "").casefold()
     option = " ".join(
@@ -367,6 +361,24 @@ def _profile_click_guard(
             str(loc.get_attribute("data-applyd-option") or "").casefold(),
         ).split()
     )
+
+    # Radio/checkbox options carry the same consequential claims as dropdown
+    # options. Route them through the structured authorization/location guard
+    # before clicking; otherwise a ref remap can turn the intended truthful
+    # radio into an adjacent visa-status claim.
+    if option:
+        consequential = _select_profile_guard(
+            page, ref, option, profile, "", []
+        )
+        if consequential:
+            return consequential.replace("select_option", "click", 1)
+
+    preferences = profile.get("employment_preferences") or {}
+    if not (
+        preferences.get("willing_to_relocate") is True
+        and preferences.get("willing_to_work_onsite") is True
+    ):
+        return None
     onsite_question = any(phrase in question for phrase in (
         "work from our", "work from the", "work onsite", "work on site",
         "in office", "in-office", "relocate",
@@ -397,10 +409,8 @@ def click(
 def _grounded_fill_value(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None,
 ) -> tuple[str, str | None]:
-    """Bind consequential date fields to profile data, not model guesses."""
-    if not profile or str(profile.get("earliest_start_date", "")).casefold() not in {
-        "now", "immediately", "available now",
-    }:
+    """Bind consequential text fields to profile data, not model guesses."""
+    if not profile:
         return value, None
     loc = _ref_locator(page, ref)
     label = loc.evaluate(
@@ -414,6 +424,21 @@ def _grounded_fill_value(
     )
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
     if any(phrase in normalized for phrase in (
+        "name pronunciation", "name pronounciation", "pronunciation of your name",
+        "pronounce your name", "phonetic spelling",
+    )):
+        pronunciation = str(profile.get("name_pronunciation") or "").strip()
+        if not pronunciation:
+            raise ValueError(
+                "name pronunciation is not in the structured profile; send "
+                "this application to review instead of inventing one"
+            )
+        return pronunciation, "grounded name pronunciation from profile"
+
+    available_now = str(profile.get("earliest_start_date", "")).casefold() in {
+        "now", "immediately", "available now",
+    }
+    if available_now and any(phrase in normalized for phrase in (
         "when can you start", "available to start", "availability date",
         "when are you available", "when would you be available",
         "employment start date", "job start date", "earliest possible start date",
@@ -675,6 +700,42 @@ def open_dropdown(page: Page, ref: str) -> str:
         return _err(f"open_dropdown {ref}: {type(e).__name__}: {e}")
 
 
+def inspect_dropdowns(page: Page, refs: list[str]) -> str:
+    """Read several dropdown catalogs without leaving one open.
+
+    Option refs cannot survive switching between custom React dropdowns, so
+    this tool intentionally returns labels only. The next model turn should
+    batch select_option(ref, exact_label) calls using those real choices.
+    """
+    results: list[str] = []
+    for ref in refs[:20]:
+        opened = open_dropdown(page, ref)
+        if opened.startswith("error:"):
+            results.append(f"  {ref}: {opened}")
+            continue
+        options = _read_options(page)
+        labels = [str(option.get("text") or "")[:120] for option in options[:80]]
+        results.append(f"  {ref}: {labels!r}")
+        try:
+            loc = _ref_locator(page, ref)
+            tag = loc.evaluate("el => el.tagName.toLowerCase()", timeout=2000)
+            if tag != "select":
+                page.keyboard.press("Escape")
+            loc.evaluate(
+                "el => el.removeAttribute('data-applyd-combobox-open')",
+                timeout=2000,
+            )
+            page.evaluate(
+                """() => document.querySelectorAll('[data-applyd-ref^="o"]')
+                    .forEach(el => el.removeAttribute('data-applyd-ref'))"""
+            )
+        except Exception:
+            # Inspection already succeeded; stale option refs are harmless and
+            # the next open/select call remints them before interaction.
+            pass
+    return f"inspected {len(results)} dropdowns:\n" + "\n".join(results)
+
+
 def pick_option(page: Page, option_ref: str) -> str:
     """Click an option previously surfaced by open_dropdown."""
     try:
@@ -842,13 +903,95 @@ def _select_profile_guard(
                 f"profile region is {profile.get('address_region')!r}"
             )
     uk_question = (
-        any(term in label for term in (" uk ", "united kingdom", "britain"))
+        any(term in f" {label} " for term in (" uk ", " united kingdom ", " britain "))
         or any(term in location_text for term in ("united kingdom", " uk", "london"))
     )
     legal_question = any(term in label for term in (
-        "legally permitted to work", "authorized to work", "authorised to work",
-        "work permit", "need a visa", "require sponsorship", "visa sponsorship",
+        "legally permitted to work", "right to work", "authorized to work", "authorised to work",
+        "work authorization", "work authorisation", "work permit", "need a visa",
+        "require sponsorship", "visa sponsorship",
     ))
+
+    # Work authorization is a consequential legal claim, so enforce it from
+    # the structured profile rather than trusting the model's interpretation
+    # of long ATS option labels. In particular, an option mentioning H-1B/F-1
+    # can still assert that the applicant is *currently authorized*; merely
+    # intending to need H-1B sponsorship does not make that statement true.
+    padded_label = f" {label} "
+    region = None
+    if any(term in padded_label for term in (
+        " united states ", " u s ", " usa ", " h1b ", " h 1b ",
+    )):
+        region = "US"
+    elif "canada" in label or "canadian" in label:
+        region = "CA"
+    elif uk_question:
+        region = "UK"
+    elif "european union" in label or " eu " in padded_label:
+        region = "EU"
+    if legal_question and region is None:
+        if any(term in location_text for term in ("united states", "usa", "u.s.")):
+            region = "US"
+        elif any(term in location_text for term in (
+            "canada", "ontario", "toronto", "ottawa", "vancouver", "montreal",
+        )):
+            region = "CA"
+        elif any(term in location_text for term in (
+            "united kingdom", "england", "scotland", "wales", "london", " uk",
+        )):
+            region = "UK"
+
+    auth_record = (profile.get("work_authorization") or {}).get(region or "")
+    if legal_question and isinstance(auth_record, dict):
+        says_not_authorized = any(phrase in desired for phrase in (
+            "not currently authorized", "not authorized", "not authorised",
+            "do not have work authorization", "no work authorization",
+            "do not have the right to work", "no right to work",
+        )) or desired in {"no", "false"}
+        says_authorized = (
+            desired in {"yes", "true"}
+            or any(phrase in desired for phrase in (
+                "i am authorized", "i am authorised", "authorized to work",
+                "authorised to work", "right to work",
+                "citizen or lawful permanent resident",
+                "green card holder", "valid work permit",
+            ))
+        ) and not says_not_authorized
+        authorized = auth_record.get("authorized")
+        if authorized is False and says_authorized:
+            return _err(
+                f"select_option {ref}: refused unsupported {region} work "
+                f"authorization claim {value!r}; structured profile says "
+                "authorized=false"
+            )
+        if authorized is True and says_not_authorized:
+            return _err(
+                f"select_option {ref}: refused false denial of {region} work "
+                "authorization; structured profile says authorized=true"
+            )
+
+        if "sponsor" in label:
+            requires = auth_record.get("requires_sponsorship")
+            says_yes = desired in {"yes", "true"} or any(
+                phrase in desired for phrase in ("require sponsorship", "need sponsorship")
+            )
+            says_no = desired in {"no", "false"} or any(
+                phrase in desired for phrase in (
+                    "do not require sponsorship", "will not require sponsorship",
+                    "no sponsorship",
+                )
+            )
+            if requires is True and says_no:
+                return _err(
+                    f"select_option {ref}: refused false {region} no-sponsorship "
+                    "claim; structured profile says requires_sponsorship=true"
+                )
+            if requires is False and says_yes:
+                return _err(
+                    f"select_option {ref}: refused false {region} sponsorship "
+                    "claim; structured profile says requires_sponsorship=false"
+                )
+
     if uk_question and legal_question:
         uk = (profile.get("work_authorization") or {}).get("UK")
         if not isinstance(uk, dict):
@@ -922,8 +1065,15 @@ def select_option(
             tag = loc.evaluate("el => el.tagName.toLowerCase()", timeout=8000)
             role = loc.get_attribute("role")
             if tag == "input" and role == "combobox":
-                loc.fill(value, timeout=8000)
-                page.wait_for_timeout(650)
+                # React/Greenhouse searchable catalogs update from keyboard
+                # events. locator.fill(value) changes the DOM value directly,
+                # which leaves the large School/Discipline catalogs unfiltered
+                # on some forms. Clear first, then type as a user so the
+                # component actually renders the matching real options.
+                loc.click(timeout=8000)
+                loc.fill("", timeout=8000)
+                loc.press_sequentially(value, delay=35, timeout=20000)
+                page.wait_for_timeout(1200)
                 page.evaluate(_OPTIONS_JS)
                 options = _read_options(page)
                 matched = _match_option(options, value)
@@ -1424,6 +1574,8 @@ def dispatch(
         return click_many(page, args["refs"], profile)
     if name == "open_dropdown":
         return open_dropdown(page, args["ref"])
+    if name == "inspect_dropdowns":
+        return inspect_dropdowns(page, args["refs"])
     if name == "pick_option":
         return pick_option(page, args["option_ref"])
     if name == "select_option":
@@ -1563,6 +1715,12 @@ TOOL_DEFS = [
         "Inspect choices only when the desired answer is genuinely unknown until you see the list. Never batch multiple open_dropdown calls: option refs would collide. For any known profile answer, use select_option instead. Returns NEW refs prefixed o, then call pick_option.",
         {"ref": {"type": "string"}},
         required=["ref"],
+    ),
+    _fn(
+        "inspect_dropdowns",
+        "Inspect the real labels for several independent dropdowns in one call, then close them. Use when a form has 3 or more required dropdowns whose desired labels are unknown. The next turn should batch select_option calls with the exact labels returned. This tool returns labels, not pickable option refs.",
+        {"refs": {"type": "array", "items": {"type": "string"}},},
+        required=["refs"],
     ),
     _fn(
         "pick_option",

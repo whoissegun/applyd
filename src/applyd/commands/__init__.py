@@ -1,5 +1,6 @@
 from .apply import cmd_apply
 from .apply_batch import cmd_apply_batch
+from .browser_login import cmd_browser_login
 from .discover import cmd_discover
 from .dedupe import cmd_dedupe
 from .enrich import cmd_enrich
@@ -17,6 +18,7 @@ from .verify_live import cmd_verify_live
 __all__ = [
     "cmd_apply",
     "cmd_apply_batch",
+    "cmd_browser_login",
     "cmd_discover",
     "cmd_dedupe",
     "cmd_enrich",

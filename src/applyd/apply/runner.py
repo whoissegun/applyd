@@ -231,6 +231,7 @@ def run_apply(
     tool_call_counts: dict[str, int] = {}
     nudged = False
     submit_confirmed_turn: int | None = None
+    submit_confirmation_note = ""
     failed_action_counts: dict[str, int] = {}
     event_sequence = 0
     preflight_required = False
@@ -578,6 +579,30 @@ def run_apply(
                                 "role": "tool", "tool_call_id": tc.id, "content": result
                             })
                             continue
+                        if (
+                            submit_confirmed_turn is not None
+                            and submit_confirmed_turn < turn
+                            and requested_status != "applied"
+                        ):
+                            # Browser evidence outranks a contradictory model
+                            # summary. This specifically covers Greenhouse's
+                            # email-code path: submit can confirm after entering
+                            # the code, while Kimi repeats the earlier wall label
+                            # and incorrectly downgrades a completed application.
+                            _emit(
+                                "report_status_override",
+                                turn=turn,
+                                name=name,
+                                payload={
+                                    "requested_status": requested_status,
+                                    "requested_note": requested_note[:500],
+                                    "reason": "prior submit tool confirmed application",
+                                },
+                            )
+                            requested_status = "applied"
+                            requested_note = submit_confirmation_note or (
+                                "application submission confirmed by runner"
+                            )
                         final_note = requested_note
                         final_status = _normalize_report_status(
                             requested_status, final_note
@@ -624,6 +649,8 @@ def run_apply(
                         or result.startswith("ok: test_mode=true")
                     ):
                         submit_confirmed_turn = turn
+                        if result.startswith("ok: submission_confirmed"):
+                            submit_confirmation_note = result.removeprefix("ok: ")
                     if name == "submit" and result.startswith("error:"):
                         # dispatch appends a fresh snapshot after a failed
                         # submit, which may expose conditional required fields.
@@ -890,7 +917,7 @@ def _profile_already_answers(
             "authorized to work", "authorised to work", "work authorization",
             "work authorisation", "immigration sponsorship", "visa sponsorship",
             "require sponsorship", "requires sponsorship", "legal right to work",
-            "legally permitted to work", "work permit", "require a visa",
+            "right to work", "legally permitted to work", "work permit", "require a visa",
             "requires a visa", "visa for employment",
         )
     )
@@ -934,6 +961,11 @@ def _profile_already_answers(
             return True
 
     known_fields = (
+        (("preferred first name", "preferred name", "nickname"), "first_name"),
+        (("name pronunciation", "name pronounciation", "phonetic spelling"), "name_pronunciation"),
+        (("education", "school", "university", "institution"), "school"),
+        (("degree",), "degree"),
+        (("major", "discipline", "field of study", "degree subject"), "major"),
         (("over 18", "at least 18"), "over_18"),
         (("veteran",), "veteran_status"),
         (("disability", "disabled"), "disability_status"),
@@ -951,6 +983,7 @@ def _profile_already_answers(
         ), "earliest_start_date"),
         (("contact your previous", "contact previous employer"), "previous_employers_may_be_contacted"),
         (("citizenship", "citizen of"), "citizenships"),
+        (("language", "languages do you speak"), "spoken_languages"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),
         (("location city", "current city", "city of residence"), "address_city"),
         (("current residence", "country of residence", "current country"), "address_country"),

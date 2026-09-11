@@ -10,6 +10,7 @@ from applyd.apply.tools import (
     TOOL_DEFS,
     _grounded_fill_value,
     fill_autocomplete,
+    inspect_dropdowns,
     open_dropdown,
     _profile_click_guard,
     _select_profile_guard,
@@ -142,6 +143,7 @@ class ApplyToolBindingTests(unittest.TestCase):
     def test_one_call_dropdown_tool_is_available(self) -> None:
         names = {item["function"]["name"] for item in TOOL_DEFS}
         self.assertIn("select_option", names)
+        self.assertIn("inspect_dropdowns", names)
 
     def test_required_question_preflight_tool_is_available(self) -> None:
         names = {item["function"]["name"] for item in TOOL_DEFS}
@@ -178,6 +180,20 @@ class ApplyToolBindingTests(unittest.TestCase):
             "Location (City)*", {"address_city": "Ottawa"}
         ))
 
+    def test_preferred_first_name_uses_profile_first_name(self) -> None:
+        self.assertTrue(_profile_already_answers(
+            "Preferred First Name*", {"first_name": "Jane"}
+        ))
+
+    def test_education_labels_use_structured_profile(self) -> None:
+        profile = {
+            "school": "Carleton University",
+            "degree": "Bachelor of Computer Science",
+            "major": "Computer Science",
+        }
+        self.assertTrue(_profile_already_answers("Education", profile))
+        self.assertTrue(_profile_already_answers("Discipline*", profile))
+
     def test_motivation_and_hourly_rate_are_not_false_profile_gaps(self) -> None:
         self.assertTrue(_profile_already_answers(
             "Why do you want to join LiveFlow?", {}
@@ -191,6 +207,10 @@ class ApplyToolBindingTests(unittest.TestCase):
         ))
         self.assertFalse(_profile_already_answers(
             "Upload a video explaining why you want to join us", {}
+        ))
+        self.assertTrue(_profile_already_answers(
+            "Which languages do you speak?",
+            {"spoken_languages": ["English"]},
         ))
 
     def test_structured_profile_overrides_country_and_region_gaps(self) -> None:
@@ -304,6 +324,21 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(value, "2022")
         self.assertIsNone(note)
 
+    def test_name_pronunciation_cannot_be_invented(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.evaluate.return_value = "Name pronunciation"
+        with self.assertRaisesRegex(ValueError, "not in the structured profile"):
+            _grounded_fill_value(page, "r6", "invented phonetics", {
+                "first_name": "Jane",
+            })
+        value, note = _grounded_fill_value(page, "r6", "wrong", {
+            "name_pronunciation": "explicit pronunciation",
+        })
+        self.assertEqual(value, "explicit pronunciation")
+        self.assertIn("grounded name pronunciation", note or "")
+
     def test_onsite_negative_option_is_blocked_when_profile_is_willing(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -369,6 +404,27 @@ class ApplyToolBindingTests(unittest.TestCase):
         result = open_dropdown(page, "r16")
         self.assertIn("already open", result)
         locator.click.assert_not_called()
+
+    @patch("applyd.apply.tools._read_options")
+    @patch("applyd.apply.tools.open_dropdown")
+    @patch("applyd.apply.tools._ref_locator")
+    def test_inspect_dropdowns_returns_labels_and_closes_each_menu(
+        self, ref_locator, open_mock, read_options
+    ) -> None:
+        open_mock.return_value = "opened"
+        read_options.side_effect = [
+            [{"ref": "o0", "text": "Yes"}, {"ref": "o1", "text": "No"}],
+            [{"ref": "o0", "text": "LinkedIn"}],
+        ]
+        locator = MagicMock()
+        locator.evaluate.side_effect = ["input", None, "input", None]
+        ref_locator.return_value = locator
+        page = MagicMock()
+        result = inspect_dropdowns(page, ["r25", "r38"])
+        self.assertIn("r25: ['Yes', 'No']", result)
+        self.assertIn("r38: ['LinkedIn']", result)
+        self.assertEqual(open_mock.call_count, 2)
+        self.assertEqual(page.keyboard.press.call_count, 2)
 
     @patch("applyd.apply.tools.pick_option", return_value="ok: picked o7")
     @patch("applyd.apply.tools._read_options")
@@ -460,6 +516,69 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertEqual(result["status"], "review")
         self.assertEqual(dispatch_mock.call_count, 2)
 
+    def test_submit_confirmation_overrides_incorrect_model_downgrade(self) -> None:
+        def response(*calls):
+            tool_calls = [
+                SimpleNamespace(
+                    id=f"call-{index}",
+                    function=SimpleNamespace(
+                        name=name, arguments=json.dumps(arguments)
+                    ),
+                )
+                for index, (name, arguments) in enumerate(calls)
+            ]
+            message = MagicMock()
+            message.tool_calls = tool_calls
+            message.content = None
+            message.model_dump.return_value = {"role": "assistant"}
+            return SimpleNamespace(
+                usage=SimpleNamespace(cost=0),
+                choices=[SimpleNamespace(message=message)],
+            )
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            response(("navigate", {})),
+            response(("snapshot", {})),
+            response(("preflight", {
+                "answerable_required_labels": ["Name"], "missing_fields": []
+            })),
+            response(("submit", {"ref": "r9"})),
+            response(("report_done", {
+                "status": "skipped", "note": "gated:email_verification"
+            })),
+        ]
+
+        @contextmanager
+        def fake_browser(*_args, **_kwargs):
+            yield MagicMock()
+
+        with patch("applyd.apply.runner._make_client", return_value=client), patch(
+            "applyd.apply.runner.browser_page", fake_browser
+        ), patch(
+            "applyd.apply.runner.dispatch",
+            side_effect=[
+                "ok: loaded",
+                "r9: [button/submit *] 'Submit'",
+                "ok: submission_confirmed via r9 after email verification",
+            ],
+        ), patch(
+            "applyd.apply.runner._start_hard_watchdog"
+        ) as watchdog, patch(
+            "applyd.apply.runner.load_env"
+        ), patch(
+            "applyd.apply.runner.build_code_reader", return_value=None
+        ):
+            watchdog.return_value.set.return_value = None
+            result = run_apply(
+                job_id="job-2", company="Example", title="Engineer",
+                job_url="https://example.test/job", resume_pdf_path="resume.pdf",
+                profile_md="{}", test_mode=False,
+            )
+
+        self.assertEqual(result["status"], "applied")
+        self.assertIn("submission_confirmed", result["note"])
+
     @patch("applyd.apply.tools.pick_option", return_value="ok: picked o1")
     @patch("applyd.apply.tools._ref_locator")
     @patch("applyd.apply.tools._read_options")
@@ -494,7 +613,11 @@ class ApplyToolBindingTests(unittest.TestCase):
         page = MagicMock()
         result = select_option(page, "r4", "Carleton University")
         self.assertIn("selected 'Carleton University'", result)
-        locator.fill.assert_called_once_with("Carleton University", timeout=8000)
+        locator.click.assert_called_once_with(timeout=8000)
+        locator.fill.assert_called_once_with("", timeout=8000)
+        locator.press_sequentially.assert_called_once_with(
+            "Carleton University", delay=35, timeout=20000
+        )
         self.assertEqual(read_options.call_count, 2)
         pick_option_mock.assert_called_once()
 
@@ -545,6 +668,71 @@ class ApplyToolBindingTests(unittest.TestCase):
             page, "r24", "Not in the US", profile, "", []
         ))
 
+    def test_us_work_authorization_claim_must_match_profile(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.return_value = (
+            "Which best describes your current U.S. work authorization status?"
+        )
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        result = _select_profile_guard(
+            page,
+            "r24",
+            "I am authorized to work in the U.S. through another status or "
+            "work authorization (H1B, F1, OPT, CPT, etc).",
+            profile,
+            "",
+            ["United States"],
+        )
+        self.assertIn("refused unsupported US work authorization claim", result or "")
+        self.assertIsNone(_select_profile_guard(
+            page,
+            "r24",
+            "I am not currently authorized to work in the United States.",
+            profile,
+            "",
+            ["United States"],
+        ))
+
+    def test_uk_radio_cannot_claim_a_temporary_work_visa(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "Please confirm your right to work status",
+            "data-applyd-option": (
+                "I hold another type of visa that gives me the temporary right "
+                "to work in the UK and I will require company visa sponsorship"
+            ),
+            "data-applyd-label": (
+                "Please confirm your right to work status — I hold another type "
+                "of visa that gives me the temporary right to work in the UK"
+            ),
+        }.get(name)
+        profile = {"work_authorization": {"UK": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+        result = _profile_click_guard(page, "r12", profile)
+        self.assertIn("refused unsupported UK work authorization claim", result or "")
+
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": "Please confirm your right to work status",
+            "data-applyd-option": (
+                "I currently do not have the right to work in the UK and would "
+                "require company visa sponsorship"
+            ),
+            "data-applyd-label": (
+                "Please confirm your right to work status — I currently do not "
+                "have the right to work in the UK and require sponsorship"
+            ),
+        }.get(name)
+        self.assertIsNone(_profile_click_guard(page, "r13", profile))
+
     def test_known_uk_authorization_is_answerable(self) -> None:
         profile = {"work_authorization": {
             "UK": {
@@ -558,6 +746,11 @@ class ApplyToolBindingTests(unittest.TestCase):
         ))
         self.assertTrue(_profile_already_answers(
             "Will you require sponsorship in the United Kingdom?", profile
+        ))
+        self.assertTrue(_profile_already_answers(
+            "Please confirm your right to work status",
+            profile,
+            job_locations=["London, United Kingdom"],
         ))
 
     def test_unsupported_excel_yes_is_blocked(self) -> None:

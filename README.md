@@ -14,6 +14,20 @@ the default path.
 > with `--test-mode false`. You are responsible for the accuracy of submitted
 > information and for complying with each website's terms and policies.
 
+## Start here
+
+- [Complete setup guide](setup.md) — install, configure OpenRouter, initialize
+  SQLite and Chrome, run a safe test, and troubleshoot the result.
+- [Candidate profile questionnaire](PROFILE_QUESTIONS.md) — the questions and
+  coding-agent prompt used to build a grounded `profile.json`.
+- [`profile.example.json`](profile.example.json) — profile schema and safe
+  defaults.
+- [`resume.example.json`](resume.example.json) — canonical factual resume
+  structure.
+
+If this is your first install, follow `setup.md` rather than piecing the setup
+together from the command reference below.
+
 ## Highlights
 
 - **Local state:** jobs, extracted facts, decisions, scores, application state,
@@ -83,6 +97,10 @@ so suitable jobs are not lost.
 - Optional: Brave Search or Serper credentials for broad/company discovery
 - Optional: Bright Data Scraping Browser credentials for configured fallbacks
 
+See [setup.md](setup.md) for macOS, Linux, and Windows environment instructions,
+current provider links, browser-profile setup, expected costs, and a first-run
+checklist.
+
 On macOS, install the system dependencies with:
 
 ```bash
@@ -102,18 +120,10 @@ pip install -e .
 playwright install chromium
 ```
 
-Create a local environment file:
+Create a local environment file and add your OpenRouter key:
 
-```dotenv
-OPENROUTER_API_KEY=your_openrouter_key
-
-# Optional discovery provider
-BRAVE_SEARCH_API_KEY=your_brave_key
-SEARCH_PROVIDER=brave
-
-# Safety defaults
-APPLYD_TEST_MODE=true
-APPLYD_BROWSER_HEADLESS=true
+```bash
+cp .env.example .env
 ```
 
 Create local candidate files and initialize SQLite:
@@ -135,6 +145,11 @@ ignored by Git.
 work authorization, education, preferences, background defaults, and writing
 policy. Do not put facts in the profile that you would not authorize applyd to
 submit.
+
+Use [PROFILE_QUESTIONS.md](PROFILE_QUESTIONS.md) to build it manually or with
+Codex, Claude Code, Cursor, or another repository-aware coding agent. That guide
+separates factual answers from preferences, provides a reusable agent prompt,
+and includes a final legal/identity accuracy checklist.
 
 `resume.json` is the canonical source for tailoring. Each experience, project,
 and bullet has a stable source ID. Tailoring may select, shorten, combine, style,
@@ -221,6 +236,18 @@ The default apply profile is `data/browser/apply-profile`; retrieval uses the
 separate `data/browser/retrieval-profile`. Real local submissions open visible
 Chrome unless `APPLYD_BROWSER_HEADLESS` is explicitly set.
 
+Initialize the dedicated application profile and sign in once with:
+
+```bash
+applyd browser-login
+```
+
+applyd does not attach to an already-open everyday Chrome profile and local mode
+does not require a CDP URL. It launches a dedicated persistent profile directly
+through Playwright. Do not set `APPLYD_BROWSER_PROFILE` to Chrome's default
+`User Data` directory; use a separate directory as described in
+[setup.md](setup.md#7-set-up-the-dedicated-chrome-profile).
+
 Local Chrome is the default application provider. Lever starts with Bright Data
 for real batch runs because the pilot repeatedly encountered CAPTCHA gates.
 Other supported ATSes retry through Bright Data only after an explicit CAPTCHA,
@@ -230,11 +257,19 @@ Bright Data is optional and is not used for discovery, retrieval, extraction,
 matching, or tailoring. To configure it:
 
 ```dotenv
+# Paste the full endpoint shown in the Bright Data Browser API zone:
+BRIGHTDATA_CDP_URL=wss://your-complete-endpoint
+
+# Or provide its components instead:
 BRIGHTDATA_CUSTOMER_ID=your_customer_id
 BRIGHTDATA_ZONE=your_zone
 BRIGHTDATA_ZONE_PASSWORD=your_zone_password
 BRIGHTDATA_COUNTRY=ca
 ```
+
+The optional Bright Data CDP endpoint comes from a Browser API / Scraping
+Browser zone in the Bright Data control panel. It is unrelated to the local
+Chrome profile. See the [CDP instructions](setup.md#9-optional-bright-data-and-its-cdp-url).
 
 A provider-reported CAPTCHA solve is not submission evidence. applyd records
 `applied` only after a later turn observes an ATS confirmation marker,
@@ -276,6 +311,14 @@ Data charges and any interrupted request that could not be persisted. In this
 batch, 17 jobs required tailoring while three SmartRecruiters jobs went directly
 to zero-cost manual review.
 
+A separate fresh extraction run processed 95 jobs for $0.2262, or roughly
+$0.00238 per job in that sample. As of September 10, 2026,
+[OpenRouter lists Kimi K2.6](https://openrouter.ai/moonshotai/kimi-k2.6) at a
+cheapest-endpoint price of $0.58/M input tokens, $3.40/M output tokens, and
+$0.058/M cached-input tokens. Always check the live model page before a large
+run. [setup.md](setup.md#planning-your-budget) translates these samples into a
+starter budget and documents the available hard cost caps.
+
 ## Configuration
 
 | Variable | Required | Purpose |
@@ -292,7 +335,8 @@ to zero-cost manual review.
 | `APPLYD_APPLY_MAX_SECONDS` | No | Secondary application wall-clock ceiling |
 | `APPLYD_IMAP_USER` | No | Mailbox for supported verification-code retrieval |
 | `APPLYD_IMAP_PASSWORD` | No | Mailbox app password |
-| `BRIGHTDATA_*` | No | Optional remote browser and CAPTCHA fallback |
+| `BRIGHTDATA_CDP_URL` | No | Full optional Bright Data Browser API WebSocket endpoint |
+| `BRIGHTDATA_*` | No | Alternative Bright Data endpoint components and CAPTCHA fallback |
 
 Keep credentials in `.env`; never commit them.
 
@@ -312,6 +356,8 @@ src/applyd/
 
 tests/              # unit and browser-tool regression tests
 scripts/            # import, benchmark, and ATS test utilities
+setup.md             # complete installation and first-run guide
+PROFILE_QUESTIONS.md # reusable candidate interview and agent prompt
 ```
 
 ## Development

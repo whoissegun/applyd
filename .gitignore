@@ -18,6 +18,7 @@ dist/
 build/
 .env
 .env.*
+!.env.example
 data/
 out/
 tmp/

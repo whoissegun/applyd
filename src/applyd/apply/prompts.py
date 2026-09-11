@@ -80,6 +80,10 @@ For multi-step forms, snapshot and preflight each newly revealed step.
    - ONLY if the answer cannot be chosen without seeing the choices first, use
      open_dropdown(ref), then pick_option(option_ref) in the next turn. Never
      batch multiple open_dropdown calls and never guess option refs.
+     If 3 or more independent dropdowns require inspection, call
+     inspect_dropdowns(refs) once instead. It returns each field's real labels
+     and closes the menus; on the next turn batch select_option calls using the
+     exact compatible labels. This avoids spending two turns per dropdown.
 5. submit (the tool no-ops in test_mode).
 6. report_done — exactly once.
 
@@ -90,6 +94,13 @@ the first snapshot is canonical for the run; refs stay valid.
 ## Filling rules
 
 - Identity, location, links, education: copy verbatim from the user profile.
+- Name pronunciation or phonetic spelling is an identity fact. Use only an
+  explicit `name_pronunciation` profile value; otherwise send it to review.
+- Education labels such as major, discipline, field of study, and program use
+  the profile's `major` value. They are not missing facts when `major` exists.
+- Spoken-language questions: use only `spoken_languages` from the profile and
+  proficiency only from `language_proficiency`. Do not infer native/bilingual
+  proficiency when no proficiency is recorded.
 - Location / any field that shows suggestions as you type (Lever location,
   Google Places): use fill_autocomplete, NEVER plain fill — these fields keep
   the real value in a hidden input and clear themselves on submit unless a

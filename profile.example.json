@@ -2,6 +2,7 @@
   "first_name": "Jane",
   "last_name": "Doe",
   "full_name": "Jane Doe",
+  "name_pronunciation": null,
   "email": "jane@example.com",
   "phone": "+1-555-555-5555",
   "address_city": "Ottawa",
@@ -12,6 +13,7 @@
   "github_url": "https://github.com/janedoe",
   "school": "Carleton University",
   "degree": "Bachelor of Computer Science",
+  "major": "Computer Science",
   "expected_grad_date": "2027-04",
   "gpa": {
     "value": 9.6,
@@ -20,6 +22,8 @@
     "conversion_policy": "use_original_or_review_if_form_requires_another_scale"
   },
   "citizenships": [],
+  "spoken_languages": ["English"],
+  "language_proficiency": {},
   "over_18": true,
   "security_clearances": [],
   "years_professional_experience": 1,

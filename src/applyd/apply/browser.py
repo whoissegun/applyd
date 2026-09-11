@@ -53,6 +53,9 @@ def _required(name: str) -> str:
 
 
 def brightdata_cdp_url() -> str:
+    direct = os.environ.get("BRIGHTDATA_CDP_URL", "").strip()
+    if direct:
+        return direct
     customer = _required("BRIGHTDATA_CUSTOMER_ID")
     zone = _required("BRIGHTDATA_ZONE")
     password = _required("BRIGHTDATA_ZONE_PASSWORD")

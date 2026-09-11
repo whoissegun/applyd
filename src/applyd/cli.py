@@ -7,6 +7,7 @@ from typing import Optional
 from .commands import (
     cmd_apply,
     cmd_apply_batch,
+    cmd_browser_login,
     cmd_discover,
     cmd_dedupe,
     cmd_enrich,
@@ -63,6 +64,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_resume.add_argument("--profile", default="profile.json")
     p_resume.add_argument("--output", default="resume.json")
     p_resume.set_defaults(func=cmd_import_resume)
+
+    p_browser_login = sub.add_parser(
+        "browser-login",
+        help="open the dedicated persistent Chrome profile for manual sign-in",
+    )
+    p_browser_login.add_argument(
+        "--profile",
+        help="profile directory (default: APPLYD_BROWSER_PROFILE or data/browser/apply-profile)",
+    )
+    p_browser_login.add_argument(
+        "--url",
+        default="https://www.google.com/",
+        help="initial setup page (default: https://www.google.com/)",
+    )
+    p_browser_login.set_defaults(func=cmd_browser_login)
 
     p_disc = sub.add_parser("discover", help="pull from aggregators + user-specified companies")
     p_disc.add_argument("--targets", default="targets.json",
