@@ -146,6 +146,29 @@ work authorization, education, preferences, background defaults, and writing
 policy. Do not put facts in the profile that you would not authorize applyd to
 submit.
 
+Role targeting and role exclusion are separate. `matchmaking.target_role_families`
+boosts preferred families but is not a strict allowlist. To prevent a grounded
+role family from entering the application funnel, add it to the personal
+profile policy:
+
+```json
+{
+  "preferences": {
+    "excluded_role_families": ["data"],
+    "exclude_title_patterns": ["\\bstrategic analyst\\b"]
+  },
+  "matchmaking": {
+    "target_role_families": ["software_engineering", "machine_learning"]
+  }
+}
+```
+
+Supported role-family values are `software_engineering`, `machine_learning`,
+`data`, `security`, `product`, `design`, `sales`, `operations`, and `other`.
+Role-family exclusions use evidence-grounded extracted facts; title patterns
+are case-insensitive regular expressions for narrower personal rules. After
+changing either setting, rerun `applyd evaluate` and `applyd match`.
+
 Use [PROFILE_QUESTIONS.md](PROFILE_QUESTIONS.md) to build it manually or with
 Codex, Claude Code, Cursor, or another repository-aware coding agent. That guide
 separates factual answers from preferences, provides a reusable agent prompt,

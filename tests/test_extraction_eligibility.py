@@ -21,6 +21,38 @@ def job(title: str = "Software Engineer", locations: list[str] | None = None) ->
 
 
 class ExtractionEligibilityTests(unittest.TestCase):
+    def test_grounded_excluded_role_family_is_ineligible(self) -> None:
+        result = evaluate_job(
+            job(title="Business Data Analyst"),
+            {
+                "role_family": {
+                    "value": "data",
+                    "evidence": "Business Data Analyst",
+                    "evidence_grounded": True,
+                }
+            },
+            {"preferences": {"excluded_role_families": ["data"]}},
+        )
+
+        self.assertEqual(result.decision, "ineligible")
+        self.assertEqual(result.reasons[0]["code"], "role_family_excluded")
+        self.assertEqual(result.reasons[0]["job_value"], "data")
+
+    def test_ungrounded_excluded_role_family_does_not_block(self) -> None:
+        result = evaluate_job(
+            job(title="Software Engineer"),
+            {
+                "role_family": {
+                    "value": "data",
+                    "evidence": None,
+                    "evidence_grounded": False,
+                }
+            },
+            {"preferences": {"excluded_role_families": ["data"]}},
+        )
+
+        self.assertEqual(result.decision, "eligible")
+
     def test_language_specialist_title_requires_profile_language(self) -> None:
         role = job(title="French Language Specialist - Freelance AI Trainer")
         result = evaluate_job(

@@ -95,6 +95,28 @@ def evaluate_job(
     blockers: list[dict[str, Any]] = []
     uncertainties: list[dict[str, Any]] = []
 
+    role_family_fact = facts.get("role_family") or {}
+    role_family = _fact(facts, "role_family", "unknown")
+    excluded_role_families = {
+        str(value).strip().casefold()
+        for value in preferences.get("excluded_role_families") or []
+        if str(value).strip()
+    }
+    if (
+        role_family != "unknown"
+        and str(role_family).casefold() in excluded_role_families
+        and isinstance(role_family_fact, dict)
+        and role_family_fact.get("evidence_grounded") is True
+    ):
+        blockers.append(
+            {
+                "code": "role_family_excluded",
+                "job_evidence": _evidence(facts, "role_family"),
+                "job_value": role_family,
+                "user_rule": sorted(excluded_role_families),
+            }
+        )
+
     # Titles such as "French Language Specialist" are themselves authoritative
     # evidence of the required spoken language. Keep this deliberately narrow so
     # programming-language roles and generic NLP titles are not excluded.
