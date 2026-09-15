@@ -994,6 +994,77 @@ class ApplyToolBindingTests(unittest.TestCase):
         )
         self.assertIn("no-sponsorship claim", result or "")
 
+    def test_generic_sponsorship_dropdown_uses_us_state_job_location(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        question = "Will you require any Visa sponsorship now or in the future?"
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-label": question,
+        }.get(name)
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+
+        result = _select_profile_guard(
+            page, "r26", "No", profile, "", ["Chicago, IL"]
+        )
+
+        self.assertIn("false US no-sponsorship claim", result or "")
+
+    def test_generic_sponsorship_radio_uses_us_state_job_location(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        page.locator.return_value.first = locator
+        question = "Will you require any Visa sponsorship now or in the future?"
+        locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-option": "No",
+            "data-applyd-label": f"{question} — No",
+        }.get(name)
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+
+        result = _profile_click_guard(
+            page, "r26", profile, ["Chicago, IL"]
+        )
+
+        self.assertIn("false US no-sponsorship claim", result or "")
+
+    @patch("applyd.apply.tools._ref_locator")
+    def test_raw_pick_cannot_bypass_us_state_sponsorship_guard(
+        self, ref_locator
+    ) -> None:
+        question = "Will you require any Visa sponsorship now or in the future?"
+        option_locator = MagicMock()
+        option_locator.evaluate.return_value = "div"
+        option_locator.inner_text.return_value = "No"
+        target_locator = MagicMock()
+        target_locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-label": question,
+        }.get(name)
+        ref_locator.side_effect = lambda _page, ref: (
+            option_locator if ref == "o0" else target_locator
+        )
+        page = MagicMock()
+        page.evaluate.return_value = {"ref": "r26", "label": question}
+        profile = {"work_authorization": {"US": {
+            "authorized": False,
+            "requires_sponsorship": True,
+        }}}
+
+        result = pick_option(
+            page, "o0", profile, job_locations=["Chicago, IL"]
+        )
+
+        self.assertIn("false US no-sponsorship claim", result or "")
+        option_locator.click.assert_not_called()
+
     def test_residence_radio_blocks_false_remote_city_claim(self) -> None:
         page = MagicMock()
         locator = MagicMock()
@@ -1175,6 +1246,27 @@ class ApplyToolBindingTests(unittest.TestCase):
                 "requires_sponsorship": True,
             }}
         })
+        self.assertEqual(value, "Yes")
+        self.assertIn("grounded US sponsorship", note or "")
+
+    def test_plain_text_sponsorship_uses_us_state_job_location(self) -> None:
+        page = MagicMock()
+        locator = MagicMock()
+        locator.evaluate.return_value = (
+            "Will you require any Visa sponsorship now or in the future?"
+        )
+        page.locator.return_value.first = locator
+        value, note = _grounded_fill_value(
+            page,
+            "r21",
+            "No",
+            {"work_authorization": {"US": {
+                "authorized": False,
+                "requires_sponsorship": True,
+            }}},
+            job_locations=["Chicago, IL"],
+        )
+
         self.assertEqual(value, "Yes")
         self.assertIn("grounded US sponsorship", note or "")
 
