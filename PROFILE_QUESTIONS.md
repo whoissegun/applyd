@@ -138,8 +138,10 @@ These are consequential legal facts. Unknown answers must go to review.
     graduate, full-time, contract, or part-time? If a form lists multiple role
     or program options, may applyd select every listed option you are willing
     to consider, or only the option that most closely matches the posting title?
-34. Which role families are you targeting, and which seniority levels are
-    preferred versus acceptable stretches?
+34. Which role families are you targeting, which role families should always
+    be excluded, and which seniority levels are preferred versus acceptable
+    stretches? Role-family exclusions are strict personal policy; target
+    families only affect ranking.
 35. Are you willing to work onsite, hybrid, and remote? Are you willing to
     follow any required onsite schedule from zero through five office days per
     week, or is there a maximum number of office days you will accept?

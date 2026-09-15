@@ -140,6 +140,36 @@ Leave an unknown consequential fact absent so the application enters review.
 Do not ask the agent to guess it. Do not put API keys, passwords, government ID
 numbers, or financial information in `profile.json`.
 
+### Exclude role families or titles
+
+`matchmaking.target_role_families` controls ranking preferences; it is not a
+strict allowlist. Use the personal deterministic policy when a grounded role
+family must never be selected:
+
+```json
+{
+  "preferences": {
+    "excluded_role_families": ["data"],
+    "exclude_title_patterns": ["\\bstrategic analyst\\b"]
+  },
+  "matchmaking": {
+    "target_role_families": ["software_engineering", "machine_learning"]
+  }
+}
+```
+
+Valid family values are `software_engineering`, `machine_learning`, `data`,
+`security`, `product`, `design`, `sales`, `operations`, and `other`.
+`exclude_title_patterns` accepts case-insensitive regular expressions and is
+useful when only particular titles should be excluded. These choices stay in
+the ignored `profile.json`; they are not hardcoded into applyd. Rerun the
+following commands after a preference change:
+
+```bash
+applyd evaluate --profile profile.json --show-reasons
+applyd match --top 50
+```
+
 ## 5. Build `resume.json`
 
 `resume.json` is the factual source used during tailoring. If your resume is a

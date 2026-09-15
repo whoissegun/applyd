@@ -73,6 +73,7 @@
   "preferences": {
     "allowed_seniority": ["intern", "new_grad", "entry", "mid", "senior", "staff_plus", "manager"],
     "allow_internships": true,
+    "excluded_role_families": [],
     "exclude_title_patterns": [],
     "unknown_policy": "eligible",
     "fill_optional_free_text": false
