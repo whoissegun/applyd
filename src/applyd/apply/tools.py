@@ -48,6 +48,37 @@ _TYPE_INSTANT_OVER = 120
 _THINK_BETWEEN_FIELDS = (0.25, 1.1)
 _THINK_BEFORE_SUBMIT = (0.8, 2.5)
 
+_US_STATE_CODES = (
+    "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|"
+    "MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|"
+    "SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC"
+)
+_CA_PROVINCE_CODES = "ON|BC|AB|QC|NS|NB|MB|SK|PE|NL|NT|NU|YT"
+
+
+def _authorization_region_from_locations(
+    job_locations: list[str] | None,
+) -> str | None:
+    """Resolve a legal-answer region from deterministic job locations."""
+    location = " | ".join(job_locations or []).casefold()
+    if (
+        any(term in location for term in ("united states", "usa", "u.s."))
+        or re.search(rf",\s*(?:{_US_STATE_CODES})(?:\b|$)", location, re.I)
+    ):
+        return "US"
+    if (
+        any(term in location for term in (
+            "canada", "ontario", "toronto", "ottawa", "vancouver", "montreal",
+        ))
+        or re.search(rf",\s*(?:{_CA_PROVINCE_CODES})(?:\b|$)", location, re.I)
+    ):
+        return "CA"
+    if any(term in location for term in (
+        "united kingdom", "england", "scotland", "wales", "london", " uk",
+    )):
+        return "UK"
+    return None
+
 
 def _should_humanize(page: Page) -> bool:
     """Humanize local Chrome only; remote CDP turns each keystroke into costly
@@ -358,6 +389,7 @@ def _is_submit_control(page: Page, ref: str) -> bool:
 
 def _profile_click_guard(
     page: Page, ref: str, profile: dict[str, Any] | None,
+    job_locations: list[str] | None = None,
 ) -> str | None:
     if not profile:
         return None
@@ -400,7 +432,7 @@ def _profile_click_guard(
     # radio into an adjacent visa-status claim.
     if option:
         consequential = _select_profile_guard(
-            page, ref, option, profile, "", []
+            page, ref, option, profile, "", job_locations
         )
         if consequential:
             return consequential.replace("select_option", "click", 1)
@@ -426,9 +458,10 @@ def _profile_click_guard(
 
 def click(
     page: Page, ref: str, profile: dict[str, Any] | None = None,
+    job_locations: list[str] | None = None,
 ) -> str:
     try:
-        guard = _profile_click_guard(page, ref, profile)
+        guard = _profile_click_guard(page, ref, profile, job_locations)
         if guard:
             return guard
         if _is_submit_control(page, ref):
@@ -440,7 +473,7 @@ def click(
 
 def _grounded_fill_value(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None,
-    resume_text: str = "",
+    resume_text: str = "", job_locations: list[str] | None = None,
 ) -> tuple[str, str | None]:
     """Bind consequential text fields to profile data, not model guesses."""
     if not profile:
@@ -574,6 +607,8 @@ def _grounded_fill_value(
             region = "UK"
         elif "european union" in normalized or " eu " in padded:
             region = "EU"
+        if region is None:
+            region = _authorization_region_from_locations(job_locations)
         record = (profile.get("work_authorization") or {}).get(region or "")
         if isinstance(record, dict) and isinstance(
             record.get("requires_sponsorship"), bool
@@ -607,7 +642,7 @@ def _grounded_fill_value(
 
 def fill(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None = None,
-    resume_text: str = "",
+    resume_text: str = "", job_locations: list[str] | None = None,
 ) -> str:
     try:
         loc = _ref_locator(page, ref)
@@ -617,7 +652,7 @@ def fill(
                 "fill_autocomplete so the hidden selection is preserved"
             )
         value, grounding_note = _grounded_fill_value(
-            page, ref, value, profile, resume_text
+            page, ref, value, profile, resume_text, job_locations
         )
         if _should_humanize(page):
             _human_type(loc, value)
@@ -631,7 +666,7 @@ def fill(
 
 def fill_many(
     page: Page, fields: list[dict[str, str]], profile: dict[str, Any] | None = None,
-    resume_text: str = "",
+    resume_text: str = "", job_locations: list[str] | None = None,
 ) -> str:
     out = []
     for i, f in enumerate(fields):
@@ -646,7 +681,7 @@ def fill_many(
                 )
                 continue
             val, grounding_note = _grounded_fill_value(
-                page, ref, val, profile, resume_text
+                page, ref, val, profile, resume_text, job_locations
             )
             if _should_humanize(page):
                 _human_type(loc, val)
@@ -664,11 +699,12 @@ def fill_many(
 
 def click_many(
     page: Page, refs: list[str], profile: dict[str, Any] | None = None,
+    job_locations: list[str] | None = None,
 ) -> str:
     out = []
     for ref in refs:
         try:
-            guard = _profile_click_guard(page, ref, profile)
+            guard = _profile_click_guard(page, ref, profile, job_locations)
             if guard:
                 out.append(f"  err: {ref} :: {guard.removeprefix('error: ')}")
                 continue
@@ -904,6 +940,7 @@ def pick_option(
     option_ref: str,
     profile: dict[str, Any] | None = None,
     company: str = "",
+    job_locations: list[str] | None = None,
 ) -> str:
     """Click an option previously surfaced by open_dropdown."""
     try:
@@ -912,12 +949,30 @@ def pick_option(
         option_text = (
             loc.inner_text(timeout=2000) or loc.get_attribute("value") or ""
         ).strip()[:80]
-        target_label = page.evaluate(
+        target = page.evaluate(
             """() => {
                 const el = document.querySelector('[data-applyd-combobox-open]');
-                return el?.getAttribute('data-applyd-label') || '';
+                return el ? {
+                    ref: el.getAttribute('data-applyd-ref') || '',
+                    label: el.getAttribute('data-applyd-label') || ''
+                } : {ref: '', label: ''};
             }"""
         )
+        if isinstance(target, dict):
+            target_ref = str(target.get("ref") or "")
+            target_label = str(target.get("label") or "")
+        else:
+            # Preserve compatibility with simple test doubles and older traces.
+            target_ref = ""
+            target_label = str(target or "")
+        if target_ref:
+            profile_guard = _select_profile_guard(
+                page, target_ref, option_text, profile, "", job_locations, company
+            )
+            if profile_guard:
+                return profile_guard.replace(
+                    f"select_option {target_ref}", f"pick_option {option_ref}", 1
+                )
         date_guard = _date_profile_guard(target_label, option_text, profile)
         if date_guard:
             return date_guard.replace(
@@ -1442,16 +1497,7 @@ def _select_profile_guard(
     elif "european union" in legal_context or " eu " in padded_label:
         region = "EU"
     if legal_question and region is None:
-        if any(term in location_text for term in ("united states", "usa", "u.s.")):
-            region = "US"
-        elif any(term in location_text for term in (
-            "canada", "ontario", "toronto", "ottawa", "vancouver", "montreal",
-        )):
-            region = "CA"
-        elif any(term in location_text for term in (
-            "united kingdom", "england", "scotland", "wales", "london", " uk",
-        )):
-            region = "UK"
+        region = _authorization_region_from_locations(job_locations)
 
     auth_record = (profile.get("work_authorization") or {}).get(region or "")
     if legal_question and isinstance(auth_record, dict):
@@ -1633,7 +1679,9 @@ def select_option(
                 "Inspect these labels and call open_dropdown on the next turn "
                 "before choosing a different answer."
             )
-        result = pick_option(page, matched["ref"], profile, company)
+        result = pick_option(
+            page, matched["ref"], profile, company, job_locations
+        )
         if result.startswith("error:"):
             return result.replace("pick_option", "select_option", 1)
         # Dropdown components normally rerender only themselves. Do not call
@@ -2148,21 +2196,25 @@ def dispatch(
     if name == "snapshot":
         return snapshot(page)
     if name == "click":
-        return click(page, args["ref"], profile)
+        return click(page, args["ref"], profile, job_locations)
     if name == "fill":
-        return fill(page, args["ref"], args["value"], profile, resume_text)
+        return fill(
+            page, args["ref"], args["value"], profile, resume_text, job_locations
+        )
     if name == "fill_many":
-        return fill_many(page, args["fields"], profile, resume_text)
+        return fill_many(page, args["fields"], profile, resume_text, job_locations)
     if name == "fill_autocomplete":
         return fill_autocomplete(page, args["ref"], args["value"])
     if name == "click_many":
-        return click_many(page, args["refs"], profile)
+        return click_many(page, args["refs"], profile, job_locations)
     if name == "open_dropdown":
         return open_dropdown(page, args["ref"])
     if name == "inspect_dropdowns":
         return inspect_dropdowns(page, args["refs"])
     if name == "pick_option":
-        return pick_option(page, args["option_ref"], profile, company)
+        return pick_option(
+            page, args["option_ref"], profile, company, job_locations
+        )
     if name == "select_option":
         return select_option(
             page, args["ref"], args["value"], profile, resume_text, job_locations,
