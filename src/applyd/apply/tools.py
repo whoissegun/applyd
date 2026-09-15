@@ -1501,6 +1501,29 @@ def _select_profile_guard(
 
     auth_record = (profile.get("work_authorization") or {}).get(region or "")
     if legal_question and isinstance(auth_record, dict):
+        denies_current_authorization = any(phrase in desired for phrase in (
+            "not currently authorized", "not authorized", "not authorised",
+            "do not have work authorization", "no work authorization",
+            "do not have the right to work", "no right to work",
+        ))
+        claims_current_status = (
+            "can work for" in desired
+            or "authorized to work" in desired
+            or "authorised to work" in desired
+            or bool(re.search(
+                r"\b(?:currently\s+)?hold(?:\s+a)?\s+"
+                r"(?:tn|e\s*3|opt|stem\s+opt|cpt|h\s*1b)\b",
+                desired,
+            ))
+            or bool(re.search(r"\bi am (?:a|an) [a-z ]*citizen\b", desired))
+        ) and not denies_current_authorization
+        if auth_record.get("authorized") is False and claims_current_status:
+            return _err(
+                f"select_option {ref}: refused unsupported {region} work "
+                f"authorization claim {value!r}; structured profile says "
+                "authorized=false"
+            )
+
         if authorization_question:
             says_not_authorized = any(phrase in desired for phrase in (
                 "not currently authorized", "not authorized", "not authorised",

@@ -1065,6 +1065,44 @@ class ApplyToolBindingTests(unittest.TestCase):
         self.assertIn("false US no-sponsorship claim", result or "")
         option_locator.click.assert_not_called()
 
+    @patch("applyd.apply.tools._ref_locator")
+    def test_raw_pick_rejects_unsupported_tn_status_claim(
+        self, ref_locator
+    ) -> None:
+        question = "Do you need visa sponsorship now or in future?"
+        option_locator = MagicMock()
+        option_locator.evaluate.return_value = "div"
+        option_locator.inner_text.return_value = (
+            "I hold a TN visa and can work for Unlimited with a new employer "
+            "petition, or I am a Canadian Citizen eligible for a TN1A visa"
+        )
+        target_locator = MagicMock()
+        target_locator.get_attribute.side_effect = lambda name: {
+            "data-applyd-question": question,
+            "data-applyd-label": question,
+        }.get(name)
+        ref_locator.side_effect = lambda _page, ref: (
+            option_locator if ref == "o6" else target_locator
+        )
+        page = MagicMock()
+        page.evaluate.return_value = {"ref": "r12", "label": question}
+        profile = {
+            "citizenships": ["NG"],
+            "work_authorization": {"US": {
+                "authorized": False,
+                "requires_sponsorship": True,
+                "visa_status": None,
+                "sponsorship_route": "H-1B",
+            }},
+        }
+
+        result = pick_option(
+            page, "o6", profile, job_locations=["San Francisco, CA"]
+        )
+
+        self.assertIn("unsupported US work authorization claim", result or "")
+        option_locator.click.assert_not_called()
+
     def test_residence_radio_blocks_false_remote_city_claim(self) -> None:
         page = MagicMock()
         locator = MagicMock()
