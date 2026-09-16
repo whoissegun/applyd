@@ -25,7 +25,7 @@ class ApplyBatchPolicyTests(unittest.TestCase):
         self.assertFalse(_eligible_evaluation({"decision": "ineligible"}))
         self.assertFalse(_eligible_evaluation(None))
 
-    def test_smartrecruiters_is_manual_only(self) -> None:
+    def test_smartrecruiters_is_default_excluded(self) -> None:
         self.assertIn("smartrecruiters", MANUAL_ONLY_ATS)
 
     def test_captcha_is_the_only_fallback_gate(self) -> None:

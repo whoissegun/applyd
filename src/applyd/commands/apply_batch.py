@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_env
-from ..discovery.routing import detect_ats, preferred_apply_url
+from ..discovery.routing import DEFAULT_EXCLUDED_ATS, detect_ats, preferred_apply_url
 from ..liveness import check_jobs_liveness
 from ..local_store import get_local_store
 from .apply import cmd_apply
 from .tailor import cmd_tailor
 
 
-MANUAL_ONLY_ATS = {"smartrecruiters"}
+MANUAL_ONLY_ATS = set(DEFAULT_EXCLUDED_ATS)
 
 
 def _normalized_title(value: str) -> str:
@@ -178,6 +178,10 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
             continue
         apply_url = preferred_apply_url(job.id, job.url, company=job.company)
         ats = detect_ats(apply_url) or "unknown"
+        # Protect against stale match tables created before an ATS became
+        # default-excluded. These rows do not consume the requested batch size.
+        if ats in DEFAULT_EXCLUDED_ATS:
+            continue
         if ats_selected[ats] >= args.max_per_ats:
             continue
         if _ats_failure_total(ats_failures, ats) >= args.ats_failure_limit:

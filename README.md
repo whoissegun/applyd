@@ -80,12 +80,14 @@ review.
 | Greenhouse | Supported | Local Chrome; optional CAPTCHA fallback |
 | Lever | Supported | Bright Data by default for real batch runs |
 | Workable | Supported | Local Chrome; limited pilot coverage |
-| SmartRecruiters | Supported | Routed to human review without model spend |
+| SmartRecruiters | Excluded by default | Manual-only research with explicit opt-in |
 | Workday and other ATSes | Excluded by default | Manual |
 
-SmartRecruiters is manual-only because repeated pilots across independent
-employers produced no confirmed submissions. It remains searchable and rankable
-so suitable jobs are not lost.
+SmartRecruiters is a known difficult automation platform: repeated pilots across
+independent employers produced no confirmed submissions. applyd therefore does
+not ingest, rank, or batch-select SmartRecruiters jobs by default. Use
+`applyd discover --include-unsupported-ats` only when you intentionally want
+those postings in the local catalog for manual research.
 
 ## Requirements
 
@@ -363,6 +365,9 @@ starter budget and documents the available hard cost caps.
 | `BRIGHTDATA_*` | No | Alternative Bright Data endpoint components and CAPTCHA fallback |
 
 Keep credentials in `.env`; never commit them.
+For Greenhouse email-code verification, see
+[Optional: email verification codes](setup.md#8-optional-email-verification-codes),
+including Gmail two-step verification and App Password setup.
 
 ## Project layout
 
@@ -402,7 +407,9 @@ path is sufficient.
 ## Known limitations
 
 - ATS markup and anti-automation behavior change without notice.
-- SmartRecruiters is currently manual-only in batch mode.
+- SmartRecruiters is excluded from default discovery, ranking, and batch
+  selection because repeated automation pilots produced no confirmed
+  submissions. It remains available through explicit manual-research opt-in.
 - Lever can remain CAPTCHA-gated even with the optional remote browser.
 - Workday is intentionally outside the automated apply path.
 - The LaTeX importer currently targets Jake-style resume structure.

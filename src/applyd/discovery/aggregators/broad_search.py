@@ -9,7 +9,7 @@ from ...models import Job
 from .._base import http_client
 from ..ats import ATS_MODULES
 from ..cache import BroadSearchCache
-from ..routing import detect_ats
+from ..routing import DEFAULT_EXCLUDED_ATS, detect_ats
 from ..search.base import SearchProvider
 
 
@@ -24,8 +24,7 @@ DEFAULT_DORKS = [
 
 ATS_SITE_RESTRICT = (
     "(site:boards.greenhouse.io OR site:jobs.lever.co "
-    "OR site:jobs.ashbyhq.com OR site:apply.workable.com "
-    "OR site:jobs.smartrecruiters.com)"
+    "OR site:jobs.ashbyhq.com OR site:apply.workable.com)"
 )
 
 
@@ -44,6 +43,7 @@ def discover(
     results_per_query: int = 10,
     client: Optional[httpx.Client] = None,
     cache: Optional[BroadSearchCache] = None,
+    include_default_excluded: bool = False,
 ) -> tuple[list[Job], dict]:
     """Run broad dorks, extract (ATS, slug) pairs, fetch each company via ATS API.
 
@@ -93,6 +93,8 @@ def discover(
         fetch_errors = 0
         per_ats: dict[str, int] = {}
         for ats, slug in sorted(discovered):
+            if ats in DEFAULT_EXCLUDED_ATS and not include_default_excluded:
+                continue
             module = ATS_MODULES.get(ats)
             if module is None:
                 continue

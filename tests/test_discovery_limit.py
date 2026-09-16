@@ -8,6 +8,7 @@ from applyd.commands.discover import (
     _freshest_within_limit,
     _supported_jobs,
 )
+from applyd.commands.match import _default_rankable_job
 from applyd.models import Job
 
 
@@ -40,6 +41,21 @@ class DiscoveryLimitTests(unittest.TestCase):
         kept, skipped = _supported_jobs([workday, greenhouse])
         self.assertEqual([job.id for job in kept], ["1"])
         self.assertEqual(skipped, 1)
+
+    def test_smartrecruiters_is_not_ingested_or_ranked_by_default(self) -> None:
+        now = datetime.now(timezone.utc)
+        smart = _job(1, now)
+        smart.url = "https://jobs.smartrecruiters.com/example/123-engineer"
+        kept, skipped = _supported_jobs([smart])
+        self.assertEqual(kept, [])
+        self.assertEqual(skipped, 1)
+        self.assertFalse(_default_rankable_job(smart))
+
+        opted_in, skipped = _supported_jobs(
+            [smart], include_default_excluded=True
+        )
+        self.assertEqual([job.id for job in opted_in], ["1"])
+        self.assertEqual(skipped, 0)
 
     def test_keeps_freshest_jobs_within_remaining_global_limit(self) -> None:
         now = datetime.now(timezone.utc)

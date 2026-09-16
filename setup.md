@@ -321,6 +321,17 @@ SimplifyJobs ingestion works without another API key:
 applyd discover --limit 1000 --no-broad
 ```
 
+SmartRecruiters is intentionally excluded from default discovery, ranking, and
+batch selection because repeated pilots produced no confirmed automated
+submissions. To retain those postings strictly for manual research, opt in:
+
+```bash
+applyd discover --limit 1000 --include-unsupported-ats
+```
+
+Rerun `applyd match` after upgrading so previously stored SmartRecruiters rows
+are removed from the active ranking table.
+
 For broader web discovery, configure Brave Search or Serper in `.env`:
 
 ```dotenv

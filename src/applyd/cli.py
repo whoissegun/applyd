@@ -98,7 +98,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_disc.add_argument(
         "--include-unsupported-ats",
         action="store_true",
-        help="include jobs outside the ATS platforms applyd can automate",
+        help="include unsupported/default-excluded ATS jobs for manual research",
     )
     p_disc.set_defaults(func=cmd_discover)
 
