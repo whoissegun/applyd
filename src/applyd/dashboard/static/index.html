@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Application history · applyd</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <svg class="svg-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-review" viewBox="0 0 24 24"><path d="M12 8v5m0 4h.01M10.3 4.7 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.7a2 2 0 0 0-3.4 0Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H5v18h14V8Zm0 0v5h5M8 13h8M8 17h5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 .5 6M20 3v5h-5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+  </svg>
+  <a class="skip-link" href="#main">Skip to applications</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="applyd home"><span class="brand-mark">a<span></span></span>applyd<span class="brand-period">.</span></a>
+    <div class="workspace"><span class="workspace-icon">↗</span><div>Your workspace<small>Personal application tracker</small></div></div>
+    <nav aria-label="Application views">
+      <button class="nav-item" data-view="all"><svg><use href="#i-grid"/></svg>All activity<span id="nav-all">—</span></button>
+      <button class="nav-item active" data-view="applied" aria-current="page"><svg><use href="#i-check"/></svg>Applied<span id="nav-applied">—</span></button>
+      <button class="nav-item" data-view="review"><svg><use href="#i-review"/></svg>Needs review<span id="nav-review">—</span></button>
+    </nav>
+    <div class="sidebar-note"><svg><use href="#i-file"/></svg><p>A record of every next step.</p><span>Your applications and resumes, together in one place.</span></div>
+    <div class="local-state"><span class="status-dot"></span>Stored on this device<small>Local workspace</small></div>
+  </aside>
+  <main id="main">
+    <header class="topbar"><span>Workspace <span class="breadcrumb">/</span> <strong>Applications</strong></span><span class="local-pill"><span class="status-dot"></span>Local</span></header>
+    <div class="content">
+      <section class="page-heading"><div><h1>Your next chapter, <br>one application at a time.</h1><p>Keep track of where you applied and what you sent.</p></div><button id="refresh" class="button"><svg><use href="#i-refresh"/></svg>Refresh history</button></section>
+      <div id="error" class="error-banner" role="alert" hidden></div>
+      <section class="overview" aria-label="Application summary">
+        <div class="summary-primary"><span class="summary-icon"><svg><use href="#i-check"/></svg></span><div><span class="metric-label">Confirmed applications</span><strong id="confirmed-count">—</strong><span class="metric-note">Submission recorded</span></div></div>
+        <div class="summary-secondary"><span class="metric-label">Needs your attention</span><strong id="review-count">—</strong><button id="review-shortcut" class="text-button">View review queue <svg><use href="#i-next"/></svg></button></div>
+        <div class="activity"><div class="activity-caption"><span>Application activity</span><span>Last 14 days · UTC</span></div><div id="activity-bars" class="bars" role="img" aria-label="Loading application activity"></div><div class="activity-dates"><span id="activity-start"></span><span>Today</span></div></div>
+      </section>
+      <section class="ledger" aria-labelledby="ledger-title">
+        <div class="ledger-heading"><div class="ledger-title"><h2 id="ledger-title">Applied jobs</h2><span id="result-count" class="count-tag">—</span></div><span id="updated" class="updated">Loading local history…</span></div>
+        <div class="toolbar"><label class="search-box"><svg><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search company, role, or location" aria-label="Search applications"><kbd>/</kbd></label><div class="selects"><label class="sr-only" for="period">Time period</label><select id="period"><option value="all">All time</option><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option></select><label class="sr-only" for="sort">Sort applications</label><select id="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="company">Company A–Z</option></select></div></div>
+        <div class="table-scroll"><table><thead><tr><th scope="col">Company & role</th><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Applied on</th><th scope="col">Resume</th><th scope="col"><span class="sr-only">Details</span></th></tr></thead><tbody id="rows"></tbody></table></div>
+        <div id="empty" class="empty" hidden><span class="empty-icon"><svg><use href="#i-search"/></svg></span><h3 id="empty-title">No applications here yet</h3><p id="empty-message">Applications will appear here after you run applyd.</p><button class="button" id="clear-filters" hidden>Clear filters</button></div>
+        <footer class="table-footer"><span id="page-info" aria-live="polite">Loading applications…</span><div><button id="previous" class="pagination" aria-label="Previous page"><svg class="flip"><use href="#i-next"/></svg></button><span id="page-number">1 / 1</span><button id="next" class="pagination" aria-label="Next page"><svg><use href="#i-next"/></svg></button></div></footer>
+      </section>
+      <footer class="page-footer"><span><span class="status-dot"></span>Your history stays on your device.</span><span>Dates shown in <span id="timezone">your local time</span></span></footer>
+    </div>
+  </main>
+  <dialog id="detail" aria-labelledby="detail-title"><div class="detail-top"><span>Application details</span><button id="close-detail" class="icon-button" aria-label="Close details"><svg><use href="#i-close"/></svg></button></div><div id="detail-content"></div></dialog>
+</body>
+</html>

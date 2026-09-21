@@ -1,0 +1,1 @@
+"""Local application history dashboard."""
