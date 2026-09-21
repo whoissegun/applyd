@@ -842,6 +842,26 @@ class LocalStore:
 
     # ---- tailoring/applications -------------------------------------
 
+    def iter_prior_application_jobs(self) -> Iterator[Job]:
+        """All attempted postings, including inactive and deduplicated rows.
+
+        A newer canonical catalog row must not hide an older submission.
+        Unconfirmed attempts also remain protected from automatic retries.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT j.* FROM jobs j WHERE EXISTS (
+                       SELECT 1 FROM applications a WHERE a.job_id=j.id AND (
+                           a.status IN ('applied', 'in_progress')
+                           OR a.reason GLOB 'manual_only_ats:*'
+                           OR EXISTS (SELECT 1 FROM apply_attempts aa
+                                      WHERE aa.application_id=a.id)
+                       )
+                   ) ORDER BY j.id"""
+            ).fetchall()
+        for row in rows:
+            yield self._row_to_job(row)
+
     def save_tailored_resume(
         self,
         *,
