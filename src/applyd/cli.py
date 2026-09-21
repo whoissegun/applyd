@@ -46,6 +46,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    from .dashboard.server import cmd_dashboard
+    p_dashboard = sub.add_parser("dashboard", help="open your local application history and resumes")
+    p_dashboard.add_argument("--port", type=int, default=8765)
+    p_dashboard.add_argument("--db", help="SQLite path (default: APPLYD_DB_PATH or data/applyd.sqlite3)")
+    p_dashboard.add_argument("--no-open", action="store_true", help="start without opening a browser")
+    p_dashboard.set_defaults(func=cmd_dashboard)
+
     p_init = sub.add_parser("init", help="create the local SQLite database")
     p_init.add_argument("--db", default="data/applyd.sqlite3")
     p_init.add_argument("--profile", default="profile.json")
@@ -98,7 +105,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_disc.add_argument(
         "--include-unsupported-ats",
         action="store_true",
-        help="include jobs outside the ATS platforms applyd can automate",
+        help="include unsupported/default-excluded ATS jobs for manual research",
     )
     p_disc.set_defaults(func=cmd_discover)
 

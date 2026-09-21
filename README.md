@@ -80,12 +80,14 @@ review.
 | Greenhouse | Supported | Local Chrome; optional CAPTCHA fallback |
 | Lever | Supported | Bright Data by default for real batch runs |
 | Workable | Supported | Local Chrome; limited pilot coverage |
-| SmartRecruiters | Supported | Routed to human review without model spend |
+| SmartRecruiters | Excluded by default | Manual-only research with explicit opt-in |
 | Workday and other ATSes | Excluded by default | Manual |
 
-SmartRecruiters is manual-only because repeated pilots across independent
-employers produced no confirmed submissions. It remains searchable and rankable
-so suitable jobs are not lost.
+SmartRecruiters is a known difficult automation platform: repeated pilots across
+independent employers produced no confirmed submissions. applyd therefore does
+not ingest, rank, or batch-select SmartRecruiters jobs by default. Use
+`applyd discover --include-unsupported-ats` only when you intentionally want
+those postings in the local catalog for manual research.
 
 ## Requirements
 
@@ -219,6 +221,38 @@ Inspect the result and trace:
 applyd trace <job_id>
 applyd profile-gaps
 ```
+
+### Local dashboard
+
+From the cloned project directory, activate the installed environment and start
+the server:
+
+```bash
+source .venv/bin/activate
+applyd dashboard
+```
+
+Opens `http://127.0.0.1:8765` in your browser. Browse confirmed applications,
+submission dates, the resume PDF, and each job's attempt history. Search by
+company, role, or location; filter by date; and switch to the review queue or
+all activity. Dates use your browser's timezone (the activity chart uses UTC).
+Use Refresh history to pick up new CLI results.
+
+The dashboard only reads local data and cannot submit applications. No Node.js,
+frontend build, account, API key, or additional dependencies are required.
+It binds only to localhost. Keep the terminal running; Ctrl+C stops it.
+
+```bash
+applyd dashboard --port 8766 --no-open
+applyd dashboard --db path/to/applyd.sqlite3
+```
+
+New application attempts archive the PDF supplied to the runner under
+`data/application-resumes/`. Its checksum is verified when opened. Older
+applications show their historical resume file with a notice that the original
+version cannot be verified, since earlier tailoring could overwrite that file.
+Missing PDFs are shown as unavailable. Prepared and test runs are never counted
+as confirmed submissions.
 
 Only after reviewing the setup, permit a real submission explicitly:
 
@@ -363,6 +397,9 @@ starter budget and documents the available hard cost caps.
 | `BRIGHTDATA_*` | No | Alternative Bright Data endpoint components and CAPTCHA fallback |
 
 Keep credentials in `.env`; never commit them.
+For Greenhouse email-code verification, see
+[Optional: email verification codes](setup.md#8-optional-email-verification-codes),
+including Gmail two-step verification and App Password setup.
 
 ## Project layout
 
@@ -402,11 +439,13 @@ path is sufficient.
 ## Known limitations
 
 - ATS markup and anti-automation behavior change without notice.
-- SmartRecruiters is currently manual-only in batch mode.
+- SmartRecruiters is excluded from default discovery, ranking, and batch
+  selection because repeated automation pilots produced no confirmed
+  submissions. It remains available through explicit manual-research opt-in.
 - Lever can remain CAPTCHA-gated even with the optional remote browser.
 - Workday is intentionally outside the automated apply path.
 - The LaTeX importer currently targets Jake-style resume structure.
-- The project does not yet include a dashboard for the review queue.
+- The dashboard shows the review queue; resolution and retries remain CLI workflows.
 
 ## License
 

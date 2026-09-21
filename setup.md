@@ -321,6 +321,17 @@ SimplifyJobs ingestion works without another API key:
 applyd discover --limit 1000 --no-broad
 ```
 
+SmartRecruiters is intentionally excluded from default discovery, ranking, and
+batch selection because repeated pilots produced no confirmed automated
+submissions. To retain those postings strictly for manual research, opt in:
+
+```bash
+applyd discover --limit 1000 --include-unsupported-ats
+```
+
+Rerun `applyd match` after upgrading so previously stored SmartRecruiters rows
+are removed from the active ranking table.
+
 For broader web discovery, configure Brave Search or Serper in `.env`:
 
 ```dotenv
@@ -386,7 +397,31 @@ applyd apply-batch \
 
 Start with five. Review every outcome before increasing the batch size.
 
-## 12. Use a coding agent to help
+## 12. View application history
+
+From your project directory after completing installation:
+
+```bash
+source .venv/bin/activate
+applyd dashboard
+```
+
+On Windows, use `.venv\Scripts\Activate.ps1` instead of `source`.
+
+This opens a local browser dashboard with applied jobs, confirmation dates,
+resume PDFs, and the review queue. The server stays in the terminal until you
+press Ctrl+C. Use `--no-open` to print the URL without opening a browser, or
+`--port 8766` if the default port is busy. It needs no extra installation or
+OpenRouter key and does not start applications. Click Refresh history after
+running CLI work. Dates display in your browser's timezone.
+
+Future application attempts save their upload PDF under
+`data/application-resumes/`; keep that folder when backing up your database.
+For older attempts, the dashboard labels the linked file as historical because
+the exact original PDF was not archived. It will not claim an unavailable file
+is the resume that was submitted.
+
+## 13. Use a coding agent to help
 
 Codex, Claude Code, Cursor, or a similar repository-aware agent can guide the
 setup and diagnose local errors. From the repository root, use this prompt:

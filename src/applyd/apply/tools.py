@@ -401,6 +401,7 @@ def _profile_click_guard(
             str(loc.get_attribute("data-applyd-option") or "").casefold(),
         ).split()
     )
+    preferences = profile.get("employment_preferences") or {}
 
     residence_question = any(phrase in question for phrase in (
         "are you located in", "are you based in", "do you live in",
@@ -413,17 +414,22 @@ def _profile_click_guard(
         ]
         profile_places = [place for place in profile_places if place]
         question_matches_profile = any(place in question for place in profile_places)
+        relocation_alternative = (
+            " or " in question
+            and "relocat" in question
+            and preferences.get("willing_to_relocate") is True
+        )
         says_yes = option in {"yes", "true"} or option.startswith("yes ")
         says_no = option in {"no", "false"} or option.startswith("no ")
-        if says_yes and not question_matches_profile:
+        if says_yes and not question_matches_profile and not relocation_alternative:
             return _err(
                 f"click {ref}: refused unsupported residence claim {option!r}; "
                 "the named place is not the structured profile city, region, or country"
             )
-        if says_no and question_matches_profile:
+        if says_no and (question_matches_profile or relocation_alternative):
             return _err(
                 f"click {ref}: refused false residence denial {option!r}; "
-                "the question matches the structured profile location"
+                "the question matches the structured profile location or relocation preference"
             )
 
     # Radio/checkbox options carry the same consequential claims as dropdown
@@ -437,7 +443,6 @@ def _profile_click_guard(
         if consequential:
             return consequential.replace("select_option", "click", 1)
 
-    preferences = profile.get("employment_preferences") or {}
     if not (
         preferences.get("willing_to_relocate") is True
         and preferences.get("willing_to_work_onsite") is True
@@ -496,6 +501,23 @@ def _grounded_fill_value(
         ).split()
     )
     answer = " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+    if "high school" in normalized and any(term in normalized for term in (
+        "perform", "performance", "rank", "ranking", "score",
+    )):
+        performance = profile.get("high_school_performance")
+        subject = (
+            "mathematics" if any(term in normalized for term in ("math", "mathematics"))
+            else "native_language" if "native language" in normalized
+            else "evidence"
+        )
+        grounded = performance.get(subject) if isinstance(performance, dict) else None
+        if not str(grounded or "").strip():
+            raise ValueError(
+                "high-school academic performance is not in the structured "
+                "profile; send this application to review"
+            )
+        return str(grounded), "grounded high-school performance from profile"
 
     if any(phrase in normalized for phrase in (
         "taught yourself", "self taught", "learned on your own",
@@ -714,7 +736,8 @@ def click_many(
             out.append(f"  ok: {_click_with_overlay_fallback(page, ref, timeout=8000)}")
         except Exception as e:
             out.append(f"  err: {ref} :: {type(e).__name__}: {e}")
-    return f"click_many ({len(refs)} items):\n" + "\n".join(out)
+    prefix = "error: " if any(line.lstrip().startswith("err:") for line in out) else ""
+    return prefix + f"click_many ({len(refs)} items):\n" + "\n".join(out)
 
 
 def fill_autocomplete(page: Page, ref: str, value: str) -> str:
@@ -1094,6 +1117,37 @@ def _month_year(value: str) -> tuple[int, int | None] | None:
     return None
 
 
+def _month_year_range(value: str) -> tuple[int, int, int] | None:
+    """Parse an ATS graduation window into ``(year, first_month, last_month)``.
+
+    Job forms commonly group graduation cohorts as ``Spring 2027`` or
+    ``April to July 2027``. These are bounded factual ranges, not guesses: an
+    exact structured graduation month either falls inside the window or it
+    does not.
+    """
+    text = _normalize_option_text(value)
+    season = re.fullmatch(r"(spring|summer|fall|autumn)\s+(20\d{2})", text)
+    if season:
+        bounds = {
+            "spring": (3, 5),
+            "summer": (6, 8),
+            "fall": (9, 11),
+            "autumn": (9, 11),
+        }[season.group(1)]
+        return int(season.group(2)), bounds[0], bounds[1]
+
+    months = re.findall(
+        r"\b(" + "|".join(sorted(_MONTH_NUMBERS, key=len, reverse=True)) + r")\b",
+        text,
+    )
+    years = re.findall(r"\b(20\d{2})\b", text)
+    if len(months) == 2 and len(set(years)) == 1:
+        first, last = (_MONTH_NUMBERS[month] for month in months)
+        if first <= last:
+            return int(years[0]), first, last
+    return None
+
+
 def _question_date(value: str) -> tuple[int, int, int | None] | None:
     """Parse an explicit day/month/year embedded in a question label."""
     text = _normalize_option_text(value)
@@ -1158,14 +1212,25 @@ def _date_profile_guard(
                 "date selection blocked: expected graduation date is not in "
                 "the structured profile"
             )
-        if not selected:
+        selected_range = _month_year_range(value)
+        if not selected and not selected_range:
             return _err(
                 f"date selection blocked: cannot prove {value!r} matches "
                 f"grounded graduation date {expected_raw!r}"
             )
-        exact_year = selected[0] == expected[0]
-        exact_month = selected[1] is None or selected[1] == expected[1]
-        if not (exact_year and exact_month):
+        if selected_range:
+            matches = (
+                selected_range[0] == expected[0]
+                and expected[1] is not None
+                and selected_range[1] <= expected[1] <= selected_range[2]
+            )
+        else:
+            matches = bool(
+                selected
+                and selected[0] == expected[0]
+                and (selected[1] is None or selected[1] == expected[1])
+            )
+        if not matches:
             return _err(
                 f"date selection blocked: {value!r} contradicts grounded "
                 f"graduation date {expected_raw!r}"
@@ -1332,6 +1397,28 @@ def _select_profile_guard(
     desired = _normalize_option_text(value)
     location_text = " ".join(job_locations or []).casefold()
 
+    if "high school" in question and any(term in question for term in (
+        "perform", "performance", "rank", "ranking", "score",
+    )):
+        performance = profile.get("high_school_performance")
+        subject = (
+            "mathematics" if any(term in question for term in ("math", "mathematics"))
+            else "native_language" if "native language" in question
+            else "evidence"
+        )
+        grounded = performance.get(subject) if isinstance(performance, dict) else None
+        grounded_normalized = _normalize_option_text(str(grounded or ""))
+        if not grounded_normalized:
+            return _err(
+                f"select_option {ref}: high-school academic performance is "
+                "not in the structured profile; send to review"
+            )
+        if desired != grounded_normalized:
+            return _err(
+                f"select_option {ref}: refused unsupported high-school "
+                f"performance {value!r}; use the structured profile value"
+            )
+
     years_question = bool(
         re.search(r"\bhow many years\b", question)
         and "experience" in question
@@ -1381,19 +1468,118 @@ def _select_profile_guard(
                 f"structured {source_name}={known_years}"
             )
 
-    degree_question = any(phrase in question for phrase in (
-        "degree", "qualification",
-    )) and not any(phrase in question for phrase in (
+    degree_focus_question = any(phrase in question for phrase in (
+        "does your degree focus", "is your degree focused",
+        "degree concentration", "degree specialization",
+    ))
+    if degree_focus_question:
+        raw_focus_areas = profile.get("degree_focus_areas")
+        if not isinstance(raw_focus_areas, list):
+            return _err(
+                f"select_option {ref}: degree focus is not in the structured "
+                "profile; send to review"
+            )
+        focus_areas = {
+            _normalize_option_text(str(area))
+            for area in raw_focus_areas
+            if str(area).strip()
+        }
+        matches_focus = any(area in question for area in focus_areas)
+        says_no = desired in {"no", "false"} or desired.startswith("no ")
+        says_yes = desired in {"yes", "true"} or desired.startswith("yes ")
+        if (says_yes and not matches_focus) or (says_no and matches_focus):
+            return _err(
+                f"select_option {ref}: refused degree-focus answer {value!r}; "
+                "it contradicts structured degree_focus_areas"
+            )
+
+    generic_recruiting_consent_question = (
+        any(phrase in question for phrase in (
+            "recruitment marketing", "recruiting marketing", "talent network",
+            "future job opportunities", "training opportunities", "job alerts",
+        ))
+        and any(term in question for term in (
+            "communication", "contact me", "receive information", "receive updates",
+        ))
+    )
+    communication_consent_question = (
+        any(term in question for term in ("sms", "whatsapp", "text message"))
+        and any(term in question for term in ("communication", "message", "contact"))
+    )
+    if generic_recruiting_consent_question or communication_consent_question:
+        policy = profile.get("application_policy") or {}
+        policy_key = (
+            "recruiting_communications_consent"
+            if generic_recruiting_consent_question
+            else "sms_recruiting_consent"
+        )
+        consent = policy.get(policy_key)
+        if not isinstance(consent, bool):
+            return _err(
+                f"select_option {ref}: recruiting communications consent is not "
+                "in the structured profile; send to review"
+            )
+        says_no = desired in {"no", "false"} or desired.startswith("no ")
+        says_yes = desired in {"yes", "true"} or desired.startswith("yes ")
+        if (says_yes and not consent) or (says_no and consent):
+            return _err(
+                f"select_option {ref}: refused contradictory recruiting "
+                f"communications answer {value!r}"
+            )
+
+    masters_interest_question = (
+        "master" in question
+        and "degree" in question
+        and (
+            any(term in question for term in ("interested", "interest in"))
+            or (
+                "full time employment" in question
+                and any(term in desired for term in ("interested", "interest in"))
+            )
+        )
+    )
+    if masters_interest_question:
+        preferences = profile.get("employment_preferences") or {}
+        willing = preferences.get("willing_to_pursue_masters_while_working")
+        if not isinstance(willing, bool):
+            return _err(
+                f"select_option {ref}: interest in pursuing a Master's degree "
+                "while working is not in the structured profile; send to review"
+            )
+        says_no = desired in {"no", "false"} or desired.startswith("no ")
+        says_yes = desired in {"yes", "true"} or desired.startswith("yes ")
+        if says_yes != willing and (says_yes or says_no):
+            return _err(
+                f"select_option {ref}: refused contradictory Master's-interest "
+                f"answer {value!r}"
+            )
+
+    # Only compare an option directly to the profile's degree when the control
+    # is actually asking for a degree level/type. The previous ``"degree" in
+    # question`` check also caught boolean statements such as "Are you pursuing
+    # a degree? — Yes" and preference questions such as "interested in gaining
+    # a Master's degree? — No", then rejected Yes/No as if they were credential
+    # names. That false-positive loop caused several live ATS reviews.
+    degree_question = (
+        question in {"degree", "degree type", "education level"}
+        or any(phrase in question for phrase in (
+            "which degree", "what degree", "select your degree",
+            "highest degree", "highest level of education",
+            "level of education", "type of degree",
+        ))
+    ) and not any(phrase in question for phrase in (
         "field of study", "discipline", "major",
     ))
     profile_degree = _normalize_option_text(str(profile.get("degree") or ""))
     if degree_question and profile_degree:
         generic_bachelor = desired in {
             "bachelor", "bachelors", "bachelor s", "bachelor degree",
-            "undergraduate", "undergraduate degree",
+            "bachelors degree", "bachelor s degree", "undergraduate",
+            "undergraduate degree",
         }
         generic_master = desired in {
-            "master", "masters", "master s", "master degree", "graduate degree",
+            "master", "masters", "master s", "master degree",
+            "masters degree", "master s degree", "graduate degree",
         }
         compatible = (
             desired == profile_degree
@@ -1456,6 +1642,49 @@ def _select_profile_guard(
                 f"select_option {ref}: refused location {value!r}; structured "
                 f"profile region is {profile.get('address_region')!r}"
             )
+
+    citizenship_region = None
+    padded_question = f" {question} "
+    if "citizen" in question:
+        if any(term in padded_question for term in (
+            " us ", " u s ", " united states ", " american ",
+        )):
+            citizenship_region = "US"
+        elif "canadian" in question or " canada " in padded_question:
+            citizenship_region = "CA"
+        elif any(term in padded_question for term in (
+            " uk ", " united kingdom ", " british ",
+        )):
+            citizenship_region = "UK"
+    citizenships = {
+        _normalize_option_text(str(item))
+        for item in (profile.get("citizenships") or [])
+        if str(item).strip()
+    }
+    if citizenship_region and citizenships:
+        aliases = {
+            "US": {"us", "usa", "united states", "united states of america", "american"},
+            "CA": {"ca", "canada", "canadian"},
+            "UK": {"uk", "gb", "united kingdom", "british"},
+        }[citizenship_region]
+        is_citizen = bool(citizenships & aliases)
+        says_no = desired in {"no", "false"} or any(phrase in desired for phrase in (
+            "not a us citizen", "not a canadian citizen", "not a british citizen",
+        ))
+        says_yes = desired in {"yes", "true"} or (
+            "citizen" in desired and "not a" not in desired
+        )
+        if says_yes and not is_citizen:
+            return _err(
+                f"select_option {ref}: refused unsupported {citizenship_region} "
+                "citizenship claim; structured citizenships do not include it"
+            )
+        if says_no and is_citizen:
+            return _err(
+                f"select_option {ref}: refused false denial of "
+                f"{citizenship_region} citizenship"
+            )
+
     legal_context = f"{question} {label}".strip()
     uk_question = (
         any(term in f" {legal_context} " for term in (
@@ -1476,6 +1705,7 @@ def _select_profile_guard(
     authorization_question = not sponsorship_question and any(term in question for term in (
         "legally permitted to work", "right to work", "authorized to work", "authorised to work",
         "work authorization", "work authorisation", "work permit", "need a visa",
+        "employment eligibility status",
     ))
     legal_question = authorization_question or sponsorship_question
 
@@ -1535,6 +1765,7 @@ def _select_profile_guard(
                 or any(phrase in desired for phrase in (
                     "i am authorized", "i am authorised", "authorized to work",
                     "authorised to work", "right to work",
+                    "permanent work authorization", "permanent work authorisation",
                     "citizen or lawful permanent resident",
                     "green card holder", "valid work permit",
                 ))

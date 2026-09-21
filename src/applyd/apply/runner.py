@@ -788,6 +788,8 @@ def _normalize_report_status(status: str, note: str) -> str:
 
 
 def _terminal_tool_verdict(name: str, result: str) -> tuple[str, str] | None:
+    if "is not in the structured profile; send to review" in result:
+        return "review", "review:missing_info | consequential answer is not in profile"
     if name != "submit":
         return None
     if "captcha did not resolve within" in result:
@@ -879,10 +881,31 @@ def _profile_already_answers(
 
     application_policy = profile.get("application_policy") or {}
     if (
-        "privacy notice" in text
+        any(phrase in text for phrase in (
+            "privacy notice", "privacy acknowledgement",
+            "privacy acknowledgment", "applicant privacy",
+        ))
         and application_policy.get("ordinary_accuracy_attestation") == "authorized"
     ):
         return True
+    generic_recruiting_consent = (
+        any(phrase in text for phrase in (
+            "recruitment marketing", "recruiting marketing", "talent network",
+            "future job opportunities", "training opportunities", "job alerts",
+        ))
+        and any(term in text for term in (
+            "communication", "contact me", "receive information", "receive updates",
+        ))
+    )
+    if generic_recruiting_consent:
+        return isinstance(
+            application_policy.get("recruiting_communications_consent"), bool
+        )
+    if (
+        any(term in text for term in ("sms", "whatsapp", "text message"))
+        and any(term in text for term in ("communication", "message", "contact"))
+    ):
+        return isinstance(application_policy.get("sms_recruiting_consent"), bool)
 
     if any(phrase in text for phrase in (
         "immediate family", "family member", "member of your family", "relative",
@@ -995,11 +1018,54 @@ def _profile_already_answers(
             )
         )
 
+    # Boolean education-status questions are answerable from the combination
+    # of the grounded degree and graduation date. Do not confuse this with a
+    # preference question merely mentioning a degree (for example, interest
+    # in pursuing a Master's), which must remain a real profile gap.
+    education_status_question = (
+        "degree" in text
+        and any(term in text for term in (
+            "completed", "complete", "pursuing", "enrolled",
+            "graduated", "graduate", "attending",
+        ))
+        and any(term in text for term in (
+            "are you", "have you", "does this apply", "do you",
+        ))
+        and "interested" not in text
+    )
+    if education_status_question:
+        return bool(profile.get("degree") and profile.get("expected_grad_date"))
+    if text in {"degree", "degree type"}:
+        return bool(profile.get("degree"))
+    if any(phrase in text for phrase in (
+        "does your degree focus", "is your degree focused",
+        "degree concentration", "degree specialization",
+    )):
+        return isinstance(profile.get("degree_focus_areas"), list)
+
+    # A school name does not ground academic rank or subject performance.
+    # Canonical's form uses labels such as "How did you perform in
+    # mathematics at high school?"; broad matching on the word "school"
+    # previously overrode a legitimate profile gap.
+    if "high school" in text and any(term in text for term in (
+        "perform", "performance", "rank", "ranking", "score",
+    )):
+        performance = profile.get("high_school_performance")
+        return isinstance(performance, dict) and bool(performance)
+
     known_fields = (
         (("preferred first name", "preferred name", "nickname"), "first_name"),
         (("name pronunciation", "name pronounciation", "phonetic spelling"), "name_pronunciation"),
         (("education", "school", "university", "institution"), "school"),
-        (("degree",), "degree"),
+        # A structured degree answers degree-type controls, not every sentence
+        # containing the word "degree". Broad substring matching previously
+        # hid genuinely unknown preference questions such as interest in a
+        # Master's program during preflight.
+        ((
+            "which degree", "what degree", "select your degree",
+            "highest degree", "highest level of education",
+            "level of education", "type of degree",
+        ), "degree"),
         (("major", "discipline", "field of study", "degree subject"), "major"),
         (("over 18", "at least 18"), "over_18"),
         (("veteran",), "veteran_status"),
@@ -1017,7 +1083,7 @@ def _profile_already_answers(
             "when would you be available", "availability date",
         ), "earliest_start_date"),
         (("contact your previous", "contact previous employer"), "previous_employers_may_be_contacted"),
-        (("citizenship", "citizen of"), "citizenships"),
+        (("citizenship", "citizen"), "citizenships"),
         (("language", "languages do you speak"), "spoken_languages"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),
         (("street address", "address line 1", "mailing address"), "address_line1"),
@@ -1067,6 +1133,10 @@ def _profile_already_answers(
         (("hybrid",), "willing_to_work_hybrid"),
         (("work remote", "remote work"), "willing_to_work_remote"),
         (("travel",), "willing_to_travel"),
+        ((
+            "interested in gaining a master", "interest in gaining a master",
+            "interested in pursuing a master", "interest in pursuing a master",
+        ), "willing_to_pursue_masters_while_working"),
     )
     if any(
         any(phrase in text for phrase in phrases)

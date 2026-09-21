@@ -17,7 +17,7 @@ from .discovery.routing import detect_gate
 from .models import Job
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _utcnow() -> str:
@@ -255,6 +255,14 @@ class LocalStore:
 
                 CREATE INDEX IF NOT EXISTS apply_trace_attempt_idx
                     ON apply_trace_events(attempt_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS apply_resume_artifacts (
+                    attempt_id TEXT PRIMARY KEY REFERENCES apply_attempts(id),
+                    tailored_resume_id TEXT REFERENCES tailored_resumes(id),
+                    pdf_path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    captured_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS profile_question_gaps (
                     normalized_label TEXT PRIMARY KEY,
@@ -834,6 +842,26 @@ class LocalStore:
 
     # ---- tailoring/applications -------------------------------------
 
+    def iter_prior_application_jobs(self) -> Iterator[Job]:
+        """All attempted postings, including inactive and deduplicated rows.
+
+        A newer canonical catalog row must not hide an older submission.
+        Unconfirmed attempts also remain protected from automatic retries.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT j.* FROM jobs j WHERE EXISTS (
+                       SELECT 1 FROM applications a WHERE a.job_id=j.id AND (
+                           a.status IN ('applied', 'in_progress')
+                           OR a.reason GLOB 'manual_only_ats:*'
+                           OR EXISTS (SELECT 1 FROM apply_attempts aa
+                                      WHERE aa.application_id=a.id)
+                       )
+                   ) ORDER BY j.id"""
+            ).fetchall()
+        for row in rows:
+            yield self._row_to_job(row)
+
     def save_tailored_resume(
         self,
         *,
@@ -952,7 +980,29 @@ class LocalStore:
                    ) VALUES(?,?,?,?,?)""",
                 (attempt_id, row["id"], "in_progress", model, now),
             )
+            # Tailoring can replace out/<company-role>/resume.pdf. Bind this
+            # attempt and its upload to a private snapshot before the browser
+            # starts, so application history can retrieve the actual bytes.
+            snapshot_path = None
+            source_pdf = Path(row["pdf_path"])
+            if source_pdf.is_file():
+                archive = self.path.resolve().parent / "application-resumes"
+                archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+                snapshot_path = archive / f"{attempt_id}.pdf"
+                pdf_bytes = source_pdf.read_bytes()
+                with snapshot_path.open("xb") as snapshot_file:
+                    snapshot_file.write(pdf_bytes)
+                snapshot_path.chmod(0o600)
+                conn.execute(
+                    """INSERT INTO apply_resume_artifacts(
+                           attempt_id, tailored_resume_id, pdf_path, sha256, captured_at
+                       ) VALUES(?,?,?,?,?)""",
+                    (attempt_id, row["tailored_resume_id"], str(snapshot_path),
+                     hashlib.sha256(pdf_bytes).hexdigest(), now),
+                )
         result = dict(row)
+        if snapshot_path is not None:
+            result["pdf_path"] = str(snapshot_path)
         result["edit_plan"] = _loads(result.pop("edit_plan_json", None), {})
         return result, attempt_id
 

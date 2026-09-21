@@ -11,14 +11,15 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_env
-from ..discovery.routing import detect_ats, preferred_apply_url
+from ..deduplication import canonical_ats_identity
+from ..discovery.routing import DEFAULT_EXCLUDED_ATS, detect_ats, preferred_apply_url
 from ..liveness import check_jobs_liveness
 from ..local_store import get_local_store
 from .apply import cmd_apply
 from .tailor import cmd_tailor
 
 
-MANUAL_ONLY_ATS = {"smartrecruiters"}
+MANUAL_ONLY_ATS = set(DEFAULT_EXCLUDED_ATS)
 
 
 def _normalized_title(value: str) -> str:
@@ -116,20 +117,14 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
     # related requisition at the same company. Cross-source duplicates have
     # different job IDs, so checking only the current ID can repeat paid work
     # (and, for successful attempts, produce duplicate submissions).
-    prior_roles: list[tuple[str, str]] = []
-    for row in ranked:
-        app = store.get_application_by_job(row["job_id"])
-        app_reason = str((app or {}).get("reason") or "")
-        if (
-            app
-            and (
-                app.get("status") == "applied"
-                or app_reason.startswith("manual_only_ats:")
-            )
-        ) or store.get_apply_attempts(row["job_id"]):
-            prior_roles.append(
-                (str(row["company"]).casefold(), str(row["title"]))
-            )
+    # Search the complete history, not just ranked rows: deduplication can
+    # replace an applied aggregator row with a fresh ATS row under an alias.
+    prior_jobs = list(store.iter_prior_application_jobs())
+    prior_roles = [(job.company.casefold(), job.title) for job in prior_jobs]
+    prior_identities = {
+        identity for job in prior_jobs
+        if (identity := canonical_ats_identity(job)) is not None
+    }
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report_path = Path(args.report or f"data/batches/apply-{stamp}.json")
@@ -176,8 +171,15 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         job = store.get(job_id)
         if job is None:
             continue
+        identity = canonical_ats_identity(job)
+        if identity is not None and identity in prior_identities:
+            continue
         apply_url = preferred_apply_url(job.id, job.url, company=job.company)
         ats = detect_ats(apply_url) or "unknown"
+        # Protect against stale match tables created before an ATS became
+        # default-excluded. These rows do not consume the requested batch size.
+        if ats in DEFAULT_EXCLUDED_ATS:
+            continue
         if ats_selected[ats] >= args.max_per_ats:
             continue
         if _ats_failure_total(ats_failures, ats) >= args.ats_failure_limit:
@@ -275,6 +277,9 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
                 continue
 
         attempted += 1
+        if identity is not None:
+            prior_identities.add(identity)
+        prior_roles.append((company_key, job.title))
         common = dict(
             job_id=job_id,
             model=args.apply_model,
