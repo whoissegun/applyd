@@ -6,7 +6,63 @@ the per-job context.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
+from typing import Any
+
+
+MAX_TAILOR_METADATA_CHARS = 2_000
+
+
+def _compact_json(raw: str) -> str:
+    """Compact JSON context without changing any candidate facts."""
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_tailor_metadata(raw: str) -> str:
+    """Keep only bounded apply-relevant metadata.
+
+    The rendered tailored resume already contains the accepted edits. Sending
+    the complete edit plan repeats every rewritten bullet and can push Kimi's
+    tool-call request over an upstream input boundary, which OpenRouter has
+    been observed to return as an empty, zero-usage completion. Preserve the
+    explicit risk metadata only. The accepted ordering and summary are already
+    represented by the rendered resume and do not need to be sent twice.
+    """
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return "{}"
+    if not isinstance(value, dict):
+        return "{}"
+
+    priority: list[tuple[str, Any]] = []
+    for key, item in value.items():
+        normalized = key.lower()
+        if any(marker in normalized for marker in ("risk", "warning", "flag")):
+            priority.append((key, item))
+    compact: dict[str, Any] = {}
+    for key, item in priority:
+        candidate = {**compact, key: item}
+        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) <= MAX_TAILOR_METADATA_CHARS:
+            compact = candidate
+    return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+
+def _resume_grounding_context(resume_tex: str) -> str:
+    """Drop deterministic LaTeX layout definitions but preserve resume facts."""
+    begin = r"\begin{document}"
+    end = r"\end{document}"
+    start = resume_tex.find(begin)
+    finish = resume_tex.rfind(end)
+    if start < 0 or finish <= start:
+        return resume_tex
+    return resume_tex[start + len(begin):finish].strip()
 
 
 SYSTEM_PROMPT = r"""You are applyd's apply agent. You handle ONE job per invocation.
@@ -29,12 +85,23 @@ the label. snapshot() surfaces this as a trailing ` *` on the line. Everything
 without the asterisk is optional.
 
 **Required field** → fill it.
+- When `application_policy.required_consents` is true, the user has standing
+  consent for required application agreements, privacy/data processing,
+  background checks, interview recording, and other required consent steps.
+  This does not change any factual authorization or history answer.
+- For prior employment at the target company, use `resume_employers` from the
+  full source resume. Listed employer = Yes; absent employer = No under the
+  user's `never_employed_by_target_unless_listed_on_resume` rule. Previous
+  applications and compound conflict-of-interest history are separate facts.
 - If the answer is in the profile / tailored resume → use it verbatim.
 - If it's a free-text prompt (Why us?, Favorite project) → compose from the
   profile's narrative hooks + the tailored resume. Honesty + ban-list rules
   in the Free-text section below.
 - If you have no grounded answer → send the job to REVIEW
   (`review:missing_info | field='<exact label>'`). Do NOT invent.
+  Exception: when `application_policy.required_narrative_invention` is true,
+  required narrative/story answers may be composed when absent from the resume.
+  This exception never applies to core factual or eligibility questions.
 
 **Optional field** → don't fill it. Skip it. Blanks save turns and don't hurt
 the application. Move on.
@@ -78,6 +145,7 @@ For multi-step forms, snapshot and preflight each newly revealed step.
      absent does it type into a searchable catalog and inspect filtered options.
      It never commits free-typed text as a dropdown answer.
      Batch independent select_option calls from the same snapshot in one turn.
+     This includes separate graduation month and year controls.
      If select_option reports no match, read the returned real labels, then use
      open_dropdown and pick_option in a later turn. Do not keep proposing text.
    - ONLY if the answer cannot be chosen without seeing the choices first, use
@@ -88,6 +156,11 @@ For multi-step forms, snapshot and preflight each newly revealed step.
      and closes the menus; on the next turn batch select_option calls using the
      exact compatible labels. This avoids spending two turns per dropdown.
 5. submit (the tool no-ops in test_mode).
+   If validation fails, use the refreshed refs, complete preflight, and resolve
+   every reported required field before another submit. A validation-summary
+   message is not itself a dropdown. Typed autocomplete text is not a selected
+   option. Do not repeat an unsuccessful catalog search or plain-fill fallback;
+   choose a genuinely compatible rendered option or report review.
 6. report_done — exactly once.
 
 Re-call snapshot ONLY if an action materially changed the page (modal opened,
@@ -104,6 +177,10 @@ the first snapshot is canonical for the run; refs stay valid.
 - Spoken-language questions: use only `spoken_languages` from the profile and
   proficiency only from `language_proficiency`. Do not infer native/bilingual
   proficiency when no proficiency is recorded.
+- Specific Yes/No questions about prior production systems, real user traffic,
+  advertising/ranking, feedback optimization, or business metrics require an
+  exact explicit `historical_application_answers` entry. Related resume terms
+  do not establish every part of a compound claim; otherwise send to review.
 - Location / any field that shows suggestions as you type (Lever location,
   Google Places): use fill_autocomplete, NEVER plain fill — these fields keep
   the real value in a hidden input and clear themselves on submit unless a
@@ -167,8 +244,8 @@ the first snapshot is canonical for the run; refs stay valid.
 
 ## Free-text answers (Why us? / Favorite project? / Strengths? etc.)
 
-Required → always fill. Optional → only if you can write something specific
-and grounded; blanks beat slop.
+Required → fill under the policy below. Optional → always skip, even if you
+could write a good answer or already know the answer.
 
 Ground every factual claim in the profile or resume. Never invent companies,
 projects, metrics, dates, technologies, credentials, or past events. Motivation,
@@ -176,10 +253,23 @@ tone, preferences, and opinions may be composed naturally when the question
 calls for them; they are not historical claims. Keep them plausible and tied
 to the actual company, role, and grounded experience.
 
+User-authorized exception: if `application_policy.required_narrative_invention`
+is true AND the narrative field is REQUIRED, prefer existing resume/profile
+material, but if absent you may invent a plausible story or subjective answer
+(including a project anecdote, learning story, or recent-reading response).
+Do not report those narrative prompts as missing profile facts. Never fill an
+optional narrative field. Do not add composed stories to the resume or profile
+as verified facts. Core facts remain grounded regardless of control type:
+identity, authorization, sponsorship, immigration, employers, qualifications,
+education/grades, employment dates, technology proficiency, metrics, years of
+experience, and legal or compliance attestations. A text box is not by itself
+permission to invent a factual answer.
+
 For non-technical prompts, write with genuine warmth and some emotion. Use plain,
 specific language. Never use an em dash. Avoid jargon, generic corporate prose,
 and phrasing that sounds machine-generated. Emotion and motivation may be
-created; the events used to support them must remain factual.
+created. Supporting events remain factual unless the required narrative
+exception above is explicitly enabled.
 
 - Stay under any visible character limit. Default 80–150 words otherwise.
 - First person, past tense for examples. Specific moments. Imperfect sentences OK.
@@ -223,7 +313,8 @@ For a skip or failure, call report_done directly.
 
 ## Hard rules
 
-- Never invent factual information not in the user profile or resume context.
+- Never invent core factual information. Only the explicit required-narrative
+  policy above permits composing absent story details; never optional answers.
 - Never retry a failed step beyond once.
 - Never message the user; the runner handles that.
 - Call report_done exactly once at the end.
@@ -244,13 +335,16 @@ def build_user_blocks(
     test_mode: bool,
 ) -> list[dict]:
     """Return user message content blocks: [static (cached), dynamic per-job]."""
+    profile_context = _compact_json(profile_md)
+    tailor_context = _compact_tailor_metadata(tailor_metadata_json)
+    resume_context = _resume_grounding_context(resume_tex)
     static = (
         "═══ USER PROFILE ═══\n"
-        f"{profile_md}\n\n"
+        f"{profile_context}\n\n"
         "═══ TAILORED RESUME (LaTeX source — ground truth for projects/metrics/tech) ═══\n"
-        f"{resume_tex}\n\n"
+        f"{resume_context}\n\n"
         "═══ TAILOR METADATA (what was emphasized + risk flags) ═══\n"
-        f"{tailor_metadata_json}\n"
+        f"{tailor_context}\n"
     )
     dynamic = (
         f"Apply to this job. test_mode={'true' if test_mode else 'false'}\n\n"

@@ -34,8 +34,8 @@ together from the command reference below.
   costs, and redacted traces are stored in `data/applyd.sqlite3`.
 - **CLI-first pipeline:** every stage can be run, inspected, and retried
   independently.
-- **Low-cost model usage:** Kimi K2.6 runs through OpenRouter only where natural
-  language interpretation or generation is useful.
+- **Separated model roles:** Jev classifies closed-form application decisions;
+  Kimi K2.6 is limited to navigation and grounded free-form writing.
 - **Local matchmaking:** embeddings and deterministic reranking run on-device.
 - **Grounded tailoring:** Kimi returns structured edits; Python validates source
   IDs and renders LaTeX. The model never writes LaTeX directly.
@@ -48,9 +48,18 @@ together from the command reference below.
 
 ## How it works
 
+Academic filtering is opt-in via the profile. `academic_status` records the
+candidate's current level and enrollment status. Set
+`preferences.excluded_required_education` to `["masters", "doctorate"]` to
+exclude jobs requiring those degrees or enrollment in those programs.
+Verbatim posting evidence is required. Preferred degrees, bachelor-accepted
+alternatives, equivalent-experience routes, and unknown requirements do not
+automatically exclude a job. The rule runs during evaluation and again before
+direct/batch application, including when an older ranking still exists.
+
 ```text
 discover -> enrich/extract -> evaluate -> deduplicate -> match -> verify -> tailor -> apply
-   HTTP      ATS/HTTP/Chrome     rules          rules       local      HTTP     Kimi     Kimi
+   HTTP      ATS/HTTP/Chrome     rules          rules       local      HTTP     Kimi   Jev + Kimi
                  + Kimi                                  vectors             + LaTeX  + Chrome
                                           SQLite
 ```
@@ -269,6 +278,13 @@ applyd apply-batch --top 20 --test-mode false
 Batch runs limit jobs per ATS, stop an ATS after repeated platform failures,
 avoid previously attempted cross-source duplicates, and write an atomic JSON
 report under `data/batches/`.
+
+Jev-assisted application handling is the default: Jev classifies profile-bound
+fields and closed-form choices, while Kimi handles navigation and grounded
+free-form writing. Ambiguous, mixed-jurisdiction, or low-confidence decisions
+go to review. The existing OpenRouter key can serve both models; a direct
+TypeSafe key is preferred when configured. The restricted pure-Jev controller
+remains a separate test surface.
 
 ### Useful commands
 

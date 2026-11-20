@@ -17,9 +17,12 @@ They live in ignored files under `data/`, `out/`, `profile.json`, and
 `resume.json`.
 
 Job descriptions and the candidate context needed for extraction, tailoring,
-and form interpretation are sent to Kimi K2.6 through OpenRouter. If you enable
-Bright Data, pages handled by that fallback pass through Bright Data's Browser
-API. Do not use either service if its data handling is unacceptable to you.
+navigation, and free-form writing are sent to Kimi K2.6 through OpenRouter.
+Closed-form application questions and the relevant non-contact profile facts
+are sent to Jev through OpenRouter (or directly to TypeSafe when configured).
+If you enable Bright Data, pages handled by that fallback pass through Bright
+Data's Browser API. Do not use these services if their data handling is
+unacceptable to you.
 
 ## 1. Install prerequisites
 
@@ -399,6 +402,105 @@ Start with five. Review every outcome before increasing the batch size.
 
 ## 12. View application history
 
+### Experimental Jev controller (validated per-job canary)
+
+`APPLYD_JEV_CONTROLLER=true` selects a separate bounded controller, not the
+prefill hybrid below. Configure `TYPESAFE_API_KEY` in your ignored environment.
+Python orders pending controls and binds allowed actions to exact profile values;
+Jev classifies the next observed field or operation. Its choice must agree with
+Python's independent exact-label binding. Python uses the guarded tools and
+checks the DOM afterward. Kimi is never called by this browser controller,
+including on errors or uncertainty. The normal default remains Kimi.
+
+This initial controller supports native identity/contact/selected education
+inputs, exact native dropdown options, runner-bound resume uploads, and Ashby's
+observed custom form container (excluding its separate resume-autofill widget). Unknown
+required questions, populated unsupported answers, consent, legal questions,
+custom widgets, ambiguous forms, and tool failures stop for review. It does not
+generate prose or handle arbitrary ATS widgets yet. Exact-label profile-bound
+fields use a provisional 0.90 confidence floor; uploads/submission use 0.95.
+Neither is a calibrated accuracy guarantee. Semantic disagreement stops even
+at confidence 1.0. There is no Kimi fallback.
+
+Validate ten fictional local Chrome forms with the real TypeSafe API:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/test_jev_controller_browser.py --run
+```
+
+Without `--run`, this prints the fixture count without making network calls.
+The script never reads your candidate files/database or opens employer pages.
+Only fictional field labels and tool-outcome categories reach TypeSafe; no
+candidate values or document contents are sent. `jev_controller_decision`
+trace events include cumulative estimated Jev costs separately from Kimi's
+reported charges. Existing per-application budget and 25-turn limits remain.
+
+After tailoring an eligible, never-attempted job, validate its actual form:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/validate_jev_job.py <job_id> \
+  --report data/batches/jev-validation.json
+```
+
+This uses your real profile and uploads the prepared resume, but never submits
+or creates an application attempt. The private report is created exclusively
+(an existing report is not overwritten). Only a `test_mode:ready_for_review`
+result can authorize a later live canary. Inspect it before proceeding:
+
+```bash
+APPLYD_JEV_CONTROLLER=true \
+APPLYD_JEV_VALIDATION=data/batches/jev-validation.json \
+applyd apply <job_id> --model jev-1.13.0/controller --browser local --test-mode false
+```
+
+The manifest expires in one hour and binds the job, URL, profile, resume bytes,
+controller/tool code, and audited form schema. A changed form blocks submission.
+Normal duplicate protections still apply. A later Jev call must observe the
+runner's submission confirmation. If that observation fails after submission,
+the result explicitly says not to resubmit. Start with one and audit it; this
+is not a general-purpose replacement for the default application agent.
+
+### Jev decisions with Kimi free-form handling
+
+The default application loop uses Jev for profile-bound fields and closed-form
+decisions. Python opens the job, binds values to the profile, rejects stale
+field references, and sends ambiguous or mixed-jurisdiction legal questions to
+review. Kimi handles required-question preflight, multi-step navigation, and
+grounded free-form writing. Kimi cannot select a radio, checkbox, or dropdown
+answer while Jev is active. This is **not** a pure Jev browser controller.
+Traces distinguish deterministic, Jev-assisted, and Kimi turns.
+
+```bash
+applyd apply <job_id>                  # test first; never submits
+applyd apply <job_id> --test-mode false
+```
+
+Configure `OPENROUTER_API_KEY` in the ignored environment. An optional direct
+`TYPESAFE_API_KEY` takes precedence for Jev when configured.
+Do not combine assisted mode with `APPLYD_JEV_CONTROLLER=true`. The pure
+controller's per-job validation requirement remains unchanged. Assisted mode
+retains the ordinary runner's preflight, legal/identity guards, 25-turn cap,
+cost limits (including Jev estimates), and later-turn submission confirmation.
+Jev is capped at 25 classification requests. Uncertainty, provider failure, or
+missing consequential facts ends the attempt in human review; it never hands a
+bounded answer to Kimi. Optional recruiting and recording consent stays off
+unless explicitly authorized in the profile. Begin with non-submitting tests;
+passing unit tests does not establish reliability on every employer.
+Closed-form Jev choices require confidence of at least 0.95; lower-confidence
+choices are sent to review.
+
+### Historical Jev-first prefill pilot
+
+This older hybrid pilot is not the Jev controller. Its live trial exposed a
+Kimi legal-answer/guard failure; do not use it as evidence of controller safety.
+
+The earlier opt-in hybrid used `APPLYD_JEV_HYBRID=true` and allowed Kimi to
+answer decisions Jev skipped. Its live trial exposed a contradictory legal
+answer, so that fallback design is historical only. The default path above now
+routes unsupported bounded decisions to review instead.
+
+### Start the dashboard
+
 From your project directory after completing installation:
 
 ```bash
@@ -468,6 +570,13 @@ applyd profile-gaps
 Add only genuinely known facts to `profile.json`, re-run `applyd init`, and
 retry. Manual videos, assessments, unsupported ATSes, and unresolved CAPTCHAs
 should remain human work.
+
+Batch reports distinguish `agent_stall` (preflight, catalog, or turn-budget
+exhaustion), `policy_guard` (repeated factual contradictions), and browser
+runtime failures. All still consume the per-ATS failure-stop budget: different
+labels do not bypass the safety cap. A closed browser after submit leaves the
+submission unconfirmed. Check the employer's confirmation or email before
+retrying; a lost session is not proof that the employer received nothing.
 
 ### Tailoring appears stuck on an OpenRouter response
 

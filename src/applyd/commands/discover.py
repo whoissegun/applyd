@@ -49,10 +49,11 @@ def _seed_cache_from_jobs(cache: ResolverCache, jobs: Iterable[Job]) -> int:
 
 
 def _freshest_within_limit(
-    jobs: Iterable[Job], *, written: int, limit: int
+    jobs: Iterable[Job], *, written: int, limit: int,
+    existing_ids: set[str] | None = None,
 ) -> list[Job]:
     """Return the freshest remaining slice under a run-wide hard cap."""
-    values = list(jobs)
+    values = [job for job in jobs if existing_ids is None or job.id not in existing_ids]
     values.sort(
         key=lambda job: job.posted_at.timestamp() if job.posted_at else 0,
         reverse=True,
@@ -95,6 +96,8 @@ def _attach_retrieval_route(job: Job, ats: str, slug: str) -> None:
 def cmd_discover(args: argparse.Namespace) -> int:
     load_env()
     repo = get_local_store()
+    existing_ids = {job.id for job in repo.iter_all(active_only=False)} \
+        if getattr(args, "new_only", False) else None
 
     cache = ResolverCache(Path(args.cache))
     cache.load()
@@ -143,9 +146,12 @@ def cmd_discover(args: argparse.Namespace) -> int:
             if not args.include_unsupported_ats:
                 candidate_jobs, unsupported = _supported_jobs(fetched_jobs)
             jobs = _freshest_within_limit(
-                candidate_jobs, written=total_new + total_updated, limit=args.limit
+                candidate_jobs, written=total_new + total_updated, limit=args.limit,
+                existing_ids=existing_ids,
             )
             new, updated = repo.upsert(jobs)
+            if existing_ids is not None:
+                existing_ids.update(job.id for job in jobs)
             total_new += new
             total_updated += updated
             seeded = _seed_cache_from_jobs(cache, jobs)
@@ -179,8 +185,11 @@ def cmd_discover(args: argparse.Namespace) -> int:
                     fetched_jobs,
                     written=total_new + total_updated,
                     limit=args.limit,
+                    existing_ids=existing_ids,
                 )
                 new, updated = repo.upsert(jobs)
+                if existing_ids is not None:
+                    existing_ids.update(job.id for job in jobs)
                 total_new += new
                 total_updated += updated
                 per_ats = ", ".join(
@@ -264,8 +273,11 @@ def cmd_discover(args: argparse.Namespace) -> int:
                         fetched_jobs,
                         written=total_new + total_updated,
                         limit=args.limit,
+                        existing_ids=existing_ids,
                     )
                     new, updated = repo.upsert(jobs)
+                    if existing_ids is not None:
+                        existing_ids.update(job.id for job in jobs)
                     total_new += new
                     total_updated += updated
                     print(

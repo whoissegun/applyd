@@ -28,6 +28,10 @@ from typing import Any
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from ..tailor.structured import escape_latex
+from .deterministic_questions import (
+    immigration_authorization_required_question, required_consent_authorized,
+    resolve_question,
+)
 
 
 # ── human-behavior knobs ─────────────────────────────────────────────────────
@@ -61,8 +65,13 @@ def _authorization_region_from_locations(
 ) -> str | None:
     """Resolve a legal-answer region from deterministic job locations."""
     location = " | ".join(job_locations or []).casefold()
+    if job_locations and all(str(place).strip().casefold() in {"sf", "nyc", "south sf"} for place in job_locations):
+        return "US"
     if (
-        any(term in location for term in ("united states", "usa", "u.s."))
+        any(term in location for term in (
+            "united states", "usa", "u.s.", "san francisco", "new york",
+            "foster city", "palo alto", "california", "boston",
+        ))
         or re.search(rf",\s*(?:{_US_STATE_CODES})(?:\b|$)", location, re.I)
     ):
         return "US"
@@ -73,11 +82,65 @@ def _authorization_region_from_locations(
         or re.search(rf",\s*(?:{_CA_PROVINCE_CODES})(?:\b|$)", location, re.I)
     ):
         return "CA"
-    if any(term in location for term in (
-        "united kingdom", "england", "scotland", "wales", "london", " uk",
-    )):
+    if (
+        any(term in location for term in (
+            "united kingdom", "england", "scotland", "wales", "london",
+        ))
+        or re.search(r"\buk\b", location)
+    ):
         return "UK"
     return None
+
+
+def _authorization_region_from_residence(profile: dict[str, Any]) -> str | None:
+    """Resolve legal region from the candidate's residence, not the job."""
+    code = " ".join(re.sub(
+        r"[^a-z0-9]+", " ", str(profile.get("address_country_code") or "").casefold(),
+    ).split())
+    country = " ".join(re.sub(
+        r"[^a-z0-9]+", " ", str(profile.get("address_country") or "").casefold(),
+    ).split())
+    aliases = {
+        "ca": "CA", "canada": "CA",
+        "us": "US", "usa": "US", "united states": "US",
+        "united states of america": "US",
+        "uk": "UK", "gb": "UK", "united kingdom": "UK",
+    }
+    return aliases.get(code) or aliases.get(country)
+
+
+def _authorization_regions_from_text(text: str) -> list[str]:
+    """Return every explicitly named legal jurisdiction, not just the first."""
+    padded = " " + " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split()) + " "
+    regions: list[str] = []
+    if any(term in padded for term in (" united states ", " usa ", " u s ", " us ")):
+        regions.append("US")
+    if " canada " in padded or " canadian " in padded:
+        regions.append("CA")
+    if any(term in padded for term in (" united kingdom ", " uk ", " britain ")):
+        regions.append("UK")
+    if " european union " in padded or " eu " in padded:
+        regions.append("EU")
+    return regions
+
+
+def _selected_application_locations(page: Page) -> list[str]:
+    """Read already-selected work-location choices from the current form."""
+    values = page.evaluate(r"""() => Array.from(document.querySelectorAll('[data-applyd-ref]'))
+      .filter(e => {
+        const q=((e.getAttribute('data-applyd-question') || '') + ' ' +
+          (e.getAttribute('data-applyd-label') || '')).toLowerCase();
+        return /(?:location|countr(?:y|ies))/.test(q) &&
+          /(?:work|selected|reside|residence|previous response)/.test(q) &&
+          (!!e.checked || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true' ||
+           !!e.getAttribute('data-applyd-picked') ||
+           (e.tagName === 'SELECT' && !!e.value));
+      })
+      .map(e => e.getAttribute('data-applyd-option') ||
+        e.getAttribute('data-applyd-picked') ||
+        (e.tagName === 'SELECT' ? (e.selectedOptions[0]?.text || e.value) : e.value) || '')
+      .map(v => v.trim()).filter(Boolean)""")
+    return [str(value) for value in values] if isinstance(values, list) else []
 
 
 def _should_humanize(page: Page) -> bool:
@@ -223,8 +286,19 @@ _SNAPSHOT_JS = r"""() => {
             if (labeler) labeledBy = labeler.innerText || '';
         }
         const wrappedLabel = el.closest('label');
-        const option = (labelEl?.innerText || wrappedLabel?.innerText || '').trim();
-        let questionEl = el.closest('fieldset')?.querySelector(':scope > .ashby-application-form-question-title') || null;
+        const choiceRole = ['radio', 'checkbox'].includes(el.getAttribute('role'));
+        const option = (labelEl?.innerText || wrappedLabel?.innerText ||
+            (choiceRole ? el.querySelector('label')?.innerText : '') || '').trim();
+        const fieldset = el.closest('fieldset');
+        let questionEl = fieldset?.querySelector(
+            ':scope > .ashby-application-form-question-title, :scope > legend'
+        ) || null;
+        // Workable points a radiogroup's aria-labelledby at a prompt outside
+        // the fieldset. The individual radio's label is only YES / NO.
+        if (!questionEl && fieldset?.getAttribute('aria-labelledby')) {
+            const ids = fieldset.getAttribute('aria-labelledby').trim().split(/\s+/);
+            if (ids.length === 1) questionEl = document.getElementById(ids[0]);
+        }
         if (!questionEl && (!(inputType === 'radio' || inputType === 'checkbox') || !option)) {
             let questionScope = el.parentElement;
             for (let depth = 0; depth < 5 && questionScope; depth++, questionScope = questionScope.parentElement) {
@@ -240,11 +314,16 @@ _SNAPSHOT_JS = r"""() => {
             const leverQuestion = el.closest('li.application-question');
             questionEl = leverQuestion?.querySelector('.application-label') || null;
         }
-        const question = (questionEl?.innerText || '').trim();
+        let question = (questionEl?.innerText || '').trim();
+        // A standalone privacy acknowledgement has no separate prompt: its
+        // wrapping label is both the question and the checkbox option.
+        if (!question && inputType === 'checkbox' &&
+            /^by submitting,? i acknowledge my personal data will be processed in accordance with .+privacy policy\.?$/i
+                .test(option.replace(/\s+/g, ' '))) question = option;
         const ph = el.getAttribute('placeholder') || '';
         const name = el.getAttribute('name') || '';
         let label = question || option || aria || labeledBy || ph || name || el.innerText || '';
-        if ((inputType === 'radio' || inputType === 'checkbox') && question && option && question !== option) {
+        if ((inputType === 'radio' || inputType === 'checkbox' || choiceRole) && question && option && question !== option) {
             label = `${question} — ${option}`;
         }
         let semanticOption = option;
@@ -268,6 +347,7 @@ _SNAPSHOT_JS = r"""() => {
                          labelText.includes('(required)') ||
                          labelText.includes('required)') ||
                          (questionEl?.className || '').toString().toLowerCase().includes('required');
+        el.setAttribute('data-applyd-required', required ? 'true' : 'false');
 
         // React comboboxes (Greenhouse country/school/degree, react-select)
         // keep the chosen value in component state, not el.value — so a picked
@@ -275,11 +355,13 @@ _SNAPSHOT_JS = r"""() => {
         // stamps the choice on data-applyd-picked; surface it as the value so
         // the field reads as satisfied. Survives snapshot (only *-ref is reset).
         const picked = el.getAttribute('data-applyd-picked');
+        const selected = !!el.checked || el.getAttribute('aria-checked') === 'true' ||
+                         el.getAttribute('aria-pressed') === 'true' || !!picked;
         const rawValue = (el.value !== undefined && el.value !== '')
             ? el.value : (el.innerText || '');
         const value = (picked || rawValue || '').toString().slice(0, 80);
 
-        out.push({ ref, role, type: inputType, label, required, value });
+        out.push({ ref, role, type: inputType, label, required, value, selected });
     }
     return out;
 }"""
@@ -326,10 +408,11 @@ def snapshot(page: Page) -> str:
         lines = []
         for e in elements:
             req = " *" if e.get("required") else ""
+            selected = " selected" if e.get("selected") else ""
             type_part = f"/{e['type']}" if e.get("type") else ""
             value = f' value={e["value"]!r}' if e.get("value") else ""
             lines.append(
-                f"{e['ref']}: [{e['role']}{type_part}{req}] {e['label']!r}{value}"
+                f"{e['ref']}: [{e['role']}{type_part}{req}{selected}] {e['label']!r}{value}"
             )
         text = "\n".join(lines)
         # Long-form ATS pages (Palantir Lever: 100+ controls) overflow 8k and
@@ -375,9 +458,13 @@ def _is_submit_control(page: Page, ref: str) -> bool:
             const tag = el.tagName.toLowerCase();
             const type = (el.type || '').toLowerCase();
             const text = (el.innerText || el.value || '').trim().toLowerCase();
+            const inForm = !!el.closest('form');
             return (
                 (tag === 'input' && (type === 'submit' || type === 'image')) ||
-                (tag === 'button' && /\\b(submit|apply|send)\\b/.test(text))
+                (tag === 'button' && (
+                    /\\b(submit|send)\\b/.test(text) ||
+                    (inForm && /\\bapply\\b/.test(text))
+                ))
             );
         }""",
         # Remote CDP round trips can exceed two seconds even on a healthy
@@ -385,6 +472,22 @@ def _is_submit_control(page: Page, ref: str) -> bool:
         # premature timeout prevents the click rather than merely slowing it.
         timeout=8000,
     ))
+
+
+def _degree_claim_guard(question: str, value: str, profile: dict[str, Any]) -> str | None:
+    """Independently reject unsupported degree-possession yes/no claims."""
+    if not re.search(r'\b(?:bachelor|master)', question, re.I):
+        return None
+    if not re.search(r'\b(?:have|hold|earned|completed|obtained|possess|received)\b', question, re.I):
+        return None
+    desired = _normalize_option_text(value)
+    actual = True if re.match(r'^(?:yes|true)\b', desired) else False if re.match(r'^(?:no|false)\b', desired) else None
+    if actual is None:
+        return None
+    answer = resolve_question(question, profile, {'yes': 'Yes', 'no': 'No'})
+    if not isinstance(answer.value, bool) or actual != answer.value:
+        return _err('degree qualification answer is not supported by explicit credential completion; send to review')
+    return None
 
 
 def _profile_click_guard(
@@ -395,15 +498,49 @@ def _profile_click_guard(
         return None
     loc = _ref_locator(page, ref)
     question = str(loc.get_attribute("data-applyd-question") or "").casefold()
+    legal_label = question + ' ' + str(loc.get_attribute('data-applyd-label') or '').casefold()
+    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    standing_consent = required_consent_authorized(legal_label, profile, required=required)
+    if not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', legal_label):
+        return _err(f'click {ref}: unusual legal attestation requires human review')
     option = " ".join(
         re.sub(
             r"[^a-z0-9]+", " ",
             str(loc.get_attribute("data-applyd-option") or "").casefold(),
         ).split()
     )
+    degree_error = _degree_claim_guard(question, option, profile)
+    if degree_error:
+        return degree_error
+    if (
+        any(term in question for term in ("recording", "recorded", "record interview"))
+        and any(term in question for term in ("consent", "agree", "permission"))
+    ):
+        consent = (profile.get("application_policy") or {}).get(
+            "interview_recording_consent"
+        )
+        if standing_consent:
+            consent = True
+        if not isinstance(consent, bool):
+            return _err(
+                f"click {ref}: interview-recording consent is not in the "
+                "structured profile; send to review"
+            )
+        says_yes = option in {"yes", "true"} or option.startswith("yes ")
+        says_no = option in {"no", "false"} or option.startswith("no ")
+        if (says_yes and not consent) or (says_no and consent):
+            return _err(
+                f"click {ref}: refused contradictory interview-recording consent"
+            )
     preferences = profile.get("employment_preferences") or {}
 
-    residence_question = any(phrase in question for phrase in (
+    residence_relative = any(phrase in question for phrase in (
+        "country you are based in", "country you re based in",
+        "country where you are based", "country where you currently reside",
+        "country you currently reside in", "your country of residence",
+        "location you currently reside", "location where you currently reside",
+    ))
+    residence_question = not residence_relative and any(phrase in question for phrase in (
         "are you located in", "are you based in", "do you live in",
         "do you reside in", "currently reside in",
     ))
@@ -476,6 +613,33 @@ def click(
         return _err(f"click {ref}: {type(e).__name__}: {e}")
 
 
+def _narrative_question(label: str) -> bool:
+    """Recognize open stories, not factual questions rendered as text boxes."""
+    text = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
+    if any(term in text for term in (
+        "authoriz", "authoris", "sponsor", "visa", "citizen", "right to work",
+        "eligible to work", "legal", "criminal", "clearance", "conflict of interest",
+        "salary", "compensation", "hourly rate", "graduat", "gpa", "grade",
+        "degree", "qualification", "certif", "licens", "proficien", "fluent",
+        "years of", "how many", "employer", "employment", "work permit", "metric",
+        "high school performance", "high school rank", "high school score",
+    )):
+        return False
+    return any(term in text for term in (
+        "why us", "why do you", "why are you", "why this", "what interests you",
+        "what excites you", "tell us about", "tell me about", "describe a time",
+        "example of a time", "favorite project", "favourite project", "project you",
+        "proud of", "greatest strength", "taught yourself", "self taught",
+        "learned on your own", "how do you stay current", "how do you keep current",
+        "how do you keep up", "stay up to date", "you ve read", "you have read",
+        "reading", "read in the past month", "technical topic", "motivation",
+    ))
+
+
+class _OptionalNarrativeField(ValueError):
+    pass
+
+
 def _grounded_fill_value(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None,
     resume_text: str = "", job_locations: list[str] | None = None,
@@ -501,6 +665,76 @@ def _grounded_fill_value(
         ).split()
     )
     answer = " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+    if 'employer' in normalized and any(term in normalized for term in ('current', 'most recent', 'previous')):
+        if re.search(r'\b(?:student|studying)\b', answer):
+            raise ValueError('student affiliation is not an employer; use source resume employment, not current_company')
+    if 'graduat' in normalized and any(term in normalized for term in ('date', 'month', 'year')):
+        from .deterministic_questions import resolve_text_question
+        kind = loc.get_attribute('type') or 'text'
+        mask = str(loc.get_attribute('placeholder') or '').casefold()
+        if re.fullmatch(r'20\d{2}-\d{2}', str(profile.get('expected_grad_date') or '')) and (
+                kind == 'date' or re.search(r'(?:mm|dd)[/-](?:mm|dd)[/-](?:yyyy|yy)', mask)):
+            raise ValueError('day-specific graduation date required but only a month is recorded; send to review')
+        mapped = resolve_text_question(label, profile, input_type=kind)
+        if mapped is None or mapped.value is None:
+            raise ValueError('graduation date is not mapped to a sufficiently precise profile value; send to review')
+        return str(mapped.value), 'grounded graduation date from profile (no invented day)'
+    narrative_authorized = False
+    if _narrative_question(label):
+        required = loc.evaluate(r"""e => e.getAttribute('data-applyd-required') === 'true' || !!e.required || e.getAttribute('aria-required') === 'true'
+          || /\*|\brequired\b/i.test((e.getAttribute('data-applyd-label') || '') + ' ' +
+            (e.getAttribute('data-applyd-question') || '') + ' ' +
+            (e.id ? document.querySelector(`label[for="${e.id}"]`)?.innerText || '' : '') +
+            ' ' + (e.closest('label')?.innerText || ''))""")
+        if required is False:
+            raise _OptionalNarrativeField('optional narrative field must stay blank')
+        narrative_authorized = (required is True and
+            (profile.get('application_policy') or {}).get('required_narrative_invention') is True)
+
+    # A request for something the applicant actually read is historical,
+    # not permission to compose a plausible reading story.
+    if not narrative_authorized and re.search(r"\b(?:read|reading)\b", normalized) and any(term in normalized for term in (
+        "past month", "last month", "recently", "you ve read", "you have read",
+    )):
+        saved = profile.get("recent_reading_response")
+        exact = profile.get("historical_application_answers") or {}
+        if not saved and isinstance(exact, dict):
+            saved = next((v for k, v in exact.items() if isinstance(v, str)
+                          and " ".join(re.sub(r"[^a-z0-9]+", " ", k.casefold()).split()) == normalized), None)
+        if not isinstance(saved, str) or not saved.strip():
+            raise ValueError("recent reading history is not in the profile; send this application to review")
+        return saved, "user-confirmed reading history"
+
+    # Creative prompts permit tone and motivation, not invented autobiography.
+    # These timeline markers turn prose into a factual life-history claim and
+    # therefore must already appear in the profile or resume.
+    personal_history_markers = (
+        "in high school", "during high school", "as a child", "growing up",
+        "when i was", "in university", "during university", "in college",
+        "during college",
+    )
+    unsupported_personal_history = [
+        phrase for phrase in personal_history_markers
+        if phrase in answer and phrase not in evidence
+    ]
+    if unsupported_personal_history and not narrative_authorized:
+        raise ValueError(
+            "free-form response contains unsupported autobiographical claims "
+            f"{unsupported_personal_history!r}; use only profile/resume facts "
+            "or send to review"
+        )
+
+    compensation_question = any(phrase in normalized for phrase in (
+        "salary", "compensation", "pay expectation", "expected pay",
+        "desired pay", "hourly rate", "expected rate", "desired rate",
+    ))
+    if compensation_question and answer in {
+        "nan", "n a", "na", "none", "null", "undefined", "unknown", "tbd",
+    }:
+        raise ValueError(
+            "invalid compensation placeholder; use the structured salary "
+            "policy or send this application to review"
+        )
 
     if "high school" in normalized and any(term in normalized for term in (
         "perform", "performance", "rank", "ranking", "score",
@@ -521,7 +755,7 @@ def _grounded_fill_value(
 
     if any(phrase in normalized for phrase in (
         "taught yourself", "self taught", "learned on your own",
-    )) and not any(phrase in evidence for phrase in (
+    )) and not narrative_authorized and not any(phrase in evidence for phrase in (
         "taught myself", "self taught", "learned on my own",
     )):
         raise ValueError(
@@ -531,7 +765,7 @@ def _grounded_fill_value(
     if any(phrase in normalized for phrase in (
         "how do you stay current", "how do you keep current",
         "how do you keep up with", "stay up to date",
-    )) and not profile.get("professional_learning_sources"):
+    )) and not narrative_authorized and not profile.get("professional_learning_sources"):
         raise ValueError(
             "professional learning sources are not in the structured profile; "
             "send this application to review"
@@ -554,7 +788,7 @@ def _grounded_fill_value(
         "daily", "every day", "weekly", "monthly", "last summer", "last year",
         "on call", "i follow", "i regularly", "recently",
     )
-    if historical_prompt:
+    if historical_prompt and not narrative_authorized:
         unsupported = [
             phrase for phrase in unsupported_history_markers
             if phrase in answer and phrase not in evidence
@@ -603,6 +837,18 @@ def _grounded_fill_value(
     # Some Greenhouse forms render a required Yes/No sponsorship question as
     # a plain text input. Bind it to the regional structured record instead of
     # accepting model-authored text.
+    if ((immigration_authorization_required_question(label) and 'sponsor' not in normalized) or any(phrase in normalized for phrase in (
+        'authorized to work', 'authorised to work', 'eligible to work', 'right to work',
+        'require sponsorship', 'need sponsorship',
+    ))) and not any(phrase in normalized for phrase in (
+        'explain', 'provide details', 'describe', 'what type', 'which visa',
+    )):
+        from .deterministic_questions import resolve_text_question
+        mapped = resolve_text_question(label, profile, job_locations=job_locations or ())
+        if mapped is not None:
+            if mapped.value is None:
+                raise ValueError('legal answer cannot be grounded: ' + mapped.reason)
+            return str(mapped.value), 'grounded legal text answer from structured regional facts'
     sponsorship_yes_no = (
         "sponsor" in normalized
         and re.search(
@@ -629,7 +875,15 @@ def _grounded_fill_value(
             region = "UK"
         elif "european union" in normalized or " eu " in padded:
             region = "EU"
-        if region is None:
+        residence_relative = any(phrase in normalized for phrase in (
+            "country you are based in", "country you re based in",
+            "country where you are based", "country where you currently reside",
+            "country you currently reside in", "your country of residence",
+            "location you currently reside", "location where you currently reside",
+        ))
+        if residence_relative:
+            region = _authorization_region_from_residence(profile)
+        elif region is None:
             region = _authorization_region_from_locations(job_locations)
         record = (profile.get("work_authorization") or {}).get(region or "")
         if isinstance(record, dict) and isinstance(
@@ -656,6 +910,7 @@ def _grounded_fill_value(
         "when can you start", "available to start", "availability date",
         "when are you available", "when would you be available",
         "employment start date", "job start date", "earliest possible start date",
+        "date available", "date of availability",
     )):
         grounded = datetime.now().date().isoformat()
         return grounded, f"grounded start date from profile: {grounded}"
@@ -682,6 +937,8 @@ def fill(
             loc.fill(value, timeout=10000)
         suffix = f"; {grounding_note}" if grounding_note else ""
         return _ok(f"filled {ref} ({len(value)} chars){suffix}")
+    except _OptionalNarrativeField:
+        return 'skipped: optional narrative field left unchanged'
     except Exception as e:
         return _err(f"fill {ref}: {type(e).__name__}: {e}")
 
@@ -714,6 +971,8 @@ def fill_many(
                 loc.fill(val, timeout=8000)
             suffix = f"; {grounding_note}" if grounding_note else ""
             out.append(f"  ok: {ref} ({len(val)} chars){suffix}")
+        except _OptionalNarrativeField:
+            out.append(f"  skipped: {ref} optional narrative field left unchanged")
         except Exception as e:
             out.append(f"  err: {ref} :: {type(e).__name__}: {e}")
     return f"fill_many ({len(fields)} fields):\n" + "\n".join(out)
@@ -745,8 +1004,7 @@ def fill_autocomplete(page: Page, ref: str, value: str) -> str:
     suggestion must be PICKED, not just typed — these widgets keep the real
     value in a hidden input (e.g. Lever's `selectedLocation`) and clear the
     visible field on submit if nothing was selected. Types keystroke-by-
-    keystroke so suggestion listeners fire, then clicks the first suggestion
-    (keyboard ArrowDown+Enter as fallback).
+    keystroke so suggestion listeners fire, then picks a rendered suggestion.
     """
     try:
         loc = _ref_locator(page, ref)
@@ -813,9 +1071,11 @@ def fill_autocomplete(page: Page, ref: str, value: str) -> str:
                 return selected.replace("pick_option", "fill_autocomplete", 1)
             picked = repr(options[0]["text"])
         else:
-            loc.press("ArrowDown")
-            loc.press("Enter")
-            picked = "keyboard ArrowDown+Enter (no suggestion list detected)"
+            return _err(
+                f"fill_autocomplete {ref}: no selectable suggestion rendered; "
+                "typed text is not a confirmed selection. Inspect the dropdown "
+                "or send to review; do not plain-fill or press Enter blindly."
+            )
         page.wait_for_timeout(500)
         final = (loc.evaluate(
             "el => el.value || el.getAttribute('data-applyd-picked') || ''"
@@ -864,6 +1124,19 @@ def open_dropdown(page: Page, ref: str) -> str:
     try:
         loc = _ref_locator(page, ref)
         tag = loc.evaluate("el => el.tagName.toLowerCase()", timeout=2000)
+        # A failed selection can leave a portal menu covering the next field.
+        # Close only a different owner; opening the same control is idempotent.
+        other_open = loc.evaluate("""el => Array.from(
+            document.querySelectorAll('[data-applyd-combobox-open="1"]')
+        ).some(other => other !== el)""")
+        if other_open is True:
+            page.keyboard.press("Escape")
+            page.evaluate("""() => {
+                document.querySelectorAll('[data-applyd-combobox-open]')
+                    .forEach(e => e.removeAttribute('data-applyd-combobox-open'));
+                document.querySelectorAll('[data-applyd-ref^="o"]')
+                    .forEach(e => e.removeAttribute('data-applyd-ref'));
+            }""")
         if tag == "select":
             options = loc.evaluate(
                 """el => {
@@ -1045,6 +1318,36 @@ def _normalize_option_text(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
 
 
+def _historical_production_claim(question: str) -> bool:
+    """Spot binary questions asserting specific past production/business work.
+
+    A related keyword in a resume does not prove the entire compound claim.
+    For instance, a shipped recommendation feature does not establish work on
+    advertising revenue, real production traffic, or conversion metrics.
+    """
+    text = _normalize_option_text(question)
+    return bool(
+        re.search(r"\b(?:have you|did you|do you have)\b", text)
+        and re.search(r"\b(?:built|deployed|shipped|worked on|experience with)\b", text)
+        and any(term in text for term in (
+            "production", "advertis", "ranking", "feedback signals",
+            "business metrics", "revenue", "conversion", "traffic",
+            "optimizes decisions",
+        ))
+    )
+
+
+def _historical_application_answer(profile: dict[str, Any], question: str) -> bool | None:
+    answers = profile.get("historical_application_answers") or {}
+    if not isinstance(answers, dict):
+        return None
+    normalized = _normalize_option_text(question)
+    for saved_question, answer in answers.items():
+        if _normalize_option_text(str(saved_question)) == normalized and isinstance(answer, bool):
+            return answer
+    return None
+
+
 def _recruitment_event_profile_guard(
     label: str,
     value: str,
@@ -1207,12 +1510,25 @@ def _date_profile_guard(
         "graduation date", "expected graduation", "graduation month",
         "graduation year",
     )):
+        if re.fullmatch(r'20\d{2}-\d{2}', expected_raw) and re.search(
+                r'\b(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]20\d{2}|[a-z]+\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+[a-z]+\s+20\d{2})\b',
+                value.casefold()):
+            return _err('date selection blocked: exact graduation day is not grounded in the month-only profile')
         if not expected:
             return _err(
                 "date selection blocked: expected graduation date is not in "
                 "the structured profile"
             )
         selected_range = _month_year_range(value)
+        # Separate month controls contain no year. Only accept this shape for
+        # an explicitly month-labeled field, against the authoritative date.
+        if "graduation month" in field and chosen in _MONTH_NUMBERS:
+            if _MONTH_NUMBERS[chosen] == expected[1]:
+                return None
+            return _err(
+                f"date selection blocked: {value!r} contradicts grounded "
+                f"graduation date {expected_raw!r}"
+            )
         if not selected and not selected_range:
             return _err(
                 f"date selection blocked: cannot prove {value!r} matches "
@@ -1305,6 +1621,12 @@ def _date_profile_guard(
 def _option_semantic(value: str) -> str | None:
     """Map common ATS wording variants to a conservative shared meaning."""
     text = _normalize_option_text(value)
+    if re.match(r"^(?:yes|true)\b", text):
+        return "boolean:yes"
+    if re.match(r"^i (?:agree|consent|accept|acknowledge)\b", text):
+        return "boolean:yes"
+    if re.match(r"^(?:no|false)\b", text):
+        return "boolean:no"
     if re.search(r"\bbachelor(?:s)?\b", text):
         return "degree:bachelor"
     if re.search(r"\bmaster(?:s)?\b", text):
@@ -1322,9 +1644,13 @@ def _option_semantic(value: str) -> str | None:
         return "source:company-careers"
     if any(phrase in text for phrase in (
         "prefer not to say", "decline to self identify", "decline to answer",
-        "do not wish to answer",
+        "do not wish to answer", "don t wish to answer",
     )):
         return "neutral:decline"
+    if text in {
+        "black", "black or african american", "black or of african descent",
+    }:
+        return "demographic:black-african-descent"
     return None
 
 
@@ -1357,6 +1683,18 @@ def _match_option(options: list[dict[str, str]], desired: str) -> dict[str, str]
         if len(equivalent) == 1:
             return equivalent[0]
     return None
+
+
+def _field_specific_option_value(field_label: str, desired: str) -> str:
+    """Translate a grounded value into an ATS-specific explicit option label."""
+    label = _normalize_option_text(field_label)
+    value = _normalize_option_text(desired)
+    if (
+        "held a u s security clearance in the past" in label
+        and value in {"no", "false"}
+    ):
+        return "N/A - have never held U.S. security clearance"
+    return desired
 
 
 def _read_options(page: Page) -> list[dict[str, str]]:
@@ -1394,8 +1732,141 @@ def _select_profile_guard(
             str(loc.get_attribute("data-applyd-question") or label).casefold(),
         ).split()
     )
+    degree_error = _degree_claim_guard(question, value, profile)
+    if degree_error:
+        return degree_error
+    recording_consent: bool | None = None
+    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    standing_consent = required_consent_authorized(question, profile, required=required)
+    if (
+        any(term in question for term in ("recording", "recorded", "record interview"))
+        and any(term in question for term in ("consent", "agree", "permission"))
+    ):
+        recording_consent = (profile.get("application_policy") or {}).get(
+            "interview_recording_consent"
+        )
+        if standing_consent:
+            recording_consent = True
+        if not isinstance(recording_consent, bool):
+            return _err(
+                f"select_option {ref}: interview-recording consent is not in "
+                "the structured profile; send to review"
+            )
     desired = _normalize_option_text(value)
-    location_text = " ".join(job_locations or []).casefold()
+    if immigration_authorization_required_question(question) and not re.search(r'\bsponsor', question):
+        answer = resolve_question(question, profile, {'yes': 'Yes', 'no': 'No'},
+                                  job_locations=job_locations or ())
+        actual = True if re.match(r'^(?:yes|true)\b', desired) else False if re.match(r'^(?:no|false)\b', desired) else None
+        if not isinstance(answer.value, bool) or actual is not answer.value:
+            return _err('visa/authorization requirement is not the same as current authorization; required fact not in the structured profile or semantically unsupported; unsupported answer blocked')
+        return None
+    if isinstance(recording_consent, bool):
+        says_yes = desired in {"yes", "true"} or desired.startswith("yes ")
+        says_no = desired in {"no", "false"} or desired.startswith("no ")
+        if (says_yes and not recording_consent) or (says_no and recording_consent):
+            return _err(
+                f"select_option {ref}: refused contradictory "
+                "interview-recording consent"
+            )
+    if not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', question + ' ' + label):
+        return _err(f'select_option {ref}: unusual legal attestation requires human review')
+
+    if _historical_production_claim(question):
+        recorded = _historical_application_answer(profile, question)
+        if not isinstance(recorded, bool):
+            return _err(
+                f"select_option {ref}: production/business-history claim is not "
+                "explicitly attested in historical_application_answers; send "
+                "this application to review"
+            )
+        says_yes = desired in {"yes", "true"} or desired.startswith("yes ")
+        says_no = desired in {"no", "false"} or desired.startswith("no ")
+        if (says_yes and not recorded) or (says_no and recorded):
+            return _err(
+                f"select_option {ref}: refused contradictory production/business-"
+                f"history answer {value!r}"
+            )
+
+    # Some location dropdowns bundle a neutral "none of these offices" choice
+    # with an additional exclusive preference claim.  Stripe, for example,
+    # offered "None of the above - I am only looking for a remote role".  The
+    # model selected it even though the profile explicitly allows onsite and
+    # hybrid work.  Do not let the absence of a truthful office option turn
+    # into a fabricated remote-only preference.
+    preferences = profile.get("employment_preferences") or {}
+    claims_remote_only = bool(
+        re.search(r"\b(?:only\s+(?:looking|interested)\s+for\s+(?:a\s+)?remote|remote\s+only)\b", desired)
+    )
+    open_to_non_remote = any(
+        preferences.get(key) is True
+        for key in (
+            "willing_to_work_onsite",
+            "willing_to_work_hybrid",
+            "willing_to_work_any_onsite_schedule",
+        )
+    )
+    if claims_remote_only and open_to_non_remote:
+        return _err(
+            f"select_option {ref}: refused false remote-only preference "
+            f"{value!r}; structured employment preferences allow onsite "
+            "or hybrid work. Choose a truthful non-exclusive option or send "
+            "to review."
+        )
+
+    language_proficiency_question = (
+        any(term in question for term in (
+            "language", "english", "french", "spanish", "german",
+            "portuguese", "mandarin", "cantonese",
+        ))
+        and any(term in question for term in (
+            "proficiency", "fluency", "fluent", "conversational", "cefr",
+        ))
+    )
+    if language_proficiency_question:
+        spoken_languages = [
+            _normalize_option_text(str(language))
+            for language in (profile.get("spoken_languages") or [])
+            if str(language).strip()
+        ]
+        proficiency = profile.get("language_proficiency")
+        if not isinstance(proficiency, dict) or not proficiency:
+            return _err(
+                f"select_option {ref}: language proficiency is not in the "
+                "structured profile; spoken_languages alone does not ground "
+                "native, bilingual, CEFR, or fluency claims. Send to review."
+            )
+        matching_values = [
+            str(level).strip()
+            for language, level in proficiency.items()
+            if _normalize_option_text(str(language)) in question
+            and str(level or "").strip()
+        ]
+        if not matching_values and len(proficiency) == 1:
+            matching_values = [
+                str(level).strip() for level in proficiency.values()
+                if str(level or "").strip()
+            ]
+        if not matching_values:
+            return _err(
+                f"select_option {ref}: no explicit proficiency is recorded "
+                "for the language in this question; send to review"
+            )
+        if "bilingual" in desired and len(spoken_languages) < 2:
+            return _err(
+                f"select_option {ref}: refused false bilingual claim {value!r}; "
+                "structured spoken_languages contains fewer than two languages"
+            )
+        recorded = {_normalize_option_text(level) for level in matching_values}
+        compatible = any(
+            desired == level or level in desired or desired in level
+            for level in recorded
+        )
+        if not compatible:
+            return _err(
+                f"select_option {ref}: refused ungrounded language proficiency "
+                f"{value!r}; use the explicit language_proficiency value or "
+                "send to review"
+            )
 
     if "high school" in question and any(term in question for term in (
         "perform", "performance", "rank", "ranking", "score",
@@ -1514,6 +1985,8 @@ def _select_profile_guard(
             else "sms_recruiting_consent"
         )
         consent = policy.get(policy_key)
+        if standing_consent:
+            consent = True
         if not isinstance(consent, bool):
             return _err(
                 f"select_option {ref}: recruiting communications consent is not "
@@ -1690,7 +2163,7 @@ def _select_profile_guard(
         any(term in f" {legal_context} " for term in (
             " uk ", " united kingdom ", " britain ",
         ))
-        or any(term in location_text for term in ("united kingdom", " uk", "london"))
+        or _authorization_region_from_locations(job_locations) == "UK"
     )
     sponsorship_question = bool(
         re.search(
@@ -1709,13 +2182,35 @@ def _select_profile_guard(
     ))
     legal_question = authorization_question or sponsorship_question
 
+    explicit_regions = _authorization_regions_from_text(legal_context)
+    if legal_question and len(explicit_regions) > 1:
+        records = profile.get("work_authorization") or {}
+        required_fact = (
+            "requires_sponsorship" if sponsorship_question else "authorized"
+        )
+        values = [
+            records.get(candidate, {}).get(required_fact)
+            for candidate in explicit_regions
+        ]
+        # A single Yes/No cannot faithfully encode conflicting country facts.
+        # Do not let question order (for example "U.S. or Canada") silently
+        # pick the first country and invert the applicant's truthful answer.
+        if (
+            all(isinstance(value, bool) for value in values)
+            and len(set(values)) > 1
+        ):
+            return _err(
+                f"select_option {ref}: mixed-jurisdiction legal question has "
+                "conflicting structured facts; send to review"
+            )
+
     # Work authorization is a consequential legal claim, so enforce it from
     # the structured profile rather than trusting the model's interpretation
     # of long ATS option labels. In particular, an option mentioning H-1B/F-1
     # can still assert that the applicant is *currently authorized*; merely
     # intending to need H-1B sponsorship does not make that statement true.
     padded_label = f" {legal_context} "
-    region = None
+    region = explicit_regions[0] if len(explicit_regions) == 1 else None
     if any(term in padded_label for term in (
         " united states ", " u s ", " usa ", " h1b ", " h 1b ",
     )):
@@ -1726,10 +2221,42 @@ def _select_profile_guard(
         region = "UK"
     elif "european union" in legal_context or " eu " in padded_label:
         region = "EU"
+    residence_relative = any(phrase in legal_context for phrase in (
+        "country you are based in", "country you re based in",
+        "country where you are based", "country where you currently reside",
+        "country you currently reside in", "your country of residence",
+        "location you currently reside", "location where you currently reside",
+    ))
     if legal_question and region is None:
-        region = _authorization_region_from_locations(job_locations)
+        selected_locations = _selected_application_locations(page)
+        region = (
+            _authorization_region_from_residence(profile)
+            if residence_relative
+            else _authorization_region_from_locations(
+                selected_locations or list(job_locations or [])
+            )
+        )
 
     auth_record = (profile.get("work_authorization") or {}).get(region or "")
+    # Never let an unresolved country silently bypass the legal guard. Known
+    # cities are mapped explicitly above; an unknown city remains review-only.
+    # The candidate's home country is used only for residence-relative wording.
+    if legal_question and region is None:
+        return _err(
+            f"select_option {ref}: legal answer blocked: work-authorization "
+            "country could not be established; send to review"
+        )
+    if legal_question and not isinstance(auth_record, dict):
+        return _err(
+            f"select_option {ref}: {region} authorization/sponsorship is not in "
+            "the structured profile; send to review"
+        )
+    required_fact = 'requires_sponsorship' if sponsorship_question else 'authorized'
+    if legal_question and not isinstance(auth_record.get(required_fact), bool):
+        return _err(
+            f"select_option {ref}: legal answer blocked: {region} "
+            f"{required_fact} is unknown; send to review"
+        )
     if legal_question and isinstance(auth_record, dict):
         denies_current_authorization = any(phrase in desired for phrase in (
             "not currently authorized", "not authorized", "not authorised",
@@ -1788,14 +2315,20 @@ def _select_profile_guard(
         option_sponsorship_claim = "sponsor" in desired
         if sponsorship_question or option_sponsorship_claim:
             requires = auth_record.get("requires_sponsorship")
-            says_yes = desired in {"yes", "true"} or any(
-                phrase in desired for phrase in ("require sponsorship", "need sponsorship")
-            )
-            says_no = desired in {"no", "false"} or any(
+            says_no = bool(re.match(r"^(no|false)\b", desired)) or any(
                 phrase in desired for phrase in (
                     "do not require sponsorship", "will not require sponsorship",
-                    "no sponsorship",
+                    "do not need sponsorship", "will not need sponsorship", "no sponsorship",
                 )
+            )
+            # Remove negative clauses before looking for affirmative claims.
+            # 'No, I do not / will not require sponsorship' is not a Yes.
+            affirmative = re.sub(
+                r"\b(?:do|does|will|would) not (?:require|need) sponsorship\b"
+                r"|\bno sponsorship\b", "", desired,
+            )
+            says_yes = bool(re.match(r"^(yes|true)\b", desired)) or any(
+                phrase in affirmative for phrase in ("require sponsorship", "need sponsorship")
             )
             if requires is True and says_no:
                 return _err(
@@ -1871,16 +2404,29 @@ def select_option(
         # Most answer dropdowns are short, and an exact/unique compatible choice
         # should be selected directly from their real labels.
         options = initial_options
-        matched = _match_option(options, value)
+        raw_field_label = str(loc.get_attribute("data-applyd-label") or "")
+        bound_value = _field_specific_option_value(raw_field_label, value)
+        matched = _match_option(options, bound_value)
+        if matched is None and profile:
+            rendered = {str(index): item.get("text", "") for index, item in enumerate(options)}
+            answer = resolve_question(
+                raw_field_label, profile, rendered, job_locations=job_locations or (),
+                company=company,
+                required=loc.get_attribute("aria-required") == "true"
+                    or loc.get_attribute("required") is not None,
+            )
+            if answer.choice in rendered:
+                matched = options[int(answer.choice)]
         if matched is None and profile:
             field_label = " ".join(
                 re.sub(
                     r"[^a-z0-9]+", " ",
-                    str(loc.get_attribute("data-applyd-label") or "").casefold(),
+                    raw_field_label.casefold(),
                 ).split()
             )
             if any(phrase in field_label for phrase in (
                 "how did you hear", "referral source", "source did you hear",
+                "how did you first learn about",
             )):
                 fallbacks = (
                     (profile.get("application_policy") or {}).get(
@@ -1908,11 +2454,11 @@ def select_option(
                 # component actually renders the matching real options.
                 loc.click(timeout=8000)
                 loc.fill("", timeout=8000)
-                loc.press_sequentially(value, delay=35, timeout=20000)
+                loc.press_sequentially(bound_value, delay=35, timeout=20000)
                 page.wait_for_timeout(1200)
                 page.evaluate(_OPTIONS_JS)
                 options = _read_options(page)
-                matched = _match_option(options, value)
+                matched = _match_option(options, bound_value)
                 searched = True
         if matched is None:
             # A failed Greenhouse catalog search leaves the combobox filtered
@@ -2326,7 +2872,29 @@ def _post_submit_result(page: Page, ref: str, verify_ctx: dict | None, submitted
     )
 
 
-def submit(page: Page, ref: str, test_mode: bool, verify_ctx: dict | None = None) -> str:
+def submit(page: Page, ref: str, test_mode: bool, verify_ctx: dict | None = None,
+           profile: dict[str, Any] | None = None) -> str:
+    if profile:
+        try:
+            companies = page.evaluate(r"""() => [...document.querySelectorAll('input,textarea')]
+              .filter(e=>e.type!=='hidden' && (e.getBoundingClientRect().width || e.getBoundingClientRect().height))
+              .map(e=>({label:e.getAttribute('data-applyd-label') || e.getAttribute('aria-label') || '', value:e.value || ''}))
+              .filter(e=>e.label.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim()==='current company' && e.value)""")
+            expected_company = profile.get('current_company')
+            for field in companies:
+                if isinstance(expected_company, str) and field['value'].strip() != expected_company.strip():
+                    return _err('submit: current company differs from the structured profile; submission not attempted')
+            dates = page.evaluate(r"""() => [...document.querySelectorAll('input,textarea,select')]
+              .filter(e=>e.type!=='hidden' && (e.getBoundingClientRect().width || e.getBoundingClientRect().height))
+              .map(e=>({label:e.getAttribute('data-applyd-label') || e.getAttribute('aria-label') || '',
+                        value:(e.tagName==='SELECT' ? e.selectedOptions[0]?.text : e.value) || ''}))
+              .filter(e=>/graduat/i.test(e.label) && /date|month|year/i.test(e.label) && e.value)""")
+            for field in dates:
+                error = _date_profile_guard(field['label'], field['value'], profile)
+                if error:
+                    return error + '; submission not attempted'
+        except Exception as exc:
+            return _err(f'submit: could not verify graduation dates: {type(exc).__name__}; submission not attempted')
     try:
         control = _ref_locator(page, ref).evaluate(
             """el => ({
@@ -2343,7 +2911,13 @@ def submit(page: Page, ref: str, test_mode: bool, verify_ctx: dict | None = None
         (control.get("tag") == "input" and control.get("type") in {"submit", "image"})
         or (
             control.get("tag") == "button"
-            and re.search(r"\b(submit|apply|send)\b", control.get("text") or "")
+            and (
+                re.search(r"\b(submit|send)\b", control.get("text") or "")
+                or (
+                    control.get("inForm")
+                    and re.search(r"\bapply\b", control.get("text") or "")
+                )
+            )
         )
     )
     if not valid_control:
@@ -2458,7 +3032,13 @@ def dispatch(
     if name == "fill_many":
         return fill_many(page, args["fields"], profile, resume_text, job_locations)
     if name == "fill_autocomplete":
-        return fill_autocomplete(page, args["ref"], args["value"])
+        try:
+            value, _ = _grounded_fill_value(page, args['ref'], args['value'], profile, resume_text, job_locations)
+        except _OptionalNarrativeField:
+            return 'skipped: optional narrative field left unchanged'
+        except ValueError as exc:
+            return _err(f'fill_autocomplete {args["ref"]}: {exc}')
+        return fill_autocomplete(page, args["ref"], value)
     if name == "click_many":
         return click_many(page, args["refs"], profile, job_locations)
     if name == "open_dropdown":
@@ -2491,14 +3071,21 @@ def dispatch(
             page, args["ref"], args["content"], profile, company, title
         )
     if name == "submit":
-        result = submit(page, args["ref"], test_mode, verify_ctx=verify_ctx)
+        result = submit(page, args["ref"], test_mode, verify_ctx=verify_ctx, profile=profile)
         if result.startswith("error:"):
             # ATS validation/spam errors commonly rerender the form and destroy
             # every data-applyd-ref. Returning a fresh snapshot prevents the
             # model from retrying a stale submit ref on the changed document.
-            page.wait_for_timeout(500)
-            result += "\nDOM refreshed after failed submit; use only these new refs:\n"
-            result += snapshot(page)
+            try:
+                page.wait_for_timeout(500)
+                refreshed = snapshot(page)
+            except Exception as exc:
+                # Preserve the original submission outcome. Never retry a
+                # submission just because its browser disappeared afterward.
+                result += f"\nDOM refresh unavailable: {type(exc).__name__}"
+            else:
+                result += "\nDOM refreshed after failed submit; use only these new refs:\n"
+                result += refreshed
         return result
     return _err(f"unknown tool: {name}")
 

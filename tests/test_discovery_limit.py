@@ -22,6 +22,13 @@ def _job(index: int, posted_at: datetime | None) -> Job:
 
 
 class DiscoveryLimitTests(unittest.TestCase):
+    def test_new_only_limit_skips_existing_freshest_records(self) -> None:
+        now = datetime.now(timezone.utc)
+        jobs = [_job(1, now), _job(2, now - timedelta(days=1)),
+                _job(3, now - timedelta(days=2))]
+        kept = _freshest_within_limit(jobs, written=0, limit=1, existing_ids={"1"})
+        self.assertEqual(["2"], [job.id for job in kept])
+
     def test_branded_greenhouse_url_gets_canonical_retrieval_route(self) -> None:
         item = _job(1, datetime.now(timezone.utc))
         item.external_id = "12345"

@@ -10,6 +10,8 @@ from applyd.tailor.structured import (
     StructuredTailorClient,
     TailorCallTimeout,
     TailorPlanError,
+    normalize_empty_plan_entries,
+    trim_plan_for_layout,
     escape_latex,
     render_latex,
 )
@@ -59,6 +61,52 @@ def plan() -> dict:
 
 
 class TailorRendererTests(unittest.TestCase):
+    def test_layout_trim_retains_source_content_and_every_entry(self) -> None:
+        def bullet(value):
+            return {"source_ids": [value], "segments": [{"text": value, "style": "plain"}]}
+        original = {
+            "experience_order": ["required"],
+            "experiences": [{"id": "required", "bullets": [bullet("a"), bullet("b")]}],
+            "project_order": ["project"],
+            "projects": [{"id": "project", "bullets": [bullet("c"), bullet("d"), bullet("e")]}],
+        }
+        compact = trim_plan_for_layout(original)
+        self.assertEqual(original["projects"][0]["bullets"][:2], compact["projects"][0]["bullets"])
+        self.assertEqual(3, len(original["projects"][0]["bullets"]))
+        while (next_plan := trim_plan_for_layout(compact)) is not None:
+            compact = next_plan
+        self.assertEqual(["required"], compact["experience_order"])
+        self.assertEqual(["project"], compact["project_order"])
+        self.assertEqual([bullet("a")], compact["experiences"][0]["bullets"])
+        self.assertEqual([bullet("c")], compact["projects"][0]["bullets"])
+
+    def test_empty_optional_entries_are_dropped_and_required_is_grounded(self) -> None:
+        resume = {
+            "tailoring_policy": {"required_experience_ids": ["required"]},
+            "experience": [
+                {"id": "required", "bullets": [{"id": "r1", "text": "Built API"}]},
+                {"id": "optional", "bullets": [{"id": "o1", "text": "Tested UI"}]},
+            ],
+            "projects": [{"id": "project", "bullets": [{"id": "p1", "text": "Made tool"}]}],
+        }
+        plan = {
+            "experience_order": ["required", "optional"],
+            "experiences": [
+                {"id": "required", "bullets": []},
+                {"id": "optional", "bullets": []},
+            ],
+            "project_order": ["project"],
+            "projects": [{"id": "project", "bullets": []}],
+        }
+
+        normalized = normalize_empty_plan_entries(resume, plan)
+
+        self.assertEqual(normalized["experience_order"], ["required"])
+        self.assertEqual(normalized["project_order"], [])
+        bullet = normalized["experiences"][0]["bullets"][0]
+        self.assertEqual(bullet["source_ids"], ["r1"])
+        self.assertEqual(bullet["segments"][0]["text"], "Built API")
+
     @unittest.skipUnless(hasattr(signal, "SIGALRM"), "requires SIGALRM")
     def test_openrouter_call_has_total_wall_clock_deadline(self) -> None:
         client = StructuredTailorClient.__new__(StructuredTailorClient)
@@ -143,6 +191,19 @@ class TailorRendererTests(unittest.TestCase):
             )
             _, errors = render_latex(resume, invalid, template)
         self.assertTrue(any("preserve source order" in error for error in errors))
+
+    def test_rejects_ungrounded_tailored_skills(self) -> None:
+        invalid = plan()
+        invalid["skills"] = {"Languages": ["Python", "Swift"]}
+        with tempfile.TemporaryDirectory() as temp:
+            template = Path(temp) / "template.tex"
+            template.write_text(
+                "%%APPLYD_HEADER%%\n%%APPLYD_EDUCATION%%\n%%APPLYD_EXPERIENCE%%\n"
+                "%%APPLYD_PROJECTS%%\n%%APPLYD_SKILLS%%",
+                encoding="utf-8",
+            )
+            _, errors = render_latex(RESUME, invalid, template)
+        self.assertTrue(any("ungrounded skill 'Swift'" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -3,12 +3,12 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from applyd.eligibility import evaluate_job
 from applyd.enrichment.extract import JobExtractor, normalize_facts
 from applyd.models import Job
-from applyd.commands.enrich import _is_credit_budget_error
+from applyd.commands.enrich import _is_credit_budget_error, cmd_enrich
 
 
 def job(title: str = "Software Engineer", locations: list[str] | None = None) -> Job:
@@ -21,6 +21,40 @@ def job(title: str = "Software Engineer", locations: list[str] | None = None) ->
 
 
 class ExtractionEligibilityTests(unittest.TestCase):
+    def test_applicant_sponsorship_question_is_not_employer_refusal(self) -> None:
+        question = 'Will you now, or in the future, require sponsorship to legally work in the U.S.?'
+        facts = normalize_facts(
+            {"sponsorship": {"value": "unavailable", "countries": ["US"], "evidence": question}},
+            title="Associate Software Developer", description=question,
+        )
+        self.assertEqual("not_stated", facts["sponsorship"]["value"])
+        result = evaluate_job(job(locations=["United States"]), facts, {
+            "work_authorization": {"US": {"authorized": False, "requires_sponsorship": True}}
+        })
+        self.assertEqual("eligible", result.decision)
+
+    def test_auth_rejection_stops_queue_without_individual_retries(self) -> None:
+        class AuthError(Exception):
+            status_code = 401
+
+        jobs = [job() for _ in range(20)]
+        for index, item in enumerate(jobs):
+            item.id = str(index)
+            item.description = "Grounded source job description. " * 30
+        repo = Mock()
+        repo.iter_unclassified.return_value = iter(jobs)
+        extractor = Mock()
+        extractor.extract_many.side_effect = AuthError("User not found")
+        args = SimpleNamespace(classify_backfill=True, source=None, limit=0,
+                               dry_run=False, workers=1, batch_size=5)
+        with patch("applyd.commands.enrich.load_env"), \
+             patch("applyd.commands.enrich.get_local_store", return_value=repo), \
+             patch("applyd.commands.enrich.JobExtractor", return_value=extractor):
+            self.assertEqual(3, cmd_enrich(args))
+        self.assertEqual(1, extractor.extract_many.call_count)
+        extractor.extract.assert_not_called()
+        repo.set_classification.assert_not_called()
+
     def test_grounded_excluded_role_family_is_ineligible(self) -> None:
         result = evaluate_job(
             job(title="Business Data Analyst"),

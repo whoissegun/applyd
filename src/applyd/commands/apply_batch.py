@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import load_env
 from ..deduplication import canonical_ats_identity
+from ..eligibility import academic_policy_reasons
 from ..discovery.routing import DEFAULT_EXCLUDED_ATS, detect_ats, preferred_apply_url
 from ..liveness import check_jobs_liveness
 from ..local_store import get_local_store
@@ -60,6 +61,12 @@ def _failure_category(attempt: dict[str, Any] | None) -> str | None:
     reason = str(attempt.get("reason") or "").lower()
     if reason.startswith("gated:captcha"):
         return "captcha"
+    if reason.startswith("review:agent_stall") or "hit max_turns=" in reason:
+        # Still consumes the existing safety-stop budget, but reports the
+        # actual cause rather than blaming browser infrastructure.
+        return "agent_stall"
+    if reason.startswith("review:policy_guard"):
+        return "policy_guard"
     if "repeated_tool_failure" in reason:
         return "tool_failure"
     if attempt.get("status") in {"failed", "infra_error"}:
@@ -104,6 +111,7 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
     """Tailor and apply serially, with one CAPTCHA-only Bright Data fallback."""
     load_env()
     store = get_local_store()
+    profile_record = store.get_profile()
     ranked = list(
         store.iter_ranked_matches(
             limit=_candidate_scan_limit(args.top), minimum_score=args.minimum_score
@@ -151,6 +159,9 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         ):
             break
         job_id = row["job_id"]
+        first_seen_on = getattr(args, "first_seen_on", None)
+        if first_seen_on and not str(row.get("first_seen_at") or "").startswith(first_seen_on):
+            continue
         if not _eligible_evaluation(store.get_evaluation(job_id)):
             continue
         company_key = str(row["company"]).casefold()
@@ -171,6 +182,11 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         job = store.get(job_id)
         if job is None:
             continue
+        if profile_record:
+            academic_blockers = academic_policy_reasons(job, store.get_facts(job.id) or {}, profile_record[0])
+            if academic_blockers:
+                store.set_evaluation(job.id, "ineligible", academic_blockers, profile_record[1])
+                continue
         identity = canonical_ats_identity(job)
         if identity is not None and identity in prior_identities:
             continue
@@ -287,7 +303,11 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
             liveness_ttl_minutes=0,
             max_cost_usd=args.max_cost_usd,
         )
-        primary_provider = _primary_browser_provider(ats, test_mode=args.test_mode)
+        browser_policy = getattr(args, "browser", "auto")
+        primary_provider = (
+            _primary_browser_provider(ats, test_mode=args.test_mode)
+            if browser_policy == "auto" else browser_policy
+        )
         if primary_provider == "brightdata":
             print(
                 "  ↳ Lever route: starting directly with Bright Data",

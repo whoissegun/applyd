@@ -24,6 +24,10 @@ def _is_credit_budget_error(exc: BaseException) -> bool:
     return "in_flight_budget_exhausted" in text or "requires more credits" in text
 
 
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    return getattr(exc, "status_code", None) in {401, 403}
+
+
 def _retrieval_url(job: Job) -> str:
     return str(job.raw.get("_applyd_retrieval_url") or job.url)
 
@@ -46,6 +50,9 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         )
     )
     for job in source_iter:
+        first_seen_on = getattr(args, "first_seen_on", None)
+        if first_seen_on and job.first_seen_at.date().isoformat() != first_seen_on:
+            continue
         if args.source and job.source != args.source:
             continue
         if not job.url and not extract_only:
@@ -189,6 +196,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
     extraction_stats = {"ok": 0, "failed": 0, "requests": 0, "fallback": 0}
     extraction_cost = 0.0
     credit_exhausted = False
+    provider_auth_failed = False
     if use_extractor and described:
         try:
             extractor = JobExtractor()
@@ -245,7 +253,15 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                                 work.appendleft([jobs_by_id[job_id]])
                                 extraction_stats["fallback"] += 1
                         except Exception as exc:  # noqa: BLE001
-                            if _is_credit_budget_error(exc):
+                            if _is_provider_auth_error(exc):
+                                provider_auth_failed = True
+                                extraction_stats["failed"] += len(batch)
+                                print(
+                                    "  ⚠ OpenRouter authentication rejected; "
+                                    "stopping new extraction requests; update OPENROUTER_API_KEY",
+                                    file=sys.stderr,
+                                )
+                            elif _is_credit_budget_error(exc):
                                 credit_exhausted = True
                                 extraction_stats["failed"] += len(batch)
                                 print(
@@ -266,7 +282,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                                     f"{type(exc).__name__}: {str(exc)[:240]}",
                                     file=sys.stderr,
                                 )
-                    while work and len(pending) < workers and not credit_exhausted:
+                    while work and len(pending) < workers and not (credit_exhausted or provider_auth_failed):
                         batch = work.popleft()
                         pending[pool.submit(extract_batch, batch)] = batch
 
@@ -280,4 +296,4 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         f"Kimi=${extraction_cost:.4f}",
         file=sys.stderr,
     )
-    return 3 if credit_exhausted else 0
+    return 3 if credit_exhausted or provider_auth_failed else 0

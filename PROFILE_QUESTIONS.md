@@ -122,6 +122,14 @@ These are consequential legal facts. Unknown answers must go to review.
     non-competes, conflicts, regulated-industry relationships, or government
     employment facts that require a saved truthful answer?
 
+If an application asks a specific Yes/No question about production deployments,
+advertising or ranking systems, feedback optimization, real user traffic, or
+revenue/conversion impact, record your explicitly verified answer in
+`historical_application_answers` using the exact question text as the key and
+a JSON boolean as the value. Leave it out for review if the compound claim is
+not fully supported; a related technology or metric on your resume does not
+answer every part of the question.
+
 ### 8. Relationships and background defaults
 
 29. May applyd assume no immediate family member works for the target company

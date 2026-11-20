@@ -816,7 +816,7 @@ class LocalStore:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT m.*, j.company, j.title, j.url, j.locations_json,
-                          j.posted_at, j.source
+                          j.posted_at, j.source, j.first_seen_at
                    FROM match_scores m JOIN jobs j ON j.id=m.job_id
                    LEFT JOIN job_duplicates d ON d.job_id=m.job_id
                    WHERE m.score>=? AND d.job_id IS NULL AND j.active=1
@@ -832,6 +832,7 @@ class LocalStore:
                 "url": row["url"],
                 "locations": _loads(row["locations_json"], []),
                 "posted_at": row["posted_at"],
+                "first_seen_at": row["first_seen_at"],
                 "source": row["source"],
                 "score": row["score"],
                 "band": row["band"],

@@ -86,13 +86,68 @@ def _work_authorization(profile: dict[str, Any], country: str) -> Any:
     return None
 
 
+def academic_policy_reasons(job: Job, facts: dict[str, Any], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Exclude required postgraduate education, not preferred degrees or alternatives."""
+    excluded = set((profile.get("preferences") or {}).get("excluded_required_education") or [])
+    education = facts.get("education") or {}
+    if not isinstance(education, dict):
+        return []
+    level = {"masters_required": "masters", "doctorate_required": "doctorate"}.get(education.get("value"))
+    if level not in excluded:
+        return []
+    evidence = str(education.get("evidence") or "").strip()
+    normalize = lambda value: " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+    # Do not trust a stale boolean flag alone: recheck the actual source quote.
+    source = f"{job.title}\n{job.description or ''}"
+    if not evidence or " ".join(evidence.casefold().split()) not in " ".join(source.casefold().split()):
+        return []
+    text = normalize(evidence)
+    degree_pattern = (r"\b(?:master(?: s|s)?|m s|ms(?! excel)|m sc|msc|m eng|meng|mba|m b a)\b"
+                      if level == "masters" else r"\b(?:ph ?d|doctorate|doctoral|doctor of philosophy|dphil)\b")
+    if (re.search(degree_pattern + r"(?:(?!\b(?:required|must|minimum|essential)\b).){0,60}\b(?:preferred|desired|desirable|a plus)\b", text)
+            or re.search(r"\b(?:preferred|desired|desirable)\b.{0,30}" + degree_pattern, text)):
+        return []
+    bachelor = r"\b(?:bachelor(?: s|s)?|b s|b a|bs|ba|bsc|beng|undergraduate)\b"
+    advanced = r"\b(?:master(?: s|s)?|m s|ms|m sc|msc|m eng|meng|mba|m b a|ph ?d|doctorate|doctoral|doctor of philosophy|dphil)\b"
+    if re.search(bachelor, text):
+        alternatives = (re.search(bachelor + r".{0,100}\bor\b.{0,40}" + advanced, text)
+                        or re.search(advanced + r".{0,100}\bor\b.{0,40}" + bachelor, text)
+                        or '/' in evidence)
+        if alternatives or not re.search(advanced, text) or not re.search(
+            r"\b(?:required|must|minimum|need|at least|essential|and)\b", text
+        ):
+            return []
+    if re.search(r"\bor\b.{0,30}\bequivalent\b.{0,30}\bexperience\b", text):
+        return []
+    if re.search(r"\bor\s+(?:an?\s+)?early career\s+(?:researcher|engineer)", text):
+        return []
+    # 'Preferably from a top university' qualifies the institution, not the
+    # required degree. Only neutralize preference language about the degree.
+    if re.search(r"\b(?:preferred|desirable|nice to have|bonus|a plus)\b", text) and not re.search(
+        r"\b(?:required|must|minimum|need|at least|essential)\b", text
+    ):
+        return []
+    if not re.search(degree_pattern, text):
+        return []
+    # Catch a shortened model quote such as "Master's degree" when the source
+    # immediately continues with "preferred".
+    flat_source = " ".join(source.casefold().split())
+    quote = " ".join(evidence.casefold().split())
+    end = flat_source.find(quote) + len(quote)
+    if re.match(r"\s*(?:is\s+|are\s+)?(?:strongly\s+)?(?:preferred|desirable)\b", flat_source[end:]):
+        return []
+    return [{"code": "required_education_excluded", "job_value": level,
+             "job_evidence": evidence, "user_rule": sorted(excluded),
+             "user_fact": profile.get("academic_status") or profile.get("degree")}]
+
+
 def evaluate_job(
     job: Job,
     facts: dict[str, Any],
     profile: dict[str, Any],
 ) -> EligibilityResult:
     preferences = profile.get("preferences") or {}
-    blockers: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = academic_policy_reasons(job, facts, profile)
     uncertainties: list[dict[str, Any]] = []
 
     role_family_fact = facts.get("role_family") or {}

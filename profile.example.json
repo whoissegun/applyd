@@ -16,6 +16,7 @@
   "school": "Carleton University",
   "current_company": null,
   "degree": "Bachelor of Computer Science",
+  "academic_status": {"level": "bachelors", "status": "in_progress"},
   "major": "Computer Science",
   "degree_focus_areas": [],
   "expected_grad_date": "2027-04",
@@ -28,6 +29,7 @@
   "citizenships": [],
   "spoken_languages": ["English"],
   "language_proficiency": {},
+  "historical_application_answers": {},
   "over_18": true,
   "security_clearances": [],
   "years_professional_experience": 1,
@@ -72,6 +74,7 @@
     "most_recent_citizenship_or_permanent_residency": "non-U.S. country"
   },
   "preferences": {
+    "excluded_required_education": [],
     "allowed_seniority": ["intern", "new_grad", "entry", "mid", "senior", "staff_plus", "manager"],
     "allow_internships": true,
     "excluded_role_families": [],
@@ -103,6 +106,8 @@
     "excluded_locations": []
   },
   "application_policy": {
+    "required_consents": false,
+    "required_narrative_invention": false,
     "optional_cover_letter": "skip",
     "required_cover_letter": "generate_from_grounded_facts_and_upload",
     "optional_free_text": "skip",
