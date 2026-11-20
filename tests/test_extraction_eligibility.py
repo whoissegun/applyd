@@ -42,6 +42,7 @@ class ExtractionEligibilityTests(unittest.TestCase):
             item.id = str(index)
             item.description = "Grounded source job description. " * 30
         repo = Mock()
+        repo.get_profile.return_value = None
         repo.iter_unclassified.return_value = iter(jobs)
         extractor = Mock()
         extractor.extract_many.side_effect = AuthError("User not found")
@@ -54,6 +55,49 @@ class ExtractionEligibilityTests(unittest.TestCase):
         self.assertEqual(1, extractor.extract_many.call_count)
         extractor.extract.assert_not_called()
         repo.set_classification.assert_not_called()
+
+    def _extract_run(self, pending, unclassified, profile=None, **overrides):
+        repo = Mock()
+        repo.get_profile.return_value = (profile, "hash") if profile else None
+        repo.iter_pending_enrichment.return_value = iter(pending)
+        repo.iter_unclassified.return_value = iter(unclassified)
+        extractor = Mock()
+        extractor.extract.return_value = SimpleNamespace(
+            facts={}, model="m", cost_usd=0.0)
+        args = SimpleNamespace(classify_backfill=False, source=None, limit=0,
+                               dry_run=False, workers=1, batch_size=1,
+                               retry_failed=False, first_seen_on=None,
+                               no_browser=True, no_extract=False)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        with patch("applyd.commands.enrich.load_env"), \
+             patch("applyd.commands.enrich.get_local_store", return_value=repo), \
+             patch("applyd.commands.enrich.JobExtractor", return_value=extractor):
+            cmd_enrich(args)
+        return repo, extractor
+
+    def test_enrich_extracts_recent_source_descriptions_but_not_stale(self) -> None:
+        recent = job("Backend Engineer")
+        recent.id = "recent"
+        recent.description = "Source-provided ATS description. " * 30
+        stale = job("Platform Engineer")
+        stale.id = "stale"
+        stale.description = recent.description
+        stale.last_seen_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        repo, extractor = self._extract_run([], [recent, stale])
+        titles = [call.args[0] for call in extractor.extract.call_args_list]
+        self.assertEqual(["Backend Engineer"], titles)
+        repo.set_classification.assert_called_once()
+
+    def test_title_excluded_jobs_skip_fetch_and_extraction(self) -> None:
+        excluded = job("Data Engineer")
+        excluded.id = "data"
+        excluded.description = "Source-provided ATS description. " * 30
+        profile = {"preferences": {"exclude_title_patterns": [r"\bdata\b"]}}
+        repo, extractor = self._extract_run([excluded], [excluded], profile)
+        extractor.extract.assert_not_called()
+        extractor.extract_many.assert_not_called()
+        repo.mark_enriched.assert_not_called()
 
     def test_grounded_excluded_role_family_is_ineligible(self) -> None:
         result = evaluate_job(

@@ -141,6 +141,23 @@ def academic_policy_reasons(job: Job, facts: dict[str, Any], profile: dict[str, 
              "user_fact": profile.get("academic_status") or profile.get("degree")}]
 
 
+def title_exclusion_match(title: str, profile: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (pattern, matched text) for the first user title exclusion hit.
+
+    Title exclusions need no extracted facts, so enrichment calls this before
+    paying for retrieval or Kimi extraction.
+    """
+    preferences = profile.get("preferences") or {}
+    for pattern in preferences.get("exclude_title_patterns") or []:
+        try:
+            matched = re.search(str(pattern), title or "", re.IGNORECASE)
+        except re.error:
+            continue
+        if matched:
+            return str(pattern), matched.group(0)
+    return None
+
+
 def evaluate_job(
     job: Job,
     facts: dict[str, Any],
@@ -198,19 +215,15 @@ def evaluate_job(
             }
         )
 
-    for pattern in preferences.get("exclude_title_patterns") or []:
-        try:
-            matched = re.search(str(pattern), job.title, re.IGNORECASE)
-        except re.error:
-            continue
-        if matched:
-            blockers.append(
-                {
-                    "code": "title_excluded",
-                    "job_evidence": matched.group(0),
-                    "user_rule": str(pattern),
-                }
-            )
+    title_match = title_exclusion_match(job.title, profile)
+    if title_match:
+        blockers.append(
+            {
+                "code": "title_excluded",
+                "job_evidence": title_match[1],
+                "user_rule": title_match[0],
+            }
+        )
 
     seniority = _fact(facts, "seniority", "unknown")
     allowed = preferences.get("allowed_seniority")
