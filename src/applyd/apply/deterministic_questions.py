@@ -739,7 +739,27 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                     "this employer", "this company", "our company", "worked for us",
                     "employed by us", "work for us",
                 )):
-                    return _review(options, "prior_company", "question names a different employer")
+                    # The question names some other employer or alias (e.g.
+                    # "SPE or one of its Sony Affiliates" for Sony Pictures
+                    # Imageworks). The resume is the full employment history,
+                    # so the answer is "no" unless a resume employer is named
+                    # or the question asks about a business relationship.
+                    named_resume_employer = any(
+                        _employer_name(name) and re.search(
+                            rf"\b{re.escape(_employer_name(name))}\b", text)
+                        for name in employers
+                    )
+                    relationship = re.search(
+                        r"\b(?:competitor|client|customer|vendor|supplier|partner|contractor)s?\b",
+                        text,
+                    )
+                    if named_resume_employer or relationship:
+                        return _review(options, "prior_company", "question names a different employer")
+                    employed = False
+                    if re.search(r"\b(?:never|not)\b.*\b(?:worked|employed)\b", text):
+                        employed = True
+                    return _result(options, employed, "prior_company",
+                                   "named employer is absent from the full source resume employer list")
                 employed = any(_employer_name(name) == target for name in employers)
                 if current_employment and employed:
                     current = profile.get('current_company')

@@ -282,8 +282,11 @@ _SNAPSHOT_JS = r"""() => {
         const ariaby = el.getAttribute('aria-labelledby');
         let labeledBy = '';
         if (ariaby) {
-            const labeler = document.getElementById(ariaby);
-            if (labeler) labeledBy = labeler.innerText || '';
+            // aria-labelledby is a space-separated id list (Workable's resume
+            // input uses "<label-id> <description-id>").
+            labeledBy = ariaby.trim().split(/\s+/)
+                .map(id => (document.getElementById(id)?.innerText || '').trim())
+                .filter(Boolean).join(' ');
         }
         const wrappedLabel = el.closest('label');
         const choiceRole = ['radio', 'checkbox'].includes(el.getAttribute('role'));
@@ -2509,6 +2512,7 @@ def _resume_upload_guard(page: Page, ref: str) -> str | None:
             );
             return {
                 id: el.id || '', name: el.getAttribute('name') || '',
+                dataui: el.getAttribute('data-ui') || '',
                 aria: el.getAttribute('aria-label') || '',
                 direct: direct?.innerText || el.closest('label')?.innerText || '',
                 context: (scope?.innerText || '').slice(0, 500)
@@ -2519,7 +2523,7 @@ def _resume_upload_guard(page: Page, ref: str) -> str | None:
     if not isinstance(details, dict):
         details = {}
     local_identity = " ".join(str(details.get(key) or "") for key in (
-        "id", "name", "aria", "direct",
+        "id", "name", "dataui", "aria", "direct",
     ))
     combined = " ".join((label, local_identity, str(details.get("context") or "")))
     normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", combined.casefold()).split())

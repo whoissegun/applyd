@@ -248,6 +248,27 @@ class DeterministicQuestionTests(unittest.TestCase):
         )
         self.assertEqual("relocate", result.choice)
 
+    def test_employer_alias_absent_from_resume_answers_no(self) -> None:
+        profile = {
+            "background_defaults": {"never_employed_by_target_unless_listed_on_resume": True},
+            "resume_employers": ["Lyft", "Shopify"],
+        }
+        options = {"yes": "Yes", "no": "No", "review": "Review"}
+        company = "Sony Pictures Imageworks"
+        self.assertEqual("no", resolve_question(
+            "Were you ever employed by SPE or one of its Sony Affiliates? *",
+            profile, options, company=company,
+        ).choice)
+        # A resume employer or a business relationship still needs review.
+        for question in (
+            "Have you ever worked for Shopify or a Sony affiliate?",
+            "Have you ever been employed by a Sony client or vendor?",
+        ):
+            with self.subTest(question=question):
+                self.assertEqual("review", resolve_question(
+                    question, profile, options, company=company,
+                ).choice)
+
     def test_employment_history_uses_full_resume_employers(self) -> None:
         profile = {
             "background_defaults": {"never_employed_by_target_unless_listed_on_resume": True},
@@ -270,8 +291,12 @@ class DeterministicQuestionTests(unittest.TestCase):
             "Have you worked for the US government and had oversight over Anduril?",
             profile, options, company="Anduril",
         ).choice)
-        self.assertEqual("review", resolve_question(
+        # The resume is the full employment history: an unlisted employer is "no".
+        self.assertEqual("no", resolve_question(
             "Have you worked for Google?", profile, options, company="Lyft",
+        ).choice)
+        self.assertEqual("review", resolve_question(
+            "Have you worked for Google or Shopify?", profile, options, company="Lyft",
         ).choice)
 
     def test_required_consent_does_not_change_optional_or_factual_answers(self) -> None:

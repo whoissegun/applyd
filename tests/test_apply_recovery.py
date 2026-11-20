@@ -204,3 +204,16 @@ class RecoveryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RequiredResumeGuardTests(unittest.TestCase):
+    def test_only_literal_true_blocks_submit(self) -> None:
+        from unittest.mock import MagicMock
+        from applyd.apply.runner import _required_resume_input_empty
+        for returned, expected in ((True, True), (False, False), (MagicMock(), False)):
+            page = MagicMock()
+            page.evaluate.return_value = returned
+            self.assertIs(expected, _required_resume_input_empty(page))
+        page = MagicMock()
+        page.evaluate.side_effect = RuntimeError("detached")
+        self.assertFalse(_required_resume_input_empty(page))

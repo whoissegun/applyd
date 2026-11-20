@@ -362,6 +362,7 @@ def run_apply(
     nudged = False
     submit_confirmed_turn: int | None = None
     submit_confirmation_note = ""
+    resume_uploaded = False
     failed_action_counts: dict[str, int] = {}
     event_sequence = 0
     preflight_required = False
@@ -888,6 +889,17 @@ def run_apply(
                             done = True
                             break
 
+                    if (name == "submit" and not resume_uploaded
+                            and _required_resume_input_empty(page)):
+                        result = (
+                            "error: submit blocked; this form has a required resume "
+                            "upload and upload_resume has not succeeded. Upload the "
+                            "resume to its file input first."
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                        _emit("tool_result", turn=turn, name=name, payload={"result": result})
+                        continue
+
                     if name == "submit":
                         _emit(
                             "test_answer_audit" if test_mode else "answer_audit",
@@ -910,6 +922,8 @@ def run_apply(
                         resume_text=resume_tex,
                         job_locations=job_locations,
                     )
+                    if name == "upload_resume" and result.startswith("ok:"):
+                        resume_uploaded = True
                     if controller is not None:
                         controller.observe(name, result)
                     if not result.startswith("error:") and name == "open_dropdown":
@@ -1034,6 +1048,32 @@ def run_apply(
         file=sys.stderr,
     )
     return _result()
+
+
+_REQUIRED_RESUME_INPUT_JS = r"""() => [...document.querySelectorAll('input[type=file]')].some(el => {
+    if (el.files && el.files.length) return false;
+    const required = el.required || el.getAttribute('aria-required') === 'true'
+        || /^\s*\*/.test(el.getAttribute('data-applyd-label') || '');
+    if (!required) return false;
+    const ids = (el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
+    const identity = [el.id, el.name, el.getAttribute('data-ui'), el.getAttribute('aria-label'),
+        el.getAttribute('data-applyd-label'),
+        ...ids.map(id => document.getElementById(id)?.innerText || '')].join(' ');
+    return /\b(resume|cv|curriculum vitae)\b/i.test(identity);
+})"""
+
+
+def _required_resume_input_empty(page: Any) -> bool:
+    """True when a required resume file input is still empty.
+
+    The runner owns resume upload, so submit must not proceed (even in test
+    mode) until upload_resume has succeeded. Inspection failure fails open so
+    this guard never blocks forms it cannot read.
+    """
+    try:
+        return page.evaluate(_REQUIRED_RESUME_INPUT_JS) is True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:
