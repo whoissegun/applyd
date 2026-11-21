@@ -16,6 +16,8 @@ from datetime import date
 import re
 from typing import Any, Mapping, Sequence
 
+from applyd.apply import option_semantics
+
 
 @dataclass(frozen=True)
 class DeterministicAnswer:
@@ -92,18 +94,27 @@ def _bind(options: Mapping[str, str] | Sequence[Mapping[str, Any]], value: Any) 
     rendered = _options(options)
     if isinstance(value, bool):
         matches = [key for key, label in rendered.items() if _boolean_label(label) is value]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0]
+        # Sentence options ("I have never worked for ...") carry the same
+        # yes/no meaning; legal wording is excluded inside bind_boolean.
+        return option_semantics.bind_boolean(rendered, value) if not matches else None
     wanted = _norm(value)
     exact = [key for key, label in rendered.items() if _norm(label) == wanted]
     if len(exact) == 1:
         return exact[0]
+    same_month = option_semantics.bind_same_month(rendered, value)
+    if same_month is not None:
+        return same_month
     for level in ("bachelor", "master", "associate", "doctor"):
         if level in wanted:
             matches = [key for key, label in rendered.items() if level in _norm(label)]
             if len(matches) == 1:
                 return matches[0]
+    # Whole-word containment only: "no" must not match inside "not".
     compatible = [key for key, label in rendered.items()
-                  if wanted and (wanted in _norm(label) or _norm(label) in wanted)]
+                  if wanted and _norm(label) and (
+                      f" {wanted} " in f" {_norm(label)} " or f" {_norm(label)} " in f" {wanted} ")]
     if len(compatible) == 1:
         return compatible[0]
     aliases = {
@@ -119,7 +130,11 @@ def _bind(options: Mapping[str, str] | Sequence[Mapping[str, Any]], value: Any) 
     candidates = aliases.get(wanted, ())
     matches = [key for key, label in rendered.items()
                if any(alias == _norm(label) or alias in _norm(label) for alias in candidates)]
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return None
+    return option_semantics.bind_semantic(rendered, value)
 
 
 def _review(options: Mapping[str, str] | Sequence[Mapping[str, Any]],
@@ -880,6 +895,20 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         return _review(options, "demographic_unset", "profile does not contain this demographic")
 
     earliest = employment.get("earliest_start") or profile.get("earliest_start_date")
+    start_question = bool(re.search(
+        r"\b(?:start date|starting date|start term|start month|start time|"
+        r"when (?:can|could|would) you (?:start|begin)|available to (?:start|begin)|"
+        r"when are you available|availability to start|desired start)\b", text))
+    rendered = _options(options)
+    if start_question and option_semantics.mostly_dates(rendered.values()):
+        # A target start date is a preference, not a fact: anchor it on the
+        # graduation month and take the nearest offered option on/after it.
+        grad = _get(profile, ("expected_grad_date",), ("education", "expected_graduation"))
+        choice = option_semantics.bind_nearest_month(rendered, grad) if grad else None
+        if choice is not None:
+            return DeterministicAnswer(choice, "start_availability", rendered[choice],
+                                       "offered start option nearest the graduation month")
+        return _review(options, "start_availability", "no offered start option near graduation")
     if "start immediately" in text:
         return _result(options, _norm(earliest) in {"immediately", "now", "available now"}, "start_availability", "structured start availability") if earliest else _review(options, "start_availability", "start availability missing")
     if "two weeks notice" in text:

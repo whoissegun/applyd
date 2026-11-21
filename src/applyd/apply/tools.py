@@ -28,6 +28,7 @@ from typing import Any
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from ..tailor.structured import escape_latex
+from . import option_semantics
 from .deterministic_questions import (
     immigration_authorization_required_question, required_consent_authorized,
     resolve_question,
@@ -1673,7 +1674,10 @@ def _match_option(options: list[dict[str, str]], desired: str) -> dict[str, str]
     compatible = []
     for option in options:
         text = _normalize_option_text(option.get("text", ""))
-        if wanted in text or text in wanted:
+        # Whole-word containment only: "no" must not match inside "not", and
+        # "Engineering (Non-Computer Science)" is not "Computer Science".
+        if text and f" non {wanted} " not in f" {text} " and (
+                f" {wanted} " in f" {text} " or f" {text} " in f" {wanted} "):
             compatible.append(option)
     if len(compatible) == 1:
         return compatible[0]
@@ -1685,7 +1689,14 @@ def _match_option(options: list[dict[str, str]], desired: str) -> dict[str, str]
         ]
         if len(equivalent) == 1:
             return equivalent[0]
-    return None
+    # Same meaning, different wording: dates as months ("2027-04" ↔ "April
+    # 2027"), veteran/disability phrasing, sentence-form yes/no options, and
+    # "Not in the U.S." for a Canadian province. Still unique-or-nothing.
+    labels = option_semantics.labels_of(options)
+    key = (option_semantics.bind_same_month(labels, desired)
+           or option_semantics.bind_semantic(labels, desired)
+           or option_semantics.bind_outside_option(labels, desired))
+    return options[int(key)] if key is not None else None
 
 
 def _field_specific_option_value(field_label: str, desired: str) -> str:

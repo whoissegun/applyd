@@ -82,11 +82,17 @@ class JevHybridTests(unittest.TestCase):
         group = {'question': 'Veteran status', 'kind': 'select', 'required': False,
                  'ref': 'r1', 'options': [
                      {'key': 'yes', 'label': 'I am a veteran'},
-                     {'key': 'no', 'label': 'I am not a veteran'}]}
+                     {'key': 'decline', 'label': 'Decline to self-identify'}]}
         page = MagicMock(); page.evaluate.side_effect = [[], [group]]
         actions, metrics = planner.propose(page, {'veteran_status': 'I am not a protected veteran'})
         self.assertEqual([], actions)
         self.assertEqual('optional_unmatched_decision_skipped', metrics['reason'])
+
+    def test_equivalent_veteran_wording_is_bound(self):
+        from applyd.apply.deterministic_questions import resolve_question
+        answer = resolve_question('Veteran status', {'veteran_status': 'I am not a protected veteran'},
+                                  {'yes': 'I am a veteran', 'no': 'I am not a veteran'})
+        self.assertEqual('no', answer.choice)
 
     def test_observed_openai_availability_wording_uses_known_fact(self):
         from applyd.apply.runner import _profile_already_answers
