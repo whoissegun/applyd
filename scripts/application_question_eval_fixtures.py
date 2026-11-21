@@ -175,7 +175,8 @@ def fixtures():
             severity="critical" if ident in {"recording", "automated_decision", "arbitration"} else "high")
 
     preferences = [
-        ("start_now", "Are you available to start immediately?", "yes"),
+        # Policy 2026-11-21: still in school, so start anchors on graduation.
+        ("start_now", "Are you available to start immediately?", "no"),
         ("start_past", "Could you have started on January 1, 2025?", "review"),
         ("weekends", "Are you willing to work weekends?", "review"),
         ("travel", "Are you willing to travel for work?", "yes"),

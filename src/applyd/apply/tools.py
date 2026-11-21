@@ -30,8 +30,8 @@ from playwright.sync_api import Page, TimeoutError as PWTimeout
 from ..tailor.structured import escape_latex
 from . import option_semantics
 from .deterministic_questions import (
-    immigration_authorization_required_question, required_consent_authorized,
-    resolve_question,
+    graduation_start_date, immigration_authorization_required_question,
+    required_consent_authorized, resolve_question,
 )
 
 
@@ -910,13 +910,18 @@ def _grounded_fill_value(
     available_now = str(profile.get("earliest_start_date", "")).casefold() in {
         "now", "immediately", "available now",
     }
-    if available_now and any(phrase in normalized for phrase in (
+    grad_start = graduation_start_date(profile)
+    if (grad_start or available_now) and any(phrase in normalized for phrase in (
         "when can you start", "available to start", "availability date",
         "when are you available", "when would you be available",
         "employment start date", "job start date", "earliest possible start date",
-        "date available", "date of availability",
+        "date available", "date of availability", "target start date", "desired start date",
+        "preferred start date", "anticipated start date", "expected start date",
+    )) and not any(phrase in normalized for phrase in (
+        "graduation", "end date", "previous", "last role", "current role",
     )):
-        grounded = datetime.now().date().isoformat()
+        # Still in school: every start date anchors on graduation, not today.
+        grounded = (grad_start or datetime.now().date()).isoformat()
         return grounded, f"grounded start date from profile: {grounded}"
     return value, None
 

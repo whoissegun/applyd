@@ -106,3 +106,39 @@ class RangeAndRegionTests(unittest.TestCase):
         self.assertEqual("Engineering – Computer Science & Technology", self.pick(
             "Computer Science", "Select...", "Business & Management",
             "Engineering (Non-Computer Science)", "Engineering – Computer Science & Technology"))
+
+
+class GraduationAnchoredStartTests(unittest.TestCase):
+    PROFILE = {"expected_grad_date": "2027-04", "earliest_start_date": "immediately"}
+
+    def test_graduation_start_date_is_last_day_of_month(self) -> None:
+        from datetime import date
+        from applyd.apply.deterministic_questions import graduation_start_date
+        self.assertEqual(date(2027, 4, 30), graduation_start_date(self.PROFILE, today=date(2026, 11, 21)))
+        self.assertIsNone(graduation_start_date(self.PROFILE, today=date(2027, 6, 1)))
+
+    def test_dropdown_before_graduation_takes_closest(self) -> None:
+        # SuperApp: options stop at July 2026 → July 2026 is the closest.
+        options = {"0": "Dec 2025", "1": "May 2026", "2": "June 2026", "3": "July 2026"}
+        answer = resolve_question("Target Start Date*", self.PROFILE, options)
+        self.assertEqual("July 2026", options[answer.choice])
+
+    def test_start_immediately_is_no_while_in_school(self) -> None:
+        answer = resolve_question("Can you start immediately?", self.PROFILE,
+                                  {"yes": "Yes", "no": "No"})
+        self.assertEqual("no", answer.choice)
+
+    def test_typed_date_available_uses_graduation(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        answer = resolve_text_question("Date available", self.PROFILE, input_type="date")
+        self.assertEqual("2027-04-30", answer.value)
+
+    def test_education_start_month_is_not_a_job_start(self) -> None:
+        options = {"0": "September 2022", "1": "April 2027"}
+        answer = resolve_question("Start date month", self.PROFILE, options)
+        self.assertNotEqual("April 2027", options.get(answer.choice))
+
+    def test_graduation_date_stays_exact(self) -> None:
+        options = {"0": "Dec 2025", "1": "May 2026", "2": "June 2026", "3": "July 2026"}
+        answer = resolve_question("Graduation Date*", self.PROFILE, options)
+        self.assertNotIn(answer.choice, options)

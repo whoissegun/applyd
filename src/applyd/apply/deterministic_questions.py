@@ -12,7 +12,7 @@ ambiguous questions return ``review``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import re
 from typing import Any, Mapping, Sequence
 
@@ -56,6 +56,24 @@ def required_consent_authorized(question: str, profile: Mapping[str, Any], *,
 
 def _employer_name(value: Any) -> str:
     return re.sub(r"\s+(?:inc|incorporated|llc|ltd|limited|corporation|corp)$", "", _norm(value))
+
+
+def graduation_start_date(profile: Mapping[str, Any], today: date | None = None) -> date | None:
+    """Start date anchored on a future graduation: last day of that month.
+
+    Start dates are a preference, so every start question (dropdown, typed
+    date, "can you start immediately?") answers from graduation while the
+    candidate is still in school. A past or missing graduation returns None
+    and callers fall back to ``earliest_start_date``.
+    """
+    grad = _get(profile, ("expected_grad_date",), ("education", "expected_graduation"))
+    covered = option_semantics.parse_months(grad) if grad else None
+    if not covered or len(covered) != 1:
+        return None
+    year, month = next(iter(covered))
+    last = (date(year + (month == 12), month % 12 + 1, 1) - timedelta(days=1))
+    today = today or date.today()
+    return last if last >= today else None
 
 
 def _get(profile: Mapping[str, Any], *paths: tuple[str, ...]) -> Any:
@@ -895,27 +913,40 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         return _review(options, "demographic_unset", "profile does not contain this demographic")
 
     earliest = employment.get("earliest_start") or profile.get("earliest_start_date")
+    # Job-start wording only: a bare "Start date month" is an education or
+    # work-history field and must never take the graduation anchor.
     start_question = bool(re.search(
-        r"\b(?:start date|starting date|start term|start month|start time|"
+        r"\b(?:(?:target|desired|preferred|anticipated|expected|earliest|ideal|potential) "
+        r"(?:start|starting) (?:date|term|month|time)|"
         r"when (?:can|could|would) you (?:start|begin)|available to (?:start|begin)|"
-        r"when are you available|availability to start|desired start)\b", text))
+        r"when are you available|availability to start|start term|"
+        r"(?:internship|co op|employment|job|role) start (?:date|term|month))\b", text)
+    ) and not re.search(r"\b(?:graduat|school|education|degree|previous|last role)\b", text)
     rendered = _options(options)
+    grad_start = graduation_start_date(profile)
     if start_question and option_semantics.mostly_dates(rendered.values()):
         # A target start date is a preference, not a fact: anchor it on the
-        # graduation month and take the nearest offered option on/after it.
-        grad = _get(profile, ("expected_grad_date",), ("education", "expected_graduation"))
-        choice = option_semantics.bind_nearest_month(rendered, grad) if grad else None
+        # graduation month (or today once graduated) and take the nearest
+        # offered option, preferring one on/after the anchor.
+        anchor = (grad_start or date.today()).strftime("%Y-%m")
+        choice = option_semantics.bind_nearest_month(rendered, anchor)
         if choice is not None:
             return DeterministicAnswer(choice, "start_availability", rendered[choice],
                                        "offered start option nearest the graduation month")
         return _review(options, "start_availability", "no offered start option near graduation")
     if "start immediately" in text:
+        if grad_start:
+            return _result(options, False, "start_availability",
+                           "still in school; start is anchored on graduation")
         return _result(options, _norm(earliest) in {"immediately", "now", "available now"}, "start_availability", "structured start availability") if earliest else _review(options, "start_availability", "start availability missing")
     if "two weeks notice" in text:
         return _result(options, False, "notice_period", "immediate availability") if _norm(earliest) in {"immediately", "now", "available now"} else _review(options, "notice_period", "notice period missing")
     if "could you have started" in text:
         return _review(options, "past_hypothetical", "past hypothetical is not current availability")
     if "when are you available" in text:
+        if grad_start:
+            return _result(options, grad_start.strftime("%B %Y"), "start_availability",
+                           "start anchored on graduation month")
         return _result(options, earliest, "start_availability", "structured start availability") if earliest else _review(options, "start_availability", "start availability missing")
 
     employment_types = _get(profile, ("employment_preferences", "employment_types"),
@@ -993,6 +1024,11 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             'job-search motivation alternative; no historical reason for leaving is invented')
     if text in {'date available', 'date of availability'}:
         earliest = _get(profile, ('employment', 'earliest_start'), ('earliest_start_date',))
+        grad_start = graduation_start_date(profile)
+        if grad_start:
+            value = grad_start.strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
+            return DeterministicAnswer('text', 'start_availability', value,
+                                       'start anchored on graduation month')
         if _norm(earliest) in {'immediately', 'now', 'available now'}:
             value = date.today().strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
             return DeterministicAnswer('text', 'start_availability', value, 'current date from explicit immediate availability')
