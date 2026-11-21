@@ -2885,10 +2885,25 @@ Sincerely,\\
 SUBMIT_CAPTCHA_WAIT_SECONDS = 90
 
 _CAPTCHA_STATE_JS = r"""() => {
-    const frame = document.querySelector('iframe[src*="hcaptcha"], iframe[src*="recaptcha"]');
-    const tok = document.querySelector('[name="h-captcha-response"], [name="g-recaptcha-response"]');
+    const frame = document.querySelector(
+        'iframe[src*="hcaptcha"], iframe[src*="recaptcha"], iframe[src*="challenges.cloudflare.com"]');
+    const tok = document.querySelector(
+        '[name="h-captcha-response"], [name="g-recaptcha-response"], [name="cf-turnstile-response"]');
+    // Workable renders Cloudflare Turnstile invisibly on submit: no iframe in
+    // the light DOM, the submit button disappears while the form stays up.
+    // Treat that as a pending challenge so the poll waits instead of
+    // reporting a premature "unconfirmed".
+    const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
+    const turnstileLoaded = [...document.scripts].some(s => /challenges\.cloudflare\.com\/turnstile/.test(s.src));
+    const submitVisible = [...document.querySelectorAll('button[type="submit"], input[type="submit"]')]
+        .some(el => visible(el) && !/cookie/i.test(el.innerText || el.value || ''));
+    const formVisible = [...document.querySelectorAll('form')].some(visible);
+    const turnstilePending = turnstileLoaded && formVisible && !submitVisible;
     return {
-        present: !!frame,
+        present: !!frame || turnstilePending,
+        provider: frame ? (frame.src.includes('cloudflare') ? 'turnstile' : 'widget')
+                        : (turnstilePending ? 'turnstile' : null),
         token_len: tok && tok.value ? tok.value.length : 0,
     };
 }"""
