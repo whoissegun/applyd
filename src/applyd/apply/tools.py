@@ -346,6 +346,13 @@ _SNAPSHOT_JS = r"""() => {
                 label = `${question} — ${buttonChoice}`;
             }
         }
+        // Greenhouse renders every upload as a bare "Attach"; its id names
+        // the slot (resume vs cover_letter). Without it the model cannot tell
+        // the resume input from the cover-letter one.
+        if (inputType === 'file' && /^(?:attach|choose file|upload|browse)\b/i.test(label.trim())) {
+            const hint = (el.id || el.getAttribute('name') || '').replace(/[_-]+/g, ' ').trim();
+            if (hint && !/^input files input/i.test(hint)) label = `${hint} — ${label}`;
+        }
         label = label.trim().slice(0, 180);
         el.setAttribute('data-applyd-label', label.slice(0, 300));
         if (question) el.setAttribute('data-applyd-question', question.slice(0, 300));
