@@ -85,6 +85,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
         ], resume_facts={key: source_resume[key]
                          for key in ('education', 'experience', 'projects', 'skills')
                          if key in source_resume})
+    # Confirmed applyd submissions answer "Have you applied before?" only when
+    # the user attests applyd's history is complete (no manual applications).
+    profile = dict(profile, previously_applied_companies=store.applied_companies(job.id))
     persisted = False
 
     def persist_event(event: dict[str, Any]) -> None:

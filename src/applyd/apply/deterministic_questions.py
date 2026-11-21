@@ -65,6 +65,26 @@ def _employer_name(value: Any) -> str:
     return re.sub(r"\s+(?:inc|incorporated|llc|ltd|limited|corporation|corp)$", "", _norm(value))
 
 
+_EMPLOYER_SUFFIXES = {
+    "technologies", "technology", "tech", "labs", "lab", "systems", "software",
+    "solutions", "group", "holdings", "company", "co", "inc", "llc", "ltd",
+    "corp", "corporation", "ai", "hq", "studios", "studio", "health", "global",
+}
+
+
+def _employer_short_name(value: Any) -> str:
+    """"Built Technologies" -> "built"; a single distinctive word stays as is.
+
+    Forms often name the employer by its short brand ("Are you a Built
+    contractor?"). Returns "" when nothing distinctive remains.
+    """
+    words = _employer_name(value).split()
+    while len(words) > 1 and words[-1] in _EMPLOYER_SUFFIXES:
+        words.pop()
+    short = " ".join(words)
+    return short if len(short) >= 3 and short not in _EMPLOYER_SUFFIXES else ""
+
+
 def is_job_start_question(question: str) -> bool:
     """Job-start wording only.
 
@@ -426,6 +446,11 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
         re.search(r"\b(?:require|requires|required|need|needs|needed|without)\b.*\bsponsor(?:ship|ed|ing)?\b", text)
         or re.search(r"\bsponsor(?:ship|ed|ing)?\b.*\b(?:require|need|you|work permit|visa)\b", text)
     )
+    # "Do you require visa support?" asks whether the employer must sponsor or
+    # assist a visa, i.e. the sponsorship fact, not current authorization.
+    if not authorization_predicate and re.search(
+            r"\bvisa (?:support|assistance|help)\b", text):
+        sponsorship = True
     if immigration_authorization_required_question(question) and not sponsorship and not authorization_predicate:
         # Requiring authorization is NOT the same predicate as possessing it.
         # An unauthorized applicant necessarily needs authorization. An already
@@ -612,6 +637,29 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                            'office-location willingness; separate from the explicit UK legal-authorization question')
         return _review(options, 'office_location_willingness', 'onsite/relocation preference missing')
 
+    # "Work out of our NYC HQ 3 times a week?", "Come into our office a minimum
+    # of 3 days a week?": an office-attendance schedule. Fewer than five days
+    # is hybrid, five is onsite; a non-local candidate also needs relocation.
+    schedule = re.search(
+        r"\b(\d|one|two|three|four|five)\s+(?:times|days)\s+(?:a|per|each)\s+week\b", text)
+    if schedule and re.search(r"\b(?:office|hq|headquarters|on site|onsite|in person|studio)\b", text) \
+            and not re.search(r"\b(?:remote|travel)\b", text):
+        words = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+        raw = schedule.group(1)
+        days = int(raw) if raw.isdigit() else words[raw]
+        key = "willing_to_work_onsite" if days >= 5 else "willing_to_work_hybrid"
+        willing = _preference(profile, key)
+        relocate = _preference(profile, "willing_to_relocate")
+        city, region, country = _profile_location(profile)
+        local = any(place and re.search(rf"\b{re.escape(place)}\b", text) for place in (city, region))
+        if isinstance(willing, bool) and (local or isinstance(relocate, bool)):
+            answer = _result(options, willing and (local or relocate is True), key,
+                             "office schedule from structured work and relocation preferences")
+            # Sentence options (commute/relocation variants) belong to the
+            # more specific onsite logic below; only plain yes/no binds here.
+            if answer.choice and answer.choice != "review":
+                return answer
+
     preference_patterns = (
         (("relocat",), "willing_to_relocate"),
         (("onsite", "on site", "in person", "in office", "work from our", "come in if needed", "working out of our"), "willing_to_work_onsite"),
@@ -772,6 +820,16 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         return _result(options, value, "domain_expertise", "explicit domain expertise or matching structured major") \
             if value else _review(options, "domain_expertise", "domain expertise missing")
 
+    # Talent-pool retention ("Yes - you can keep my CV on file for up to 3
+    # years") is often carried only by the options, under a generic label.
+    retention = r"\b(?:keep|retain|hold|store)\b.*\b(?:cv|resume|data|details|application)\b.*\bon file\b|\btalent (?:pool|community)\b"
+    option_text = " ".join(_norm(label) for label in _options(options).values())
+    if re.search(retention, text) or re.search(retention, option_text):
+        value = next((policy.get(key) for key in ("talent_pool_consent", "recruiting_communications_consent")
+                      if isinstance(policy.get(key), bool)), None)
+        return _result(options, value, "consent", "explicit structured talent-pool consent") \
+            if isinstance(value, bool) else _review(options, "consent", "talent-pool consent missing")
+
     consent_map = (
         (("recruiting marketing", "future job opportunities", "talent network", "whatsapp"), ("recruiting_marketing_consent", "recruiting_communications_consent")),
         (("text messages", "sms"), ("sms_recruiting_consent",)),
@@ -831,6 +889,17 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     if "relative" in text or "relatives" in text:
         value = background.get("no_immediate_family_at_target_company")
         return _result(options, not value, "company_relative", "structured background default") if isinstance(value, bool) else _review(options, "company_relative", "relative fact missing")
+    if company and re.search(
+            r"\b(?:have|did) you\b.*\b(?:previously |ever |already )?applied\b"
+            r"|\bapplied (?:before|previously|in the past)\b", text):
+        history = profile.get("previously_applied_companies")
+        complete = (profile.get("application_policy") or {}).get("application_history_complete")
+        if complete is True and isinstance(history, list):
+            names = {_employer_name(company), _employer_short_name(company)} - {""}
+            applied = any(_employer_name(name) in names or _employer_short_name(name) in names
+                          for name in history)
+            return _result(options, applied, "prior_application",
+                           "confirmed applyd application history (attested complete)")
     current_employment = bool(re.search(
         r'\bare you (?:currently )?(?:a |an )?(?:current )?(?:employee|employed)\b', text))
     if current_employment or any(term in text for term in ("previously worked", "ever worked", "ever been employed", "previously employed", "previously been employed", "worked for", "worked at", "employed by")):
@@ -845,6 +914,9 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                 )):
                     return _review(options, "prior_company", "target missing or compound employment history")
                 target = _employer_name(company)
+                short = _employer_short_name(company)
+                if short and short != target and re.search(rf"\b{re.escape(short)}\b", text):
+                    target = short
                 if target not in text and not any(phrase in text for phrase in (
                     "this employer", "this company", "our company", "worked for us",
                     "employed by us", "work for us",
@@ -870,7 +942,8 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                         employed = True
                     return _result(options, employed, "prior_company",
                                    "named employer is absent from the full source resume employer list")
-                employed = any(_employer_name(name) == target for name in employers)
+                employed = any(_employer_name(name) == target
+                               or _employer_short_name(name) == target for name in employers)
                 if current_employment and employed:
                     current = profile.get('current_company')
                     if not isinstance(current, str) or _employer_name(current) != target:
@@ -907,6 +980,19 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         value = demographics.get("gender", profile.get("gender"))
         return _result(options, value, "gender", "structured demographic field") \
             if value else _review(options, "gender", "gender missing")
+
+    # "Are there any accommodations we can provide to make your interview
+    # process more accessible?" An explicit preference wins; otherwise a
+    # stated "no disability" means none are requested.
+    if "accommodation" in text and re.search(r"\b(?:interview|accessib|disabilit|hiring process)\b", text):
+        explicit = (profile.get("application_policy") or {}).get("interview_accommodations_needed")
+        disability = demographics.get("disability_status", profile.get("disability_status"))
+        if isinstance(explicit, bool):
+            return _result(options, explicit, "interview_accommodations", "explicit accommodation preference")
+        if isinstance(disability, str) and _norm(disability).startswith("no"):
+            return _result(options, False, "interview_accommodations",
+                           "profile states no disability; no accommodation requested")
+        return _review(options, "interview_accommodations", "accommodation need not stated")
 
     demographic_map = (
         (("hispanic", "latino"), "hispanic_latino"),
@@ -1099,6 +1185,18 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
         if isinstance(value, str) and value.strip():
             return DeterministicAnswer("text", "github_url", value,
                                        "saved GitHub profile URL")
+    # "Please leave your GitHub or portfolio link if you have one:" — a link
+    # request naming GitHub (alone or with portfolio/website) takes the saved
+    # GitHub URL; a portfolio-only request takes the saved portfolio URL.
+    if (re.search(r"\b(?:link|links|url|urls)\b", text)
+            and not re.search(r"\b(?:linkedin|project you|writing sample|video)\b", text)):
+        github = profile.get("github_url")
+        portfolio = profile.get("portfolio_url")
+        if "github" in text and isinstance(github, str) and github.strip():
+            return DeterministicAnswer("text", "github_url", github, "saved GitHub profile URL")
+        if (re.search(r"\b(?:portfolio|personal website)\b", text)
+                and isinstance(portfolio, str) and portfolio.strip()):
+            return DeterministicAnswer("text", "github_url", portfolio, "saved portfolio URL")
     if "subject to u s export controls" in text:
         export = profile.get("export_control") or profile.get("identity_facts") or {}
         classification = _norm(export.get("classification")) \

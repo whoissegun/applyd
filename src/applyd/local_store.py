@@ -843,6 +843,16 @@ class LocalStore:
 
     # ---- tailoring/applications -------------------------------------
 
+    def applied_companies(self, exclude_job_id: str | None = None) -> list[str]:
+        """Companies with a confirmed submitted application (for "applied before?")."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT j.company FROM jobs j JOIN applications a ON a.job_id=j.id
+                   WHERE a.status='applied' AND j.id != ?""",
+                (exclude_job_id or "",),
+            ).fetchall()
+        return sorted(str(row[0]) for row in rows if row[0])
+
     def iter_prior_application_jobs(self) -> Iterator[Job]:
         """All attempted postings, including inactive and deduplicated rows.
 

@@ -241,3 +241,61 @@ class SavedAnswerComboboxTests(unittest.TestCase):
         self.assertEqual("Product Engineering",
                          resolve_text_question("Area of Interest*", profile).value)
         self.assertIsNone(resolve_text_question("Areas of interest outside work", profile))
+
+
+class BatchTenFixTests(unittest.TestCase):
+    OPTIONS = {"yes": "Yes", "no": "No", "review": "Review"}
+    PROFILE = {
+        "address_city": "Ottawa", "address_region": "Ontario", "address_country": "Canada",
+        "github_url": "https://github.com/example", "portfolio_url": "https://example.dev",
+        "disability_status": "No, I do not have a disability",
+        "employment_preferences": {"willing_to_work_hybrid": True, "willing_to_work_onsite": True,
+                                   "willing_to_relocate": True},
+        "application_policy": {"recruiting_communications_consent": False},
+        "work_authorization": {"CA": {"authorized": True, "requires_sponsorship": False},
+                               "US": {"authorized": False, "requires_sponsorship": True}},
+        "background_defaults": {"never_employed_by_target_unless_listed_on_resume": True},
+        "resume_employers": ["Lyft", "Shopify"],
+    }
+
+    def ask(self, q, **kw):
+        return resolve_question(q, self.PROFILE, self.OPTIONS, **kw).choice
+
+    def test_github_or_portfolio_link(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        self.assertEqual("https://github.com/example", resolve_text_question(
+            "Please leave your GitHub or portfolio link if you have one:", self.PROFILE).value)
+        self.assertEqual("https://example.dev", resolve_text_question(
+            "Link to your portfolio", self.PROFILE).value)
+
+    def test_office_schedule(self) -> None:
+        self.assertEqual("yes", self.ask(
+            "Are you willing and able to work out of our NYC HQ in Downtown Manhattan 3 times a week?"))
+        self.assertEqual("yes", self.ask("Are you able to come into our office a minimum of 3 days a week?"))
+
+    def test_visa_support_is_sponsorship(self) -> None:
+        self.assertEqual("no", self.ask("Do you require VISA support?", job_locations=["Ottawa, ON, Canada"]))
+        self.assertEqual("yes", self.ask("Do you require VISA support?", job_locations=["NYC"]))
+
+    def test_short_employer_name(self) -> None:
+        self.assertEqual("no", self.ask(
+            "Are your currently a Built contractor, or have you ever been employed at Built?*",
+            company="Built Technologies"))
+
+    def test_accommodations(self) -> None:
+        self.assertEqual("no", self.ask(
+            "Are there any accommodations we can provide to make your interview process more accessible?"))
+
+    def test_talent_pool_from_options(self) -> None:
+        options = {"0": "Yes - you can keep my CV on file for up to 3 years",
+                   "1": "No - please delete my data after the process"}
+        self.assertEqual("1", resolve_question(
+            "Keeping your data safe is really important to us **", self.PROFILE, options).choice)
+
+    def test_prior_application_requires_attestation(self) -> None:
+        profile = dict(self.PROFILE, previously_applied_companies=["Fidus Systems"])
+        self.assertEqual("review", resolve_question(
+            "Have you applied to Grayce before?", profile, self.OPTIONS, company="Grayce").choice)
+        profile["application_policy"] = {"application_history_complete": True}
+        self.assertEqual("no", resolve_question(
+            "Have you applied to Grayce before?", profile, self.OPTIONS, company="Grayce").choice)
