@@ -15,6 +15,26 @@ def _format_location(loc: dict) -> Optional[str]:
     return ", ".join(parts) if parts else None
 
 
+def fetch_description(company: str, shortcode: str,
+                      client: Optional[httpx.Client] = None) -> Optional[str]:
+    """The list endpoint omits the public posting's description sections."""
+    with http_client(client) as c:
+        response = c.get(
+            f"https://apply.workable.com/api/v2/accounts/{company}/jobs/{shortcode}",
+            follow_redirects=True, timeout=15.0,
+        )
+        if response.status_code in (400, 404):
+            return None
+        response.raise_for_status()
+        data = response.json()
+    if str(data.get('shortcode') or '') != shortcode:
+        return None
+    if data.get('state') and data['state'] != 'published':
+        return None
+    parts = [data.get(key) for key in ('description', 'requirements', 'benefits')]
+    return '\n\n'.join(part for part in parts if isinstance(part, str) and part.strip()) or None
+
+
 def fetch(company: str, client: Optional[httpx.Client] = None) -> list[Job]:
     url = f"https://apply.workable.com/api/v3/accounts/{company}/jobs"
     with http_client(client) as c:

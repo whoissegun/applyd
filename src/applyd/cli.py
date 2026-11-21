@@ -46,6 +46,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    from .dashboard.server import cmd_dashboard
+    p_dashboard = sub.add_parser("dashboard", help="open your local application history and resumes")
+    p_dashboard.add_argument("--port", type=int, default=8765)
+    p_dashboard.add_argument("--db", help="SQLite path (default: APPLYD_DB_PATH or data/applyd.sqlite3)")
+    p_dashboard.add_argument("--no-open", action="store_true", help="start without opening a browser")
+    p_dashboard.set_defaults(func=cmd_dashboard)
+
     p_init = sub.add_parser("init", help="create the local SQLite database")
     p_init.add_argument("--db", default="data/applyd.sqlite3")
     p_init.add_argument("--profile", default="profile.json")
@@ -92,13 +99,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_disc.add_argument("--no-broad", action="store_true",
                         help="skip the broad-search aggregator this run")
     p_disc.add_argument(
+        "--new-only", action="store_true",
+        help="exclude stored job IDs before applying the discovery limit",
+    )
+    p_disc.add_argument(
         "--limit", type=int, default=0,
         help="hard cap on jobs written this run (0 = unlimited)",
     )
     p_disc.add_argument(
         "--include-unsupported-ats",
         action="store_true",
-        help="include jobs outside the ATS platforms applyd can automate",
+        help="include unsupported/default-excluded ATS jobs for manual research",
     )
     p_disc.set_defaults(func=cmd_discover)
 
@@ -123,6 +134,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="max jobs to process (0 = no limit)")
     p_enr.add_argument("--source", choices=ALL_SOURCES,
                        help="only enrich jobs from this source")
+    p_enr.add_argument("--first-seen-on", help="only process jobs first seen on YYYY-MM-DD")
     p_enr.add_argument("--retry-failed", action="store_true",
                        help="re-try jobs previously marked fetch_tier=failed")
     p_enr.add_argument("--dry-run", action="store_true",
@@ -192,7 +204,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_tail.set_defaults(func=cmd_tailor)
 
     p_apply = sub.add_parser(
-        "apply", help="fill one tailored application with Kimi and local Chrome"
+        "apply", help="fill one tailored application with Jev decisions, Kimi writing, and local Chrome"
     )
     p_apply.add_argument("job_id", help="job id already processed by `applyd tailor`")
     p_apply.add_argument("--model", default="moonshotai/kimi-k2.6")
@@ -219,6 +231,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="serially tailor and apply to ranked jobs with CAPTCHA fallback",
     )
     p_batch.add_argument("--top", type=int, default=20)
+    p_batch.add_argument(
+        "--first-seen-on",
+        help="only apply to jobs first ingested on this YYYY-MM-DD date",
+    )
     p_batch.add_argument("--minimum-score", type=float, default=70.0)
     p_batch.add_argument("--max-per-ats", type=int, default=6)
     p_batch.add_argument("--ats-failure-limit", type=int, default=3)
@@ -227,6 +243,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_batch.add_argument("--output", default="out")
     p_batch.add_argument("--tailor-model", default="moonshotai/kimi-k2.6")
     p_batch.add_argument("--apply-model", default="moonshotai/kimi-k2.6")
+    p_batch.add_argument(
+        "--browser", choices=["local", "auto", "brightdata"], default="local",
+        help="primary application browser (default: persistent local Chrome)",
+    )
     p_batch.add_argument(
         "--test-mode", type=_parse_bool, default=True,
         help="true never submits; false permits real submissions (default true)",

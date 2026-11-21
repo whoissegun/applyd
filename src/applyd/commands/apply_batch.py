@@ -11,14 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from ..config import load_env
-from ..discovery.routing import detect_ats, preferred_apply_url
+from ..deduplication import canonical_ats_identity
+from ..eligibility import academic_policy_reasons
+from ..discovery.routing import DEFAULT_EXCLUDED_ATS, detect_ats, preferred_apply_url
 from ..liveness import check_jobs_liveness
 from ..local_store import get_local_store
 from .apply import cmd_apply
 from .tailor import cmd_tailor
 
 
-MANUAL_ONLY_ATS = {"smartrecruiters"}
+MANUAL_ONLY_ATS = set(DEFAULT_EXCLUDED_ATS)
 
 
 def _normalized_title(value: str) -> str:
@@ -59,6 +61,12 @@ def _failure_category(attempt: dict[str, Any] | None) -> str | None:
     reason = str(attempt.get("reason") or "").lower()
     if reason.startswith("gated:captcha"):
         return "captcha"
+    if reason.startswith("review:agent_stall") or "hit max_turns=" in reason:
+        # Still consumes the existing safety-stop budget, but reports the
+        # actual cause rather than blaming browser infrastructure.
+        return "agent_stall"
+    if reason.startswith("review:policy_guard"):
+        return "policy_guard"
     if "repeated_tool_failure" in reason:
         return "tool_failure"
     if attempt.get("status") in {"failed", "infra_error"}:
@@ -103,6 +111,7 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
     """Tailor and apply serially, with one CAPTCHA-only Bright Data fallback."""
     load_env()
     store = get_local_store()
+    profile_record = store.get_profile()
     ranked = list(
         store.iter_ranked_matches(
             limit=_candidate_scan_limit(args.top), minimum_score=args.minimum_score
@@ -116,20 +125,14 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
     # related requisition at the same company. Cross-source duplicates have
     # different job IDs, so checking only the current ID can repeat paid work
     # (and, for successful attempts, produce duplicate submissions).
-    prior_roles: list[tuple[str, str]] = []
-    for row in ranked:
-        app = store.get_application_by_job(row["job_id"])
-        app_reason = str((app or {}).get("reason") or "")
-        if (
-            app
-            and (
-                app.get("status") == "applied"
-                or app_reason.startswith("manual_only_ats:")
-            )
-        ) or store.get_apply_attempts(row["job_id"]):
-            prior_roles.append(
-                (str(row["company"]).casefold(), str(row["title"]))
-            )
+    # Search the complete history, not just ranked rows: deduplication can
+    # replace an applied aggregator row with a fresh ATS row under an alias.
+    prior_jobs = list(store.iter_prior_application_jobs())
+    prior_roles = [(job.company.casefold(), job.title) for job in prior_jobs]
+    prior_identities = {
+        identity for job in prior_jobs
+        if (identity := canonical_ats_identity(job)) is not None
+    }
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report_path = Path(args.report or f"data/batches/apply-{stamp}.json")
@@ -156,6 +159,9 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         ):
             break
         job_id = row["job_id"]
+        first_seen_on = getattr(args, "first_seen_on", None)
+        if first_seen_on and not str(row.get("first_seen_at") or "").startswith(first_seen_on):
+            continue
         if not _eligible_evaluation(store.get_evaluation(job_id)):
             continue
         company_key = str(row["company"]).casefold()
@@ -176,8 +182,20 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
         job = store.get(job_id)
         if job is None:
             continue
+        if profile_record:
+            academic_blockers = academic_policy_reasons(job, store.get_facts(job.id) or {}, profile_record[0])
+            if academic_blockers:
+                store.set_evaluation(job.id, "ineligible", academic_blockers, profile_record[1])
+                continue
+        identity = canonical_ats_identity(job)
+        if identity is not None and identity in prior_identities:
+            continue
         apply_url = preferred_apply_url(job.id, job.url, company=job.company)
         ats = detect_ats(apply_url) or "unknown"
+        # Protect against stale match tables created before an ATS became
+        # default-excluded. These rows do not consume the requested batch size.
+        if ats in DEFAULT_EXCLUDED_ATS:
+            continue
         if ats_selected[ats] >= args.max_per_ats:
             continue
         if _ats_failure_total(ats_failures, ats) >= args.ats_failure_limit:
@@ -275,6 +293,9 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
                 continue
 
         attempted += 1
+        if identity is not None:
+            prior_identities.add(identity)
+        prior_roles.append((company_key, job.title))
         common = dict(
             job_id=job_id,
             model=args.apply_model,
@@ -282,7 +303,11 @@ def cmd_apply_batch(args: argparse.Namespace) -> int:
             liveness_ttl_minutes=0,
             max_cost_usd=args.max_cost_usd,
         )
-        primary_provider = _primary_browser_provider(ats, test_mode=args.test_mode)
+        browser_policy = getattr(args, "browser", "auto")
+        primary_provider = (
+            _primary_browser_provider(ats, test_mode=args.test_mode)
+            if browser_policy == "auto" else browser_policy
+        )
         if primary_provider == "brightdata":
             print(
                 "  ↳ Lever route: starting directly with Bright Data",

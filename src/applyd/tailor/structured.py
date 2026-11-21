@@ -280,6 +280,75 @@ def _source_bullets(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def normalize_empty_plan_entries(
+    resume: dict[str, Any], plan: dict[str, Any]
+) -> dict[str, Any]:
+    """Remove empty optional entries and safely seed required experience.
+
+    Kimi occasionally selects an entry in an order list but returns no bullets
+    for it, including after a repair call. Optional empty entries add no resume
+    content, so dropping them is deterministic. A required experience cannot be
+    dropped; use its first source bullet verbatim instead of inventing text.
+    """
+    normalized = json.loads(json.dumps(plan))
+    required = {
+        str(value)
+        for value in (resume.get("tailoring_policy") or {}).get(
+            "required_experience_ids", []
+        )
+    }
+
+    for section, order_key, source_section in (
+        ("experiences", "experience_order", "experience"),
+        ("projects", "project_order", "projects"),
+    ):
+        entries = {
+            str(entry.get("id")): entry
+            for entry in normalized.get(section) or []
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        sources = _entry_map(resume, source_section)
+        kept: list[str] = []
+        for raw_id in normalized.get(order_key) or []:
+            entry_id = str(raw_id)
+            entry = entries.get(entry_id)
+            if entry and entry.get("bullets"):
+                kept.append(entry_id)
+                continue
+            if section == "experiences" and entry_id in required:
+                source_bullets = list(_source_bullets(sources.get(entry_id, {})).values())
+                if source_bullets:
+                    source = source_bullets[0]
+                    seeded = entry or {"id": entry_id}
+                    seeded["bullets"] = [{
+                        "source_ids": [str(source["id"])],
+                        "segments": [{
+                            "text": str(source.get("text") or ""),
+                            "style": "plain",
+                        }],
+                    }]
+                    entries[entry_id] = seeded
+                    kept.append(entry_id)
+        normalized[order_key] = kept
+        normalized[section] = [entries[entry_id] for entry_id in kept]
+    return normalized
+
+
+def trim_plan_for_layout(plan: dict[str, Any]) -> dict[str, Any] | None:
+    """Drop one lowest-priority bullet without rewriting any factual content."""
+    result = json.loads(json.dumps(plan))
+    for section, minimum in (
+        ("projects", 2), ("experiences", 3),
+        ("projects", 1), ("experiences", 2), ("experiences", 1),
+    ):
+        for entry in reversed(result.get(section) or []):
+            bullets = entry.get("bullets") or []
+            if len(bullets) > minimum:
+                entry["bullets"] = bullets[:-1]
+                return result
+    return None
+
+
 def _experience_policy_errors(resume: dict[str, Any], plan: dict[str, Any]) -> list[str]:
     policy = resume.get("tailoring_policy") or {}
     source_order = [str(entry["id"]) for entry in resume.get("experience") or []]
@@ -324,6 +393,42 @@ def _render_segments(segments: Any) -> tuple[str, str]:
     if bold_count > 2:
         raise TailorPlanError("bullet contains more than two bold spans")
     return "".join(rendered), "".join(plain)
+
+
+def _grounded_skill_errors(
+    resume: dict[str, Any], skills: dict[str, Any]
+) -> list[str]:
+    """Reject technologies that do not occur anywhere in the source resume."""
+    source = " ".join(
+        re.sub(r"[^a-z0-9+#.]+", " ", value.casefold()).strip()
+        for value in _all_strings(resume)
+    )
+    errors: list[str] = []
+    for category, values in skills.items():
+        if not isinstance(values, list):
+            errors.append(f"skills {category!r} must be a list")
+            continue
+        for value in values:
+            normalized = re.sub(
+                r"[^a-z0-9+#.]+", " ", str(value).casefold()
+            ).strip()
+            if not normalized or normalized not in source:
+                errors.append(
+                    f"ungrounded skill {value!r}; use only technologies stated "
+                    "in the source resume"
+                )
+    return errors
+
+
+def _all_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _all_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _all_strings(child)
 
 
 def _render_bullets(
@@ -460,6 +565,7 @@ def render_latex(
     project_lines.append(r"  \resumeSubHeadingListEnd")
 
     skills = plan.get("skills") if isinstance(plan.get("skills"), dict) else resume.get("skills", {})
+    errors.extend(_grounded_skill_errors(resume, skills))
     skill_lines = [r"\section{Technical Skills}", r" \begin{itemize}[leftmargin=0.15in, label={}]", r"  \small{\item{"]
     for category, values in skills.items():
         skill_lines.append(
