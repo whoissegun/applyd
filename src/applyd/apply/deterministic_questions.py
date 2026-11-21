@@ -1501,7 +1501,17 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             value = date.today().strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
             return DeterministicAnswer('text', 'start_availability', value, 'current date from explicit immediate availability')
         return DeterministicAnswer('review', 'start_availability', None, 'availability date missing')
-    if text in {"notice period", "what is your notice period", "notice what is your notice period"}:
+    if (text in {"notice period", "what is your notice period", "notice what is your notice period"}
+            or re.fullmatch(r"(?:what is |what s )?(?:your )?(?:current )?notice period(?: required)?", text)):
+        # Not currently employed (studying; internships ended): no notice
+        # period to serve, regardless of the graduation-anchored start.
+        current = _norm(profile.get("current_company") or "")
+        notes = profile.get("work_history_notes") or {}
+        if "student" in current or (isinstance(notes, Mapping) and any(
+                k.endswith("_ended") and v is True for k, v in notes.items())):
+            return DeterministicAnswer("text", "notice_period",
+                                       "None — I am not currently employed.",
+                                       "not currently employed; no notice period")
         earliest = _get(profile, ("employment", "earliest_start"), ("earliest_start_date",))
         if _norm(earliest) in {"immediately", "now", "available now"}:
             return DeterministicAnswer("text", "start_availability", "Available immediately",

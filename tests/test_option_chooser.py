@@ -419,3 +419,11 @@ class DenialAndRelocatingOptionTests(unittest.TestCase):
                    "2": "I am not willing to relocate"}
         q = "Our positions are based out of our San Francisco office (3-4 days in the office). Are you open to this?"
         self.assertEqual("1", resolve_question(q, profile, options).choice)
+
+
+class NoticePeriodTests(unittest.TestCase):
+    def test_student_has_no_notice_period(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        profile = {"current_company": "Carleton University (student)", "earliest_start_date": "immediately"}
+        self.assertEqual("None — I am not currently employed.",
+                         resolve_text_question("What is your current notice period?", profile).value)
