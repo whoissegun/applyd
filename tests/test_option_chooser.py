@@ -336,3 +336,26 @@ class ConfidentialityAgreementTests(unittest.TestCase):
     def test_willing_to_sign_is_not_a_fact(self) -> None:
         self.assertEqual("review", self.ask("Are you willing to sign a non-disclosure agreement?",
                                             {"no_confidentiality_agreements": True}))
+
+
+class ExperienceAndRelocationTimelineTests(unittest.TestCase):
+    BANDS = {"0": "0 years", "1": "Less than 1 year", "2": "1–2 years", "3": "More than 2 years"}
+    Q = "How much full-time professional software engineering experience do you have?"
+
+    def test_full_time_experience_needs_attestation(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        base = {"years_professional_experience": 1.4}
+        self.assertNotIn(resolve_question(self.Q, base, self.BANDS).choice, self.BANDS)
+        attested = dict(base, experience_counts_as_full_time=True)
+        self.assertEqual("1–2 years", self.BANDS[resolve_question(self.Q, attested, self.BANDS).choice])
+
+    def test_relocate_anytime_takes_soonest_window(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        options = {"0": "Yes, I'm in the Bay Area", "1": "Yes - I can relocate within 30 days",
+                   "2": "Yes - I can relocate within 3 months", "3": "No, I am not able to relocate"}
+        profile = {"employment_preferences": {"willing_to_relocate": True, "relocation_timeline": "immediately"}}
+        self.assertEqual("1", resolve_question("Are you based in the Bay Area, or ready to relocate?",
+                                               profile, options).choice)
+        profile["employment_preferences"].pop("relocation_timeline")
+        self.assertNotEqual("1", resolve_question("Are you based in the Bay Area, or ready to relocate?",
+                                                  profile, options).choice)

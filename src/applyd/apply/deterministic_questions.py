@@ -755,6 +755,22 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             if answer.choice and answer.choice != "review":
                 return answer
 
+    # Relocation timeline options ("relocate within 30 days / 3 months"):
+    # a candidate who can relocate immediately takes the soonest window.
+    if "relocat" in text:
+        rendered = _options(options)
+        windows = {}
+        for key, label in rendered.items():
+            m = re.search(r"\brelocat\w*\b.*\bwithin (\d+) (day|week|month)s?\b", _norm(label))
+            if m and not re.match(r"^no\b", _norm(label)):
+                windows[key] = int(m.group(1)) * {"day": 1, "week": 7, "month": 30}[m.group(2)]
+        timeline = _norm(_preference(profile, "relocation_timeline") or "")
+        if windows and _preference(profile, "willing_to_relocate") is True and timeline in {
+                "immediately", "anytime", "any time", "now"}:
+            soonest = min(windows, key=windows.get)
+            if list(windows.values()).count(windows[soonest]) == 1:
+                return DeterministicAnswer(soonest, "relocation_timeline", rendered[soonest],
+                                           "can relocate immediately; soonest offered window")
     preference_patterns = (
         (("relocat",), "willing_to_relocate"),
         (("onsite", "on site", "in person", "in office", "work from our", "come in if needed", "working out of our"), "willing_to_work_onsite"),
@@ -925,9 +941,14 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                         "user policy: closest offered option to the graduation month")
         else: value = "Currently pursuing a Bachelor's degree" if currently_student and degree and "bachelor" in _norm(degree) else None
         return _result(options, value, "education_control", "structured education field") if value else _review(options, "education_control", "education fact missing")
-    if "years" in text and "experience" in text and any(
-            term in text for term in ("professional", "relevant", "software")):
+    if (("years" in text or re.search(r"\bhow much\b.*\bexperience\b", text)) and "experience" in text and any(
+            term in text for term in ("professional", "relevant", "software"))):
         years = employment.get("years_professional_experience", profile.get("years_professional_experience"))
+        # "Full-time" experience uses the total only when the candidate says
+        # their (internship) experience was full-time work.
+        if "full time" in text and employment.get("experience_counts_as_full_time",
+                                                  profile.get("experience_counts_as_full_time")) is not True:
+            return _review(options, "experience_years", "full-time status of experience not stated")
         threshold = re.search(r"\b(\d+)\s*\+?\s*years", text)
         if not isinstance(years, (int, float)) or isinstance(years, bool):
             return _review(options, "experience_years", "experience years missing")

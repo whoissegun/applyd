@@ -33,6 +33,7 @@
   "over_18": true,
   "security_clearances": [],
   "years_professional_experience": 1,
+  "experience_counts_as_full_time": null,
   "work_authorization": {
     "CA": {
       "authorized": true,
@@ -98,6 +99,7 @@
     "employment_types": ["internship", "placement", "new_grad", "full_time", "contract"],
     "accept_any_role_option": false,
     "willing_to_relocate": true,
+    "relocation_timeline": null,
     "willing_to_work_onsite": true,
     "willing_to_work_hybrid": true,
     "willing_to_work_remote": true,
