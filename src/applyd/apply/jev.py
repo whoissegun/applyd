@@ -274,6 +274,18 @@ class JevPlanner:
                         {'ref': field['ref'], 'value': mapped_value},
                     ))
                     continue
+                # "Where are you currently located?" typeaheads: the
+                # structured residence, picked from real suggestions.
+                if (field.get('select') and re.fullmatch(
+                        r'(?:where are you (?:currently )?(?:located|based)|current location|'
+                        r'location|your location|where do you (?:currently )?live)', label)):
+                    place = ', '.join(str(profile.get(k)) for k in
+                                      ('address_city', 'address_region', 'address_country')
+                                      if profile.get(k))
+                    if place:
+                        self.seen.add((label, 'deterministic:residence_location'))
+                        deterministic_actions.append(('fill_autocomplete', {'ref': field['ref'], 'value': place}))
+                        continue
                 answer = resolve_text_question(
                     str(field.get('label') or ''), profile,
                     job_locations=job_locations or (), company=company,
@@ -438,6 +450,17 @@ class JevPlanner:
             multi_values, multi_predicate = profile.get('spoken_languages'), 'spoken_languages_multi'
         elif question_key == 'undergrad discipline s' and 'bachelor' in str(profile.get('degree', '')).casefold():
             multi_values, multi_predicate = [profile.get('major')], 'undergrad_discipline_multi'
+        elif (re.search(r'\b(?:qualifications?|degrees?)\b', question_key)
+                and re.search(r'\bin progress\b|\bpursuing\b|\bcurrently studying\b', question_key)):
+            # "Qualifications (achieved or in progress)": the enrolled degree
+            # level counts; tick exactly that one level, nothing inferred.
+            degree = str(profile.get('degree', '')).casefold()
+            level = next((name for name in ('bachelor', 'master', 'doctor', 'phd')
+                          if name in degree), None)
+            matches = [str(option.get('label', '')) for option in options
+                       if level and level in str(option.get('label', '')).casefold()]
+            if len(matches) == 1:
+                multi_values, multi_predicate = matches, 'degree_level_in_progress_multi'
         if group.get('kind') == 'checkbox' and isinstance(multi_values, list):
             known = {str(value).strip().casefold() for value in multi_values if value}
             selected = [option for option in options

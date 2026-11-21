@@ -42,7 +42,9 @@ class JevHybridTests(unittest.TestCase):
         with patch.object(planner, '_post') as post:
             actions, metrics = planner.propose(page, {'over_18':True})
         self.assertEqual(actions, [])
-        self.assertEqual(metrics['reason'], 'optional_question_skipped')
+        # Age is a recognized demographic with no decline option here: still
+        # skipped, never guessed, and no paid request.
+        self.assertIn(metrics['reason'], {'optional_question_skipped', 'optional_unmatched_decision_skipped'})
         post.assert_not_called()
 
     def test_optional_bounded_skip_requires_positive_optional_detection(self):

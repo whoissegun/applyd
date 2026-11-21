@@ -954,7 +954,8 @@ def run_apply(
                     if name == "upload_resume" and result.startswith("ok:"):
                         resume_uploaded = True
                     if (hybrid_response is not None and result.startswith("ok:")
-                            and name in {"select_option", "click", "click_many", "pick_option"}):
+                            and name in {"select_option", "click", "click_many", "pick_option",
+                                         "fill_autocomplete"}):
                         controller_refs.update(
                             ref for ref in (args.get("refs") if name == "click_many"
                                             else [args.get("ref")])
@@ -1246,6 +1247,14 @@ def _profile_already_answers(
     """Reject false model gaps only when the structured profile has the fact."""
     text = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
     from .deterministic_questions import required_consent_authorized, resolve_text_question
+    # Identity/contact fields with an exact label mapping and a stored value
+    # are never "missing" (Sirion: the model listed First/Last Name and Email).
+    from .jev import FIELDS
+    bare = re.sub(r"\s+(?:required|optional)$", "", text)
+    for key, pattern in FIELDS.items():
+        value = profile.get(key)
+        if re.fullmatch(pattern, bare) and isinstance(value, str) and value.strip():
+            return True
     if required_consent_authorized(label, profile, required=True):
         return True
     if ((profile.get('application_policy') or {}).get('required_narrative_invention') is True

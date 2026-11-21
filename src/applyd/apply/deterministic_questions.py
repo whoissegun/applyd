@@ -218,6 +218,23 @@ def _result(options: Mapping[str, str] | Sequence[Mapping[str, Any]], value: Any
     return DeterministicAnswer(choice, predicate, value, reason)
 
 
+def _bind_gpa_band(rendered: Mapping[str, str], gpa: float) -> str | None:
+    """Unique band containing ``gpa`` ("3.6 - 4.0", "3.0 or under", "3.5+")."""
+    matches = []
+    for key, label in rendered.items():
+        text = str(label).casefold()
+        between = re.search(r"(\d(?:\.\d+)?)\s*(?:-|–|—|to)\s*(\d(?:\.\d+)?)", text)
+        under = re.search(r"(\d(?:\.\d+)?)\s*(?:or (?:under|below|less)|and below)|(?:under|below|less than)\s*(\d(?:\.\d+)?)", text)
+        plus = re.search(r"(\d(?:\.\d+)?)\s*(?:\+|or (?:above|higher|more))", text)
+        if between and float(between.group(1)) <= gpa <= float(between.group(2)):
+            matches.append(key)
+        elif under and gpa <= float(under.group(1) or under.group(2)):
+            matches.append(key)
+        elif plus and gpa >= float(plus.group(1)):
+            matches.append(key)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _bind_year_band(options: Mapping[str, str] | Sequence[Mapping[str, Any]],
                     years: float) -> str | None:
     """Bind a numeric experience fact to one visible, non-overlapping band."""
@@ -251,6 +268,18 @@ def _regions(question: str) -> list[str]:
     return found
 
 
+_US_STATE_NAMES = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+    "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+    "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+    "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina",
+    "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island",
+    "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont", "virginia",
+    "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
+}
+
+
 def _location_regions(profile: Mapping[str, Any], job_locations: Sequence[str]) -> list[str]:
     context = profile.get("job_context") if isinstance(profile.get("job_context"), Mapping) else {}
     raw: list[str] = list(job_locations)
@@ -258,6 +287,8 @@ def _location_regions(profile: Mapping[str, Any], job_locations: Sequence[str]) 
         value = context.get(key)
         raw.extend(value if isinstance(value, list) else [value] if value else [])
     if raw and all(_norm(str(place)) in {"sf", "nyc", "south sf"} for place in raw):
+        return ["US"]
+    if raw and all(_norm(str(place)) in _US_STATE_NAMES for place in raw):
         return ["US"]
     text = " | ".join(map(str, raw))
     if re.search(
@@ -759,6 +790,46 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             if "computer science" not in text or "computer science" not in subject:
                 return _review(options, "degree_completion", "degree subject needs exact grounding")
         return _result(options, True, "degree_completion", "explicit completed profile credential")
+    # "When do you graduate?" / "Expected graduation term" with date options.
+    if ("graduat" in text and re.search(r"\b(?:when|date|month|term|year|semester|expected|anticipated)\b", text)
+            and not re.search(r"\b(?:have you|did you|are you|will you)\b", text) and grad):
+        rendered = _options(options)
+        choice = _bind(options, grad)
+        if choice is None and isinstance(policy, Mapping) and policy.get("graduation_date_nearest_option") is True \
+                and option_semantics.mostly_dates(rendered.values()):
+            choice = option_semantics.bind_nearest_month(rendered, grad, prefer_after=False)
+        if choice is not None:
+            return DeterministicAnswer(choice, "education_control", rendered.get(choice, grad),
+                                       "structured graduation date bound to offered option")
+    # GPA bands on a 4.0 scale from a different-scale GPA, when the profile
+    # explicitly allows linear conversion.
+    if re.search(r"\bgpa\b|grade point average", text):
+        gpa = profile.get("gpa")
+        rendered = _options(options)
+        if isinstance(gpa, Mapping) and isinstance(gpa.get("value"), (int, float)) and gpa.get("disclose") is not False:
+            value, scale = float(gpa["value"]), float(gpa.get("scale") or 4.0)
+            if scale != 4.0 and gpa.get("conversion_policy") == "allow_linear_conversion_when_required":
+                value = round(value / scale * 4.0, 2)
+            if scale == 4.0 or gpa.get("conversion_policy") == "allow_linear_conversion_when_required":
+                band = _bind_gpa_band(rendered, value)
+                if band is not None:
+                    return DeterministicAnswer(band, "gpa_band", rendered[band],
+                                               f"GPA {value} on a 4.0 scale (linear conversion permitted)")
+        return _review(options, "gpa_band", "GPA band not established")
+    if "essential functions" in text and "accommodation" in text:
+        disability = demographics.get("disability_status", profile.get("disability_status")) \
+            if isinstance(demographics, Mapping) else profile.get("disability_status")
+        if isinstance(disability, str) and _norm(disability).startswith("no"):
+            return _result(options, True, "essential_functions",
+                           "profile states no disability; able with or without accommodation")
+    if (re.search(r"\bhave you (?:built|developed|created|shipped)\b.*\b(?:software|application|app)\b", text)
+            and re.search(r"\b(?:coursework|internships?|personal projects?|professional experience)\b", text)
+            and not re.search(r"\b(?:frontend|backend|mobile|ios|android|machine learning|production|"
+                              r"scale|users|revenue|interactive|embedded)\b", text)):
+        facts = profile.get("resume_facts") or {}
+        if isinstance(facts, Mapping) and (facts.get("experience") or facts.get("projects")):
+            return _result(options, True, "general_software_experience",
+                           "resume lists software internships/projects")
     year = re.search(r"\b(20\d{2})\b", text)
     if year and "graduat" in text:
         return _result(options, bool(grad and str(grad).startswith(year.group(1))), "graduation_year", "structured graduation date")
@@ -849,7 +920,8 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         return _result(options, True, "required_consent", "user authorized required privacy consent")
 
     consent_map = (
-        (("recruiting marketing", "future job opportunities", "talent network", "whatsapp"), ("recruiting_marketing_consent", "recruiting_communications_consent")),
+        (("recruiting marketing", "recruitment marketing", "marketing communications",
+          "future job opportunities", "talent network", "whatsapp"), ("recruiting_marketing_consent", "recruiting_communications_consent")),
         (("text messages", "sms"), ("sms_recruiting_consent",)),
         (("recording", "recorded", "recording and transcribing"), ("interview_recording_consent",)),
     )
@@ -891,8 +963,12 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     if "driver s license" in text:
         value = credentials.get("drivers_license")
         return _result(options, value, "drivers_license", "structured credential") if isinstance(value, bool) else _review(options, "drivers_license", "credential missing")
-    if re.search(r"\bnon (?:compete|competition|solicitation|solicit)\b", text):
+    if re.search(r"\bnon ?(?:compete|competition|solicitation|solicit)\b", text):
         value = background.get("no_restrictive_covenants")
+        # Nondisclosure/confidentiality agreements are a different fact
+        # (internships usually involve one); never answer them from this one.
+        if re.search(r"\b(?:non ?disclosure|confidentiality|nda)\b", text):
+            return _review(options, "sensitive_history", "nondisclosure/confidentiality agreement fact missing")
         if isinstance(value, bool) and not re.search(r"\b(?:agree|sign|willing)\b", text):
             return _result(options, not value, "restrictive_covenants",
                            "structured background fact about non-compete/non-solicit agreements")
@@ -1026,8 +1102,28 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         (("veteran or active member",), "veteran_status"),
         (("disability", "chronic condition"), "disability_status"),
         (("gender identity",), "gender"),
-        (("racial ethnic",), "ethnicity"),
+        (("racial ethnic", "what is your ethnicity", "ethnic origin", "ethnic background", "ethnic group"), "ethnicity"),
     )
+    # Sensitive equal-opportunity questions the profile does not answer
+    # (sex, gender-identity-at-birth, age, sexual orientation, religion):
+    # take the form's own decline option. Never infer a value.
+    decline_terms = ("prefer not", "decline", "don t wish", "do not wish", "rather not", "not to say", "not to answer")
+    sensitive = re.search(
+        r"\b(?:what is your sex|your sex|sex registered|sex assigned|assigned at birth|registered at birth|"
+        r"sexual orientation|religion|belief|what is your age|age range|age group|age bracket)\b", text)
+    if sensitive:
+        gender = demographics.get("gender", profile.get("gender"))
+        if re.search(r"\b(?:what is your sex|your sex)\b", text) and isinstance(gender, str) \
+                and not any(t in _norm(gender) for t in decline_terms):
+            answer = _result(options, gender, "sex", "structured demographic field")
+            if answer.choice and answer.choice != "review":
+                return answer
+        rendered = _options(options)
+        declines = [k for k, label in rendered.items() if any(t in _norm(label) for t in decline_terms)]
+        if len(declines) == 1:
+            return DeterministicAnswer(declines[0], "demographic_unset", rendered[declines[0]],
+                                       "profile does not state this; use the form's decline option")
+        return _review(options, "demographic_unset", "profile does not state this demographic")
     for terms, key in demographic_map:
         if any(term in text for term in terms):
             value = demographics.get(key, profile.get(key))
@@ -1035,6 +1131,18 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                 value = False if value and "not" in _norm(value) else None
             elif key == "disability_status" and isinstance(value, str):
                 value = not _norm(value).startswith("no")
+            if key == "ethnicity" and isinstance(value, str) and "black" in _norm(value):
+                answer = _result(options, value, key, "structured demographic field")
+                if answer.choice and answer.choice != "review":
+                    return answer
+                # UK-style lists ("Black or Black British - African").
+                rendered = _options(options)
+                african = [k for k, label in rendered.items()
+                           if "black" in _norm(label) and "african" in _norm(label)
+                           and "caribbean" not in _norm(label)]
+                if len(african) == 1:
+                    return DeterministicAnswer(african[0], key, rendered[african[0]],
+                                               "structured ethnicity bound to the form's Black African option")
             return _result(options, value, key, "structured demographic field") if value is not None else _review(options, key, "demographic fact missing")
     if "current age" in text:
         rendered = _options(options)
@@ -1213,6 +1321,16 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
         if isinstance(value, str) and value.strip():
             return DeterministicAnswer("text", "github_url", value,
                                        "saved GitHub profile URL")
+    # "Please provide a link to a project ... you've built": the first resume
+    # project with a URL (a real artifact, not a profile page).
+    if re.search(r"\blinks? to (?:a |one of your |your )?(?:project|something you(?: ve)? built)\b|\bproject (?:link|url)\b", text):
+        facts = profile.get("resume_facts") or {}
+        projects = facts.get("projects") if isinstance(facts, Mapping) else None
+        for project in projects or []:
+            url = project.get("url") or project.get("link") if isinstance(project, Mapping) else None
+            if isinstance(url, str) and url.startswith("http"):
+                return DeterministicAnswer("text", "github_url", url,
+                                           f"resume project URL ({project.get('name', 'project')})")
     # "Please leave your GitHub or portfolio link if you have one:" — a link
     # request naming GitHub (alone or with portfolio/website) takes the saved
     # GitHub URL; a portfolio-only request takes the saved portfolio URL.

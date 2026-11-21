@@ -156,3 +156,57 @@ class ConsequentialTextGuardTests(unittest.TestCase):
         from applyd.apply.tools import _consequential_text_guard
         for q in ("Why do you want to work here?", "Discipline"):
             self.assertIsNone(_consequential_text_guard(self.loc(q), "anything", self.PROFILE, []))
+
+
+class Batch20FixTests(unittest.TestCase):
+    PROFILE = {
+        "gender": "Prefer not to say", "ethnicity": "Black or African American",
+        "disability_status": "No, I do not have a disability", "expected_grad_date": "2027-04",
+        "gpa": {"value": 9.6, "scale": 12, "disclose": True,
+                "conversion_policy": "allow_linear_conversion_when_required"},
+        "application_policy": {"recruiting_communications_consent": False},
+        "background_defaults": {"no_restrictive_covenants": True},
+        "resume_facts": {"experience": [{"company": "Shopify"}],
+                         "projects": [{"name": "Spequlo", "url": "https://spequlo.com"}]},
+        "work_authorization": {"US": {"authorized": False, "requires_sponsorship": True}},
+    }
+
+    def pick(self, q, labels, **kw):
+        from applyd.apply.deterministic_questions import resolve_question
+        options = {str(i): label for i, label in enumerate(labels)}
+        return options.get(resolve_question(q, self.PROFILE, options, required=True, **kw).choice)
+
+    def test_sensitive_demographics_take_decline(self) -> None:
+        for q in ("What is your sex?*", "What is your sexual orientation?*",
+                  "What is your religion or belief?*", "What is your age?*"):
+            self.assertEqual("Prefer not to say", self.pick(q, ["A", "B", "Prefer not to say"]), q)
+
+    def test_uk_ethnicity_list(self) -> None:
+        self.assertEqual("Black or Black British - African", self.pick(
+            "What is your ethnicity?*", ["Black or Black British - African",
+                                         "Black or Black British - Caribbean", "White British"]))
+
+    def test_graduation_range_and_gpa_band(self) -> None:
+        self.assertEqual("Jan - April 2027", self.pick(
+            "When do you graduate?*", ["Sept - Dec 2026", "Jan - April 2027", "May - Aug 2027"]))
+        self.assertEqual("3.1 - 3.5", self.pick("What is your GPA?*", ["3.6 - 4.0", "3.1 - 3.5", "3.0 or under"]))
+
+    def test_marketing_consent_and_covenants(self) -> None:
+        self.assertEqual("No", self.pick(
+            "You can choose to receive recruitment marketing communications from us", ["Yes", "No"]))
+        self.assertEqual("No", self.pick("Are you subject to any noncompete agreement?*", ["Yes", "No"]))
+        self.assertIsNone(self.pick(
+            "Are you subject to any noncompete nondisclosure/confidentiality agreement?*", ["Yes", "No"]))
+
+    def test_state_name_location_and_essential_functions(self) -> None:
+        self.assertEqual("Yes", self.pick(
+            "If you require sponsorship or visa-related assistance please specify", ["Yes", "No"],
+            job_locations=["Georgia"]))
+        self.assertEqual("Yes", self.pick(
+            "Are you able to perform the essential functions of the job, with or without reasonable accommodation?",
+            ["Yes", "No"]))
+
+    def test_project_link(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        self.assertEqual("https://spequlo.com", resolve_text_question(
+            "Please provide a link to a project you've built", self.PROFILE).value)

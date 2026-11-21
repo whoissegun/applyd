@@ -68,6 +68,9 @@ def _authorization_region_from_locations(
     location = " | ".join(job_locations or []).casefold()
     if job_locations and all(str(place).strip().casefold() in {"sf", "nyc", "south sf"} for place in job_locations):
         return "US"
+    from .deterministic_questions import _US_STATE_NAMES
+    if job_locations and all(str(p).strip().casefold() in _US_STATE_NAMES for p in job_locations):
+        return "US"
     if (
         any(term in location for term in (
             "united states", "usa", "u.s.", "san francisco", "new york",
@@ -1436,6 +1439,10 @@ def _recruitment_event_profile_guard(
     if not any(phrase in question for phrase in (
         "recruitment event", "event you attended", "which event",
     )):
+        return None
+    # "Receive recruitment marketing communications ... recruitment events"
+    # is an opt-in consent, not a question about events attended.
+    if re.search(r"\b(?:receive|communications?|marketing|opt in|subscribe|updates)\b", question):
         return None
     background = (profile or {}).get("background_defaults") or {}
     recruitment_events = background.get("recruitment_events") or {}
