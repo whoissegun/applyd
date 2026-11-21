@@ -552,7 +552,8 @@ def _profile_click_guard(
     loc = _ref_locator(page, ref)
     question = str(loc.get_attribute("data-applyd-question") or "").casefold()
     legal_label = question + ' ' + str(loc.get_attribute('data-applyd-label') or '').casefold()
-    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    required = (loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+                or loc.get_attribute("data-applyd-required") == "true")
     standing_consent = required_consent_authorized(legal_label, profile, required=required)
     if (not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', legal_label)
             and not _covenant_answer_ok(legal_label, str(loc.get_attribute("data-applyd-option") or ""), profile)):
@@ -1944,7 +1945,8 @@ def _select_profile_guard(
     if degree_error:
         return degree_error
     recording_consent: bool | None = None
-    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    required = (loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+                or loc.get_attribute("data-applyd-required") == "true")
     standing_consent = required_consent_authorized(question, profile, required=required)
     if (
         any(term in question for term in ("recording", "recorded", "record interview"))
@@ -2607,7 +2609,8 @@ def _resolve_from_rendered_options(
         options = _read_options(page)
     texts = _option_texts(options)
     rendered = {str(i): text for i, text in enumerate(texts)}
-    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    required = (loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+                or loc.get_attribute("data-applyd-required") == "true")
     answer = resolve_question(label, profile, rendered, job_locations=job_locations or (),
                               company=company, required=required)
     if answer.choice in rendered:
@@ -2668,6 +2671,12 @@ def select_option(
         if not initial_options:
             opened = open_dropdown(page, ref)
             if opened.startswith("error:"):
+                # Typeaheads (School, Location) render nothing until typed
+                # into: type the value and pick a real suggestion instead.
+                if "no options rendered" in opened and loc.evaluate(
+                        "el => el.tagName === 'INPUT' && el.getAttribute('role') === 'combobox'", timeout=3000):
+                    typed = fill_autocomplete(page, ref, value)
+                    return typed.replace("fill_autocomplete", "select_option", 1)
                 return opened.replace("open_dropdown", "select_option", 1)
             initial_options = _read_options(page)
         # Inspect what the component actually rendered before typing anything.
