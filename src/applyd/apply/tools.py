@@ -3141,6 +3141,19 @@ def _post_submit_result(page: Page, ref: str, verify_ctx: dict | None, submitted
         )
     if not state.get("formVisible") and not state.get("submitVisible"):
         return _ok(f"submission_confirmed via {ref}; form closed; url={page.url}")
+    try:
+        turnstile = page.evaluate(
+            "() => [...document.scripts].some(s => /challenges\\.cloudflare\\.com\\/turnstile/.test(s.src))")
+    except Exception:  # noqa: BLE001
+        turnstile = False
+    if turnstile:
+        # Workable re-shows the button after a failed invisible Turnstile
+        # check; no error, no confirmation, no email. That is a CAPTCHA gate,
+        # not an ambiguous outcome to keep re-clicking.
+        return _err(
+            f"submit {ref}: captcha did not resolve within {SUBMIT_CAPTCHA_WAIT_SECONDS}s "
+            "(Cloudflare Turnstile; form still visible, no confirmation)"
+        )
     return _err(
         f"submit {ref}: submission outcome unconfirmed; form is still visible at {page.url}"
     )
