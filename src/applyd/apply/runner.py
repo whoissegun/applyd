@@ -870,6 +870,16 @@ def run_apply(
                         if is_bounded_answer_action(page, name, args):
                             action_refs = (args.get('refs') if name == 'click_many'
                                            else [args.get('ref')])
+                            if name == 'pick_option':
+                                # pick_option names an option (o*); its field is
+                                # the combobox currently marked open.
+                                try:
+                                    open_ref = page.evaluate(
+                                        "() => document.querySelector('[data-applyd-combobox-open]')"
+                                        "?.getAttribute('data-applyd-ref') || ''")
+                                except Exception:  # noqa: BLE001
+                                    open_ref = ''
+                                action_refs = [open_ref] if open_ref else []
                             if action_refs and all(ref in controller_refs for ref in action_refs):
                                 # The deterministic layer already answered this
                                 # field (e.g. the closest graduation option);
