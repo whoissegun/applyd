@@ -612,3 +612,44 @@ class DeterministicQuestionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImmigrationScopeTests(unittest.TestCase):
+    PROFILE = {"work_authorization": {
+        "CA": {"authorized": True, "requires_sponsorship": False},
+        "US": {"authorized": False, "requires_sponsorship": True},
+    }}
+    OPTIONS = {"yes": "Yes", "no": "No", "review": "Review"}
+
+    def ask(self, question, locations=(), form_regions=()):
+        return resolve_question(question, self.PROFILE, self.OPTIONS,
+                                job_locations=locations, form_regions=form_regions).choice
+
+    def test_scoped_answers_follow_each_country(self) -> None:
+        self.assertEqual("yes", self.ask("Are you legally authorized to work in Canada?"))
+        self.assertEqual("no", self.ask("Will you require sponsorship to work in Canada?"))
+        self.assertEqual("no", self.ask("Are you legally authorized to work in the United States?"))
+        self.assertEqual("yes", self.ask("Will you now or in the future require sponsorship for a US visa?"))
+
+    def test_with_or_without_sponsorship_is_yes_for_us(self) -> None:
+        self.assertEqual("yes", self.ask(
+            "Are you authorized to work in the United States with or without sponsorship?"))
+        self.assertEqual("yes", self.ask(
+            "Are you authorized to work in Canada with or without visa sponsorship?"))
+        # Plain "without sponsorship" keeps its strict meaning.
+        self.assertEqual("no", self.ask(
+            "Are you authorized to work in the United States without sponsorship?"))
+
+    def test_unscoped_question_on_form_naming_other_country_goes_to_review(self) -> None:
+        # Didero: Toronto role, form asks a U.S. question, then an unscoped one.
+        self.assertEqual("review", self.ask(
+            "Will you now or in the future require employment visa sponsorship?",
+            locations=["Toronto, ON, Canada"], form_regions=["US"]))
+
+    def test_unscoped_question_still_answers_when_form_names_only_job_country(self) -> None:
+        self.assertEqual("no", self.ask(
+            "Will you now or in the future require employment visa sponsorship?",
+            locations=["Toronto, ON, Canada"], form_regions=["CA"]))
+        self.assertEqual("no", self.ask(
+            "Will you now or in the future require employment visa sponsorship?",
+            locations=["Toronto, ON, Canada"]))

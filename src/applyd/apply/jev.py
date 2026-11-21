@@ -365,6 +365,13 @@ class JevPlanner:
         groups = page.evaluate(DECISIONS_JS)
         if not isinstance(groups, list):
             return [], {'reason': 'no_supported_decisions'}
+        # Countries named anywhere on the form, including already-answered
+        # questions, scope unscoped legal questions such as "Will you require
+        # sponsorship?" that follow a U.S.-specific one.
+        form_regions = sorted({
+            region for candidate in groups if isinstance(candidate, dict)
+            for region in _regions_in_question(str(candidate.get('question') or ''))
+        })
         groups = [group for group in groups
                   if isinstance(group, dict) and (
                       group.get('question') not in self.decision_seen
@@ -419,7 +426,7 @@ class JevPlanner:
                 decision_locations = [str(value) for value in selected_locations]
         deterministic = resolve_question(
             question, profile, options, job_locations=decision_locations, company=company,
-            required=bool(group.get('required')),
+            required=bool(group.get('required')), form_regions=form_regions,
         )
         if deterministic.choice and deterministic.choice != 'review':
             fresh_groups = page.evaluate(DECISIONS_JS)

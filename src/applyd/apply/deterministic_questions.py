@@ -265,7 +265,8 @@ def immigration_authorization_required_question(question: str) -> bool:
 
 
 def _legal(question: str, profile: Mapping[str, Any], options: Any,
-           job_locations: Sequence[str]) -> DeterministicAnswer | None:
+           job_locations: Sequence[str],
+           form_regions: Sequence[str] = ()) -> DeterministicAnswer | None:
     text = _norm(question)
     if (text.startswith('skip this question if you are applying to work in canada or the uk')
             and _location_regions(profile, job_locations) in [['CA'], ['UK']]):
@@ -296,6 +297,7 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
         return _review(options, "legal_ambiguous", "scope is not a concrete jurisdictional predicate")
 
     regions = _regions(question)
+    unscoped = not regions
     residence_relative = any(phrase in text for phrase in (
         "country you are based in", "country you re based in",
         "country where you are based", "country where you currently reside",
@@ -345,6 +347,22 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
     )) or bool(re.search(r'\bhave\b.*\bwork authori[sz]ation\b', text))
     if re.search(r'\b(?:ever|previously|denied)\b', text):
         return _review(options, 'legal_ambiguous', 'historical immigration fact is not established by current authorization')
+    # "Authorized to work ... with or without sponsorship?" asks whether the
+    # candidate can work there at all, sponsorship included.
+    with_or_without = authorization_predicate and bool(re.search(
+        r"\bwith or without\b.*\bsponsor\w*\b", text))
+    if with_or_without:
+        facts = [_work_record(profile, r) or {} for r in regions]
+        if len(facts) != 1:
+            return _review(options, "work_authorized_with_sponsorship", "multiple jurisdictions")
+        record = facts[0]
+        if record.get("authorized") is True:
+            return _result(options, True, "work_authorized_with_sponsorship",
+                           "currently authorized in the named jurisdiction")
+        if record.get("requires_sponsorship") is True:
+            return _result(options, True, "work_authorized_with_sponsorship",
+                           "authorized with employer sponsorship per structured regional facts")
+        return _review(options, "work_authorized_with_sponsorship", "structured fact is missing")
     without_sponsorship = authorization_predicate and bool(re.search(
         r"\bwithout\b.*\b(?:sponsor\w*|employer sponsored)\b", text))
     sponsorship = not authorization_predicate and bool(
@@ -375,6 +393,16 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
         values = [authorized and not needs for authorized, needs in zip(values, sponsorship_values)]
     if not all(isinstance(value, bool) for value in values):
         return _review(options, f"work_{field}", "structured jurisdictional fact is missing")
+    other_form_regions = [r for r in form_regions if r not in regions]
+    if unscoped and not residence_relative and not role_relative and other_form_regions:
+        # e.g. Toronto role, form asks "authorized in the U.S.?" then an
+        # unscoped "require sponsorship?". If the truthful answer differs by
+        # country, the scope is genuinely ambiguous: never guess.
+        other_values = [(_work_record(profile, r) or {}).get(field) for r in other_form_regions]
+        if any(value != values[0] for value in values + other_values):
+            return _review(options, f"work_{field}",
+                           "unscoped legal question on a form that names another country "
+                           "with a different answer")
     if field == 'authorized' and 'unrestricted' in text and any(values):
         return _review(options, 'work_authorized', 'authorization boolean does not establish unrestricted permit conditions')
     if len(values) == 1:
@@ -412,11 +440,17 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
 
 def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                      job_locations: Sequence[str] = (), company: str = "",
-                     required: bool = False) -> DeterministicAnswer:
-    """Resolve a supported closed question or return the rendered review choice."""
+                     required: bool = False,
+                     form_regions: Sequence[str] = ()) -> DeterministicAnswer:
+    """Resolve a supported closed question or return the rendered review choice.
+
+    ``form_regions`` lists countries named elsewhere on the same form; it
+    keeps an unscoped legal question from silently taking the job-location
+    country when the form is evidently asking about another one.
+    """
     question = re.split(r"\n\s*[Ss]elect\s*(?:\.\.\.|…)?\s*\n", question, maxsplit=1)[0]
     text = _norm(question)
-    legal = _legal(question, profile, options, job_locations)
+    legal = _legal(question, profile, options, job_locations, form_regions)
     if legal is not None:
         return legal
     if required_consent_authorized(question, profile, required=required):
