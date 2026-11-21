@@ -363,6 +363,8 @@ def run_apply(
     submit_confirmed_turn: int | None = None
     submit_confirmation_note = ""
     resume_uploaded = False
+    # Refs the deterministic/Jev layer answered in this attempt.
+    controller_refs: set[str] = set()
     failed_action_counts: dict[str, int] = {}
     event_sequence = 0
     preflight_required = False
@@ -866,6 +868,19 @@ def run_apply(
                             args = dict(args, fields=[field for field in args.get('fields', [])
                                 if not is_optional_answer_action(page, 'fill', field)])
                         if is_bounded_answer_action(page, name, args):
+                            action_refs = (args.get('refs') if name == 'click_many'
+                                           else [args.get('ref')])
+                            if action_refs and all(ref in controller_refs for ref in action_refs):
+                                # The deterministic layer already answered this
+                                # field (e.g. the closest graduation option);
+                                # Kimi may not overwrite it, and that is not a
+                                # reason to abandon the application.
+                                result = ('skipped: this question was already answered by the '
+                                          'controller from the structured profile. The answer was '
+                                          'not changed. Do not retry it; continue with other fields.')
+                                messages.append({'role': 'tool', 'tool_call_id': tc.id, 'content': result})
+                                _emit('tool_result', turn=turn, name=name, payload={'result': result})
+                                continue
                             if is_satisfied_answer_action(page, name, args, jev_planner.decision_attempts):
                                 result = ('skipped: these closed questions are optional or already answered '
                                           'by the controller. Existing answers were not changed. Do not retry them.')
@@ -924,6 +939,12 @@ def run_apply(
                     )
                     if name == "upload_resume" and result.startswith("ok:"):
                         resume_uploaded = True
+                    if (hybrid_response is not None and result.startswith("ok:")
+                            and name in {"select_option", "click", "click_many", "pick_option"}):
+                        controller_refs.update(
+                            ref for ref in (args.get("refs") if name == "click_many"
+                                            else [args.get("ref")])
+                            if isinstance(ref, str))
                     if controller is not None:
                         controller.observe(name, result)
                     if not result.startswith("error:") and name == "open_dropdown":

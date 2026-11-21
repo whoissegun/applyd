@@ -183,3 +183,52 @@ class GraduationNearestPolicyTests(unittest.TestCase):
         self.assertIsNotNone(_date_profile_guard(
             "Target Start Date*", "Dec 2025", self.BASE,
             offered=list(self.SUPERAPP), today=date(2026, 11, 21)))
+
+
+class ComboboxStartAndConsentTests(unittest.TestCase):
+    PROFILE = {"expected_grad_date": "2027-04", "earliest_start_date": "immediately"}
+
+    def test_target_start_combobox_gets_graduation_anchor(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        self.assertEqual("2027-04-30", resolve_text_question("Target Start Date*", self.PROFILE).value)
+        self.assertIsNone(resolve_text_question("Start date month", self.PROFILE))
+        # The dropdown then binds the closest offered option.
+        options = {"0": "June 2026", "1": "July 2026"}
+        self.assertEqual("1", resolve_question("Target Start Date*", self.PROFILE, options).choice)
+
+    def test_confirm_deny_consent_options(self) -> None:
+        match = _match_option(opts("Confirm", "Deny"), "Yes")
+        self.assertEqual("Confirm", match["text"])
+        match = _match_option(opts("Confirm", "Deny"), "No")
+        self.assertEqual("Deny", match["text"])
+
+
+class SelectedLocationReaderTests(unittest.TestCase):
+    def test_legal_answer_is_not_a_selected_location(self) -> None:
+        from applyd.apply import tools
+        src = tools._selected_application_locations.__code__.co_consts
+        js = next(c for c in src if isinstance(c, str) and "querySelectorAll" in c)
+        self.assertIn("authori[sz]|sponsor", js)
+        self.assertIn("yes|no|true|false", js)
+
+
+class NonCompeteTests(unittest.TestCase):
+    Q = ("Are you now (or will you be) subject to any agreement containing restrictions "
+         "or covenants regarding non-competition or non-solicitation?*")
+    OPTIONS = {"yes": "Yes", "no": "No", "review": "Review"}
+
+    def test_consent_policy_never_answers_non_compete(self) -> None:
+        profile = {"application_policy": {"required_consents": True}}
+        self.assertEqual("review", resolve_question(self.Q, profile, self.OPTIONS, required=True).choice)
+
+    def test_explicit_fact_answers_no(self) -> None:
+        profile = {"application_policy": {"required_consents": True},
+                   "background_defaults": {"no_restrictive_covenants": True}}
+        self.assertEqual("no", resolve_question(self.Q, profile, self.OPTIONS, required=True).choice)
+
+    def test_real_consents_still_yes(self) -> None:
+        profile = {"application_policy": {"required_consents": True}}
+        for q in ("Do you agree to the following personal data protection regulation?*",
+                  "By applying you consent to a background check*"):
+            with self.subTest(q=q):
+                self.assertEqual("yes", resolve_question(q, profile, self.OPTIONS, required=True).choice)

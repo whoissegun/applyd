@@ -43,19 +43,42 @@ def required_consent_authorized(question: str, profile: Mapping[str, Any], *,
         "do you have", "are you subject", "are you bound",
     )):
         return False
+    # Factual status questions phrased around an agreement ("Are you now (or
+    # will you be) subject to any agreement ... non-competition?") are claims
+    # about the candidate, not consent requests.
+    if re.search(r"\b(?:are|were|will) you\b.*\b(?:subject to|bound by|party to|restricted by)\b", text):
+        return False
+    if re.search(r"\bnon (?:competition|solicitation|compete|solicit)\b", text) and \
+            not re.search(r"\b(?:i agree|do you agree|will you agree|willing to sign)\b", text):
+        return False
     if ('interview' in text and any(term in text for term in ('recording', 'records', 'transcribe'))
             and 'with your approval' in text):
         return True
-    return bool(re.search(r"\bauthorize\b", text)) or any(term in text for term in (
-        "consent", "agree", "privacy", "permission",
-        "background check", "binding arbitration", "terms and conditions",
-        "acknowledge", "waiver of rights", "non compete agreement",
-        "i understand",
-    ))
+    # Whole words only: "agree" must not match inside "agreement".
+    return bool(re.search(
+        r"\b(?:authorize|consent|consents|agree|agrees|privacy|permission|acknowledge|"
+        r"background check|binding arbitration|terms and conditions|waiver of rights|"
+        r"non compete agreement|i understand)\b", text))
 
 
 def _employer_name(value: Any) -> str:
     return re.sub(r"\s+(?:inc|incorporated|llc|ltd|limited|corporation|corp)$", "", _norm(value))
+
+
+def is_job_start_question(question: str) -> bool:
+    """Job-start wording only.
+
+    A bare "Start date month" is an education or work-history field and must
+    never take the graduation anchor.
+    """
+    text = _norm(question)
+    return bool(re.search(
+        r"\b(?:(?:target|desired|preferred|anticipated|expected|earliest|ideal|potential) "
+        r"(?:start|starting) (?:date|term|month|time)|"
+        r"when (?:can|could|would) you (?:start|begin)|available to (?:start|begin)|"
+        r"when are you available|availability to start|start term|"
+        r"(?:internship|co op|employment|job|role) start (?:date|term|month))\b", text)
+    ) and not re.search(r"\b(?:graduat|school|education|degree|previous|last role)\b", text)
 
 
 def graduation_start_date(profile: Mapping[str, Any], today: date | None = None) -> date | None:
@@ -792,7 +815,14 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     if "driver s license" in text:
         value = credentials.get("drivers_license")
         return _result(options, value, "drivers_license", "structured credential") if isinstance(value, bool) else _review(options, "drivers_license", "credential missing")
-    if any(term in text for term in ("criminal offence", "criminal offense", "non compete")):
+    if re.search(r"\bnon (?:compete|competition|solicitation|solicit)\b", text):
+        value = background.get("no_restrictive_covenants")
+        if isinstance(value, bool) and not re.search(r"\b(?:agree|sign|willing)\b", text):
+            return _result(options, not value, "restrictive_covenants",
+                           "structured background fact about non-compete/non-solicit agreements")
+        return _review(options, "sensitive_history", "restrictive-covenant fact missing")
+    if any(term in text for term in ("criminal offence", "criminal offense", "non compete",
+                                     "non competition", "non solicitation", "non solicit")):
         return _review(options, "sensitive_history", "historical fact missing")
 
     if "immediate family" in text and "government" in text:
@@ -925,15 +955,7 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         return _review(options, "demographic_unset", "profile does not contain this demographic")
 
     earliest = employment.get("earliest_start") or profile.get("earliest_start_date")
-    # Job-start wording only: a bare "Start date month" is an education or
-    # work-history field and must never take the graduation anchor.
-    start_question = bool(re.search(
-        r"\b(?:(?:target|desired|preferred|anticipated|expected|earliest|ideal|potential) "
-        r"(?:start|starting) (?:date|term|month|time)|"
-        r"when (?:can|could|would) you (?:start|begin)|available to (?:start|begin)|"
-        r"when are you available|availability to start|start term|"
-        r"(?:internship|co op|employment|job|role) start (?:date|term|month))\b", text)
-    ) and not re.search(r"\b(?:graduat|school|education|degree|previous|last role)\b", text)
+    start_question = is_job_start_question(text)
     rendered = _options(options)
     grad_start = graduation_start_date(profile)
     if start_question and option_semantics.mostly_dates(rendered.values()):
@@ -1034,6 +1056,14 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
         return DeterministicAnswer('text', 'job_search_motivation',
             'I am seeking a role where I can contribute, keep developing my skills, and take on meaningful technical work.',
             'job-search motivation alternative; no historical reason for leaving is invented')
+    if text not in {'date available', 'date of availability'} and is_job_start_question(text):
+        grad_start = graduation_start_date(profile)
+        if grad_start:
+            # Typed fields take the date; dropdowns then bind the closest
+            # offered option to it in select_option.
+            value = grad_start.strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
+            return DeterministicAnswer('text', 'start_availability', value,
+                                       'start anchored on graduation month')
     if text in {'date available', 'date of availability'}:
         earliest = _get(profile, ('employment', 'earliest_start'), ('earliest_start_date',))
         grad_start = graduation_start_date(profile)

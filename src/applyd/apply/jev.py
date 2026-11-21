@@ -295,9 +295,15 @@ class JevPlanner:
                     self.seen.add((label, 'deterministic_optional_skip'))
                     continue
                 self.seen.add((label, 'deterministic:' + answer.predicate))
+                value = str(answer.value)
+                if (field.get('select') and answer.predicate == 'start_availability'
+                        and re.fullmatch(r'\d{4}-\d{2}-\d{2}', value)):
+                    # Dropdowns offer months/terms, not days; select_option
+                    # then binds the closest offered option to this month.
+                    value = value[:7]
                 deterministic_actions.append((
                     'select_option' if field.get('select') else 'fill',
-                    {'ref': field['ref'], 'value': str(answer.value)},
+                    {'ref': field['ref'], 'value': value},
                 ))
             if deterministic_actions:
                 fresh = page.evaluate(FIELDS_JS)

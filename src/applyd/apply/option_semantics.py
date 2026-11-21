@@ -80,6 +80,11 @@ def semantic(value: object) -> str | None:
         return "boolean:yes"
     if re.match(r"^(?:no|false)\b", text):
         return "boolean:no"
+    # Consent pickers phrased as Confirm/Deny, Agree/Disagree, Accept/Decline.
+    if re.fullmatch(r"(?:i )?(?:confirm|agree|accept|consent)", text):
+        return "boolean:yes"
+    if re.fullmatch(r"(?:i )?(?:deny|disagree|do not agree|do not consent)", text):
+        return "boolean:no"
     return None
 
 

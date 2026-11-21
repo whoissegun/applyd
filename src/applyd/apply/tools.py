@@ -131,8 +131,12 @@ def _selected_application_locations(page: Page) -> list[str]:
       .filter(e => {
         const q=((e.getAttribute('data-applyd-question') || '') + ' ' +
           (e.getAttribute('data-applyd-label') || '')).toLowerCase();
+        // Legal questions ("authorized to work in the country you are
+        // applying to?") mention country+work but their answer is Yes/No,
+        // not a location.
         return /(?:location|countr(?:y|ies))/.test(q) &&
           /(?:work|selected|reside|residence|previous response)/.test(q) &&
+          !/(?:authori[sz]|sponsor|visa|citizen|permit|eligib|legally)/.test(q) &&
           (!!e.checked || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true' ||
            !!e.getAttribute('data-applyd-picked') ||
            (e.tagName === 'SELECT' && !!e.value));
@@ -140,7 +144,8 @@ def _selected_application_locations(page: Page) -> list[str]:
       .map(e => e.getAttribute('data-applyd-option') ||
         e.getAttribute('data-applyd-picked') ||
         (e.tagName === 'SELECT' ? (e.selectedOptions[0]?.text || e.value) : e.value) || '')
-      .map(v => v.trim()).filter(Boolean)""")
+      .map(v => v.trim()).filter(Boolean)
+      .filter(v => !/^(?:yes|no|true|false)$/i.test(v))""")
     return [str(value) for value in values] if isinstance(values, list) else []
 
 
