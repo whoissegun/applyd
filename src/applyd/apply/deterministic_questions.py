@@ -1195,6 +1195,21 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                     return DeterministicAnswer(african[0], key, rendered[african[0]],
                                                "structured ethnicity bound to the form's Black African option")
             return _result(options, value, key, "structured demographic field") if value is not None else _review(options, key, "demographic fact missing")
+    # "Nationality": the single structured citizenship, as a country name or
+    # its demonym, whichever the form offers.
+    if re.fullmatch(r"(?:what is your )?(?:nationality|citizenship|country of citizenship)", text):
+        country = _citizenship_country(profile)
+        demonyms = {"Nigeria": "Nigerian", "Canada": "Canadian", "United States": "American",
+                    "United Kingdom": "British", "India": "Indian"}
+        if country:
+            rendered = _options(options)
+            for wanted in (country, demonyms.get(country, "")):
+                matches = [k for k, label in rendered.items() if wanted and _norm(label) == _norm(wanted)]
+                if len(matches) == 1:
+                    return DeterministicAnswer(matches[0], "nationality", rendered[matches[0]],
+                                               "single structured citizenship")
+            if not set(rendered) <= {"yes", "no", "review"}:
+                return _review(options, "nationality", "citizenship not among the offered options")
     if "current age" in text:
         rendered = _options(options)
         decline = next((key for key, label in rendered.items()

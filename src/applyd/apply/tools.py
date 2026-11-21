@@ -2690,6 +2690,21 @@ def select_option(
                 options = _read_options(page)
                 matched = _match_option(options, bound_value)
                 searched = True
+        if matched is None and profile and re.search(
+                r"\b(?:school|university|college|institution)\b", raw_field_label, re.I):
+            # The candidate's school is absent from a national catalog
+            # ("OTHER (non-UK university)"): the form's explicit Other choice
+            # is the truthful answer. Restore the unfiltered list first.
+            if searched:
+                loc.fill("", timeout=8000)
+                page.wait_for_timeout(500)
+                page.evaluate(_OPTIONS_JS)
+                options = _read_options(page) or initial_options
+            others = [o for o in (options or initial_options)
+                      if re.match(r"^\s*other\b", str(o.get("text", "")), re.I)]
+            if len(others) == 1:
+                matched = others[0]
+                searched = False
         if matched is None:
             # A failed Greenhouse catalog search leaves the combobox filtered
             # to zero options. Restore the unfiltered catalog before returning

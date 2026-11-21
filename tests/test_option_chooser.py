@@ -292,3 +292,12 @@ class AmpersandAndCommuteTests(unittest.TestCase):
             "Please confirm you live within a commutable distance to our offices at Howbery Park*", profile).value
         self.assertIn("Ottawa", value)
         self.assertIn("willing to relocate", value)
+
+
+class NationalityTests(unittest.TestCase):
+    def test_nationality_binds_country_or_demonym(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"citizenships": ["NG"]}
+        for options, expected in (({"0": "British", "1": "Nigerian"}, "Nigerian"),
+                                  ({"0": "United Kingdom", "1": "Nigeria"}, "Nigeria")):
+            self.assertEqual(expected, options[resolve_question("Nationality*", profile, options).choice])
