@@ -419,7 +419,8 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
             if status else _review(options, "immigration_status", "status missing")
     status_question = any(term in text for term in (
         "authorized to work", "authorised to work", "eligible to work", "legal right to work",
-        "right to work", "authorized in", "work lawfully", "work authorization", "work authorisation",
+        "right to work", "right to live and work", "authorized in", "work lawfully",
+        "work authorization", "work authorisation",
         "valid authorization", "work permit", "sponsorship", "sponsor", "visa sponsorship",
     )) or immigration_authorization_required_question(question)
     if not status_question:
@@ -438,7 +439,9 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
     role_relative = any(phrase in text for phrase in (
         "country where this role is based", "location s you selected", "locations you selected",
         "that country", "country you are applying to", "country for which you are applying",
-        "country you are applying for",
+        "country you are applying for", "country where the position is based",
+        "country where the job is based", "country where the role is based",
+        "country in which the position is based", "country in which the role is based",
     ))
     if residence_relative:
         residence_region = _profile_residence_region(profile)
@@ -475,7 +478,8 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
 
     authorization_predicate = any(phrase in text for phrase in (
         "authorized to work", "authorised to work", "eligible to work", "right to work",
-        "authorized in", "work lawfully", "valid authorization", "valid authorisation",
+        "right to live and work", "authorized in", "work lawfully", "valid authorization",
+        "valid authorisation",
     )) or bool(re.search(r'\bhave\b.*\bwork authori[sz]ation\b', text))
     # "Will you require visa sponsorship to be eligible to work in the U.S.?"
     # asks the sponsorship fact; the trailing authorization phrase is only its
@@ -492,6 +496,12 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
             authorization_predicate = False
     if re.search(r'\b(?:ever|previously|denied)\b', text):
         return _review(options, 'legal_ambiguous', 'historical immigration fact is not established by current authorization')
+    if re.search(r"\bpermanent (?:right|residen\w*|status|authori[sz]ation)\b", text) and not re.search(r"\bsponsor", text):
+        records = [_work_record(profile, r) or {} for r in regions]
+        if len(records) == 1 and records[0].get("authorized") is False:
+            return _result(options, False, "work_permanent_right",
+                           "not authorized in the jurisdiction, so no permanent right")
+        return _review(options, "work_permanent_right", "permanent status is not established by a work permit")
     # "Authorized to work ... with or without sponsorship?" asks whether the
     # candidate can work there at all, sponsorship included.
     with_or_without = authorization_predicate and bool(re.search(
@@ -1157,8 +1167,12 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                 return answer
         rendered = _options(options)
         declines = [k for k, label in rendered.items() if any(t in _norm(label) for t in decline_terms)]
-        if len(declines) == 1:
-            return DeterministicAnswer(declines[0], "demographic_unset", rendered[declines[0]],
+        if declines:
+            # Several decline wordings ("Prefer not to say", "I don't wish to
+            # answer") mean the same thing; take them in a fixed order.
+            rank = lambda k: next((i for i, t in enumerate(decline_terms) if t in _norm(rendered[k])), 99)
+            choice = sorted(declines, key=lambda k: (rank(k), int(k) if k.isdigit() else 0))[0]
+            return DeterministicAnswer(choice, "demographic_unset", rendered[choice],
                                        "profile does not state this; use the form's decline option")
         return _review(options, "demographic_unset", "profile does not state this demographic")
     for terms, key in demographic_map:
@@ -1329,6 +1343,15 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             value = grad_start.strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
             return DeterministicAnswer('text', 'start_availability', value,
                                        'start anchored on graduation month')
+    visa_details = re.search(r"\bif you (?:are on|hold|have) (?:a )?(?:current )?visa\b.*\b(?:details|type|expiry|expiration)\b", text)
+    if visa_details:
+        regions = _regions(question) or _location_regions(profile, job_locations)
+        if len(regions) == 1:
+            record = _work_record(profile, regions[0]) or {}
+            if record.get("authorized") is False and not record.get("visa_status"):
+                return DeterministicAnswer("text", "visa_details", "Not applicable — I do not currently hold a "
+                                           f"{ {'UK': 'UK', 'US': 'U.S.', 'EU': 'EU', 'CA': 'Canadian'}.get(regions[0], regions[0]) } visa.",
+                                           "structured record: no visa held in this jurisdiction")
     if text in {'date available', 'date of availability'}:
         earliest = _get(profile, ('employment', 'earliest_start'), ('earliest_start_date',))
         grad_start = graduation_start_date(profile)

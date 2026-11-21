@@ -247,3 +247,30 @@ class RetestFollowUpTests(unittest.TestCase):
         from applyd.apply.deterministic_questions import resolve_text_question
         self.assertIsNone(resolve_text_question("What is your sex?*", self.PROFILE, required=True))
         self.assertIsNone(resolve_text_question("What is your GPA?*", self.PROFILE, required=True))
+
+
+class MultipleDeclineOptionTests(unittest.TestCase):
+    def test_first_preferred_decline_is_used(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        options = {"0": "Female", "1": "Male", "2": "Prefer not to say", "3": "I don't wish to answer"}
+        answer = resolve_question("What is your sex?*", {"gender": "Prefer not to say"}, options, required=True)
+        self.assertEqual("Prefer not to say", options[answer.choice])
+
+
+class PermanentRightAndVisaDetailsTests(unittest.TestCase):
+    PROFILE = {"work_authorization": {
+        "UK": {"authorized": False, "requires_sponsorship": True, "visa_status": None},
+        "CA": {"authorized": True, "requires_sponsorship": False, "visa_status": "work permit"}}}
+    YN = {"yes": "Yes", "no": "No", "review": "Review"}
+    Q = "Do you have a permanent right to live and work in the country where the position is based?*"
+
+    def test_permanent_right_only_answered_when_unauthorized(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        self.assertEqual("no", resolve_question(self.Q, self.PROFILE, self.YN, job_locations=["Wallingford, UK"]).choice)
+        self.assertEqual("review", resolve_question(self.Q, self.PROFILE, self.YN, job_locations=["Toronto, ON, Canada"]).choice)
+
+    def test_visa_details_not_applicable_without_visa(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        q = ("If you are on a current visa that gives you the right to live and work in the UK "
+             "please provide details of the type of visa and expiry date.*")
+        self.assertIn("do not currently hold a UK visa", resolve_text_question(q, self.PROFILE).value)
