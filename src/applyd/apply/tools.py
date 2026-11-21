@@ -1593,6 +1593,16 @@ def _nearest_offered_ok(
         anchor = str(profile.get("expected_grad_date") or "")
     elif any(phrase in field for phrase in _START_FIELD_PHRASES):
         start = graduation_start_date(profile, today=today)
+        # Relative windows ("More than 60 days after accepting"): allowed only
+        # when it is the single window containing the days until the start.
+        from .deterministic_questions import _relative_window
+        windows = {text: _relative_window(text) for text in offered}
+        windows = {text: w for text, w in windows.items() if w}
+        if len(windows) >= 2 and _relative_window(value):
+            current = today or date.today()
+            days = max(0, ((start or current) - current).days)
+            fits = [text for text, (lo, hi) in windows.items() if lo <= days <= hi]
+            return len(fits) == 1 and _normalize_option_text(fits[0]) == _normalize_option_text(value)
         anchor = (start or today or date.today()).strftime("%Y-%m")
     else:
         return False

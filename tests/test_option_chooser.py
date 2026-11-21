@@ -390,3 +390,15 @@ class RelativeStartWindowTests(unittest.TestCase):
         self.assertEqual("3", resolve_question(self.Q, {"expected_grad_date": far}, self.OPTIONS).choice)
         self.assertEqual("0", resolve_question(self.Q, {"expected_grad_date": "2020-01",
                                                         "earliest_start_date": "immediately"}, self.OPTIONS).choice)
+
+
+class RelativeWindowGuardTests(unittest.TestCase):
+    def test_guard_allows_only_the_fitting_window(self) -> None:
+        from datetime import date
+        from applyd.apply.tools import _date_profile_guard
+        profile = {"expected_grad_date": "2027-04", "earliest_start_date": "immediately"}
+        offered = ["Within two weeks of accepting.", "More than two weeks, but within 30 days of accepting.",
+                   "More than 30 days, but within 60 days of accepting.", "More than 60 days after accepting."]
+        label = "If you receive and accept an offer, when would you be available to start?*"
+        self.assertIsNone(_date_profile_guard(label, offered[3], profile, offered=offered, today=date(2026, 11, 21)))
+        self.assertIsNotNone(_date_profile_guard(label, offered[0], profile, offered=offered, today=date(2026, 11, 21)))
