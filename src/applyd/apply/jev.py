@@ -88,7 +88,8 @@ DECISIONS_JS = r"""() => {
  }
  return [...groups.values()].filter(g=>!g.selected && (g.options.length>=2 ||
    (g.kind==='checkbox' && g.required && g.options.length===1 &&
-     /consent|privacy|agree|acknowledge|i understand/i.test(g.question)))).slice(0,30);
+     /consent|privacy|agree|acknowledge|i understand|certify|attest|true and (?:correct|complete|accurate)|i confirm/i
+       .test(g.question + ' ' + g.options[0].label)))).slice(0,30);
 }"""
 
 SELECTED_LOCATIONS_JS = r"""() => Array.from(document.querySelectorAll('[data-applyd-ref]'))
