@@ -450,3 +450,13 @@ class FreshPoolFixTests(unittest.TestCase):
         profile = {"resume_facts": {"education": [{"dates": "Sep 2022 - Apr 2027"}]}}
         self.assertEqual("September", resolve_text_question("Start date month*", profile).value)
         self.assertEqual("2022", resolve_text_question("Start date year*", profile).value)
+
+
+class AccuracyCertificationTests(unittest.TestCase):
+    def test_certify_true_and_correct_uses_accuracy_policy(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        q = ("I hereby certify that I have not knowingly withheld any information and that the "
+             "answers given by me are true and correct to the best of my knowledge.")
+        profile = {"application_policy": {"ordinary_accuracy_attestation": "authorized"}}
+        self.assertEqual("0", resolve_question(q, profile, {"0": q}, required=True).choice)
+        self.assertNotEqual("0", resolve_question(q, {}, {"0": q}, required=True).choice)

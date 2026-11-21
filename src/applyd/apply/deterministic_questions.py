@@ -1070,7 +1070,9 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     if "privacy notice" in text:
         allowed = policy.get("ordinary_accuracy_attestation") in {True, "authorized"}
         return _result(options, allowed, "privacy_acknowledgement", "ordinary acknowledgement policy")
-    if "application is accurate" in text:
+    if "application is accurate" in text or re.search(
+            r"\b(?:hereby certify|i certify|certify that)\b.*\b(?:true|correct|accurate|complete)\b|"
+            r"\btrue and (?:correct|complete|accurate)\b|\bnot knowingly withheld\b", text):
         allowed = policy.get("ordinary_accuracy_attestation") in {True, "authorized"}
         return _result(options, allowed, "accuracy_attestation", "ordinary accuracy policy")
     if any(term in text for term in ("automated hiring decisions", "binding arbitration", "background check")):
