@@ -359,3 +359,20 @@ class ExperienceAndRelocationTimelineTests(unittest.TestCase):
         profile["employment_preferences"].pop("relocation_timeline")
         self.assertNotEqual("1", resolve_question("Are you based in the Bay Area, or ready to relocate?",
                                                   profile, options).choice)
+
+
+class UniversityAndExperienceTextPathTests(unittest.TestCase):
+    def test_university_question_binds_school_or_other(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"school": "Carleton University"}
+        q = "What university are you currently studying at or have most recently graduated from?*"
+        uk = {"0": "OTHER (non-UK university)", "1": "University of Aberdeen"}
+        self.assertEqual("0", resolve_question(q, profile, uk).choice)
+        ca = {"0": "McGill University", "1": "Carleton University", "2": "Other"}
+        self.assertEqual("1", resolve_question(q, profile, ca).choice)
+
+    def test_experience_bands_wait_for_real_options(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        profile = {"years_professional_experience": 1.4, "experience_counts_as_full_time": True}
+        self.assertIsNone(resolve_text_question(
+            "How much full-time professional software engineering experience do you have?", profile, required=True))

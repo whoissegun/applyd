@@ -941,8 +941,10 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                         "user policy: closest offered option to the graduation month")
         else: value = "Currently pursuing a Bachelor's degree" if currently_student and degree and "bachelor" in _norm(degree) else None
         return _result(options, value, "education_control", "structured education field") if value else _review(options, "education_control", "education fact missing")
+    synthetic_options = set(_options(options)) <= {"yes", "no", "review"}
     if (("years" in text or re.search(r"\bhow much\b.*\bexperience\b", text)) and "experience" in text and any(
-            term in text for term in ("professional", "relevant", "software"))):
+            term in text for term in ("professional", "relevant", "software"))
+            and not (synthetic_options and not re.search(r"\b\d+\s*\+?\s*years", text))):
         years = employment.get("years_professional_experience", profile.get("years_professional_experience"))
         # "Full-time" experience uses the total only when the candidate says
         # their (internship) experience was full-time work.
@@ -1257,6 +1259,21 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                                                "single structured citizenship")
             if not set(rendered) <= {"yes", "no", "review"}:
                 return _review(options, "nationality", "citizenship not among the offered options")
+    # "What university are you currently studying at or have most recently
+    # graduated from?": the structured school, else the catalog's Other.
+    if re.search(r"\b(?:what|which) (?:university|school|college|institution)\b|"
+                 r"\b(?:university|school|college) (?:are you|you are|do you) (?:currently )?(?:attend|studying|enrolled)", text) \
+            and not re.search(r"\b(?:event|society|fair|club)\b", text):
+        school = profile.get("school") or education.get("school")
+        rendered = _options(options)
+        if school and not synthetic_options:
+            choice = _bind(options, school)
+            if choice is None:
+                others = [k for k, label in rendered.items() if re.match(r"^other\b", _norm(label))]
+                choice = others[0] if len(others) == 1 else None
+            if choice is not None:
+                return DeterministicAnswer(choice, "education_control", rendered[choice],
+                                           "structured school (or the catalog's explicit Other)")
     if "current age" in text:
         rendered = _options(options)
         decline = next((key for key, label in rendered.items()
