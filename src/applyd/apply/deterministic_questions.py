@@ -85,6 +85,31 @@ def _employer_short_name(value: Any) -> str:
     return short if len(short) >= 3 and short not in _EMPLOYER_SUFFIXES else ""
 
 
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                 "eight": 8, "ten": 10, "twelve": 12, "a": 1, "an": 1}
+
+
+def _relative_window(label: str) -> tuple[float, float] | None:
+    """Day range for "within two weeks", "more than 30 days but within 60
+    days", "more than 60 days" style availability options."""
+    text = _norm(label)
+    units = r"(\d+|one|two|three|four|five|six|eight|ten|twelve|a|an) (day|week|month)s?"
+    def days(n, unit):
+        n = int(n) if n.isdigit() else _NUMBER_WORDS[n]
+        return n * {"day": 1, "week": 7, "month": 30}[unit]
+    more = re.search(r"\b(?:more than|over|after|at least) " + units, text)
+    within = re.search(r"\b(?:within|less than|under|up to|in) " + units, text)
+    if more and within and within.start() > more.start():
+        return float(days(*more.groups())), float(days(*within.groups()))
+    if within and not more:
+        return 0.0, float(days(*within.groups()))
+    if more and not within:
+        return float(days(*more.groups())) + 0.001, float("inf")
+    if re.search(r"\b(?:immediately|asap|as soon as possible|right away)\b", text):
+        return 0.0, 0.0
+    return None
+
+
 def is_job_start_question(question: str) -> bool:
     """Job-start wording only.
 
@@ -1308,6 +1333,17 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     start_question = is_job_start_question(text)
     rendered = _options(options)
     grad_start = graduation_start_date(profile)
+    if start_question:
+        # Relative windows ("Within two weeks of accepting", "More than 60
+        # days after accepting"): the days until the graduation-anchored start.
+        windows = {k: _relative_window(label) for k, label in rendered.items()}
+        windows = {k: w for k, w in windows.items() if w}
+        if len(windows) >= 2:
+            days = max(0, ((grad_start or date.today()) - date.today()).days)
+            fits = [k for k, (lo, hi) in windows.items() if lo <= days <= hi]
+            if len(fits) == 1:
+                return DeterministicAnswer(fits[0], "start_availability", rendered[fits[0]],
+                                           f"{days} days until the graduation-anchored start")
     if start_question and option_semantics.mostly_dates(rendered.values()):
         # A target start date is a preference, not a fact: anchor it on the
         # graduation month (or today once graduated) and take the nearest

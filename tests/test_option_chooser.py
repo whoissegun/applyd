@@ -376,3 +376,17 @@ class UniversityAndExperienceTextPathTests(unittest.TestCase):
         profile = {"years_professional_experience": 1.4, "experience_counts_as_full_time": True}
         self.assertIsNone(resolve_text_question(
             "How much full-time professional software engineering experience do you have?", profile, required=True))
+
+
+class RelativeStartWindowTests(unittest.TestCase):
+    OPTIONS = {"0": "Within two weeks of accepting.", "1": "More than two weeks, but within 30 days of accepting.",
+               "2": "More than 30 days, but within 60 days of accepting.", "3": "More than 60 days after accepting."}
+    Q = "If you receive and accept an offer, when would you be available to start?*"
+
+    def test_window_from_graduation_anchor(self) -> None:
+        from datetime import date, timedelta
+        from applyd.apply.deterministic_questions import resolve_question
+        far = (date.today() + timedelta(days=200)).strftime("%Y-%m")
+        self.assertEqual("3", resolve_question(self.Q, {"expected_grad_date": far}, self.OPTIONS).choice)
+        self.assertEqual("0", resolve_question(self.Q, {"expected_grad_date": "2020-01",
+                                                        "earliest_start_date": "immediately"}, self.OPTIONS).choice)
