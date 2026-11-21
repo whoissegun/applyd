@@ -1266,7 +1266,10 @@ def _profile_already_answers(
         "prior_company", "github_url", "start_availability", "compensation",
         "role_country_residence", "residence_region",
         "job_search_motivation", "education_control", "work_authorized",
-        "work_requires_sponsorship", "saved_exact_answer",
+        "work_requires_sponsorship", "saved_exact_answer", "skill_experience",
+        "general_software_experience", "nationality", "gpa_band", "visa_details",
+        "commute_relocation", "work_permanent_right", "restrictive_covenants",
+        "criminal_history", "essential_functions", "interview_accommodations",
     }:
         return deterministic.value is not None
     # Work-eligibility labels ("Eligibility to work in the United Kingdom.")
