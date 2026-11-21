@@ -653,3 +653,14 @@ class ImmigrationScopeTests(unittest.TestCase):
         self.assertEqual("no", self.ask(
             "Will you now or in the future require employment visa sponsorship?",
             locations=["Toronto, ON, Canada"]))
+
+    def test_country_you_are_applying_to_uses_job_country(self) -> None:
+        pa = ["State College, PA"]
+        self.assertEqual("no", self.ask(
+            "Are you authorized to work in the country you are applying to?", locations=pa))
+        self.assertEqual("yes", self.ask(
+            "Do you now or will you in the future require sponsorship for employment "
+            "for the country for which you are applying to?", locations=pa))
+        self.assertEqual("yes", self.ask(
+            "Are you authorized to work in the country you are applying to?",
+            locations=["Toronto, ON, Canada"]))

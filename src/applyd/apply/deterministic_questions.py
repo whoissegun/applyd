@@ -306,7 +306,8 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
     ))
     role_relative = any(phrase in text for phrase in (
         "country where this role is based", "location s you selected", "locations you selected",
-        "that country",
+        "that country", "country you are applying to", "country for which you are applying",
+        "country you are applying for",
     ))
     if residence_relative:
         residence_region = _profile_residence_region(profile)
