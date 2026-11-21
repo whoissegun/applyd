@@ -1270,6 +1270,8 @@ def _profile_already_answers(
         "general_software_experience", "nationality", "gpa_band", "visa_details",
         "commute_relocation", "work_permanent_right", "restrictive_covenants",
         "criminal_history", "essential_functions", "interview_accommodations",
+        "accuracy_attestation", "required_consent", "notice_period", "relocation_timeline",
+        "onsite_with_relocation", "work_status_category",
     }:
         return deterministic.value is not None
     # Work-eligibility labels ("Eligibility to work in the United Kingdom.")
