@@ -56,8 +56,8 @@ def required_consent_authorized(question: str, profile: Mapping[str, Any], *,
         return True
     # Whole words only: "agree" must not match inside "agreement".
     return bool(re.search(
-        r"\b(?:authorize|consent|consents|agree|agrees|privacy|permission|acknowledge|"
-        r"background check|binding arbitration|terms and conditions|waiver of rights|"
+        r"\b(?:authorize|consent|consents|agree|agrees|privacy|permission|acknowledge|acknowledgement|"
+        r"acknowledgment|background check|binding arbitration|arbitration agreement|terms and conditions|waiver of rights|"
         r"non compete agreement|i understand)\b", text))
 
 
@@ -783,11 +783,15 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     # Office/hybrid/onsite questions answered by location options ("I am
     # based in San Francisco" / "I am open to relocating" / "not willing"):
     # a non-local candidate willing to relocate takes the relocating option.
-    if re.search(r"\b(?:office|hybrid|onsite|on site|in person|based out of|located)\b", text):
+    if re.search(r"\b(?:office|hybrid|onsite|on site|in person|based out of|located|local to|live in|commut)\b", text):
         rendered = _options(options)
+        # "willing to relocate" options, ignoring the "not open to relocating" one.
         relocating = [k for k, label in rendered.items()
-                      if re.search(r"\brelocat", _norm(label)) and not re.search(r"\b(?:not|unable|no|cannot)\b", _norm(label))]
-        based = [k for k, label in rendered.items() if re.search(r"\b(?:based in|live in|located in|local to)\b", _norm(label))]
+                      if re.search(r"\brelocat", _norm(label))
+                      and not re.search(r"\b(?:not|unable|cannot|can t)\b(?:\s+\w+){0,3}\s+relocat", _norm(label))]
+        based = [k for k, label in rendered.items()
+                 if re.search(r"\b(?:based in|live in|located in|local to|reliably be in|currently in)\b", _norm(label))
+                 and k not in relocating]
         if len(relocating) == 1 and based:
             city = _norm(profile.get("address_city") or "")
             local = bool(city) and any(city in _norm(rendered[k]) for k in based)
@@ -952,6 +956,14 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     year = re.search(r"\b(20\d{2})\b", text)
     if year and "graduat" in text:
         return _result(options, bool(grad and str(grad).startswith(year.group(1))), "graduation_year", "structured graduation date")
+    if text in {"start date month", "start date year"}:
+        facts = profile.get("resume_facts") or {}
+        entries = facts.get("education") if isinstance(facts, Mapping) else None
+        dates = str((entries or [{}])[0].get("dates") or "") if isinstance(entries, list) and entries else ""
+        start = option_semantics.parse_month(dates.split(" - ")[0]) if " - " in dates else None
+        if start and len(start[1]) == 1:
+            value = date(2000, start[1][0], 1).strftime("%B") if text.endswith("month") else str(start[0])
+            return _result(options, value, "education_control", "resume education start date")
     if text in {
         "degree", "discipline", "school", "end date month", "end date year",
         "graduation date", "expected graduation date", "graduation month",

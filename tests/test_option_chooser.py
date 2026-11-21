@@ -427,3 +427,26 @@ class NoticePeriodTests(unittest.TestCase):
         profile = {"current_company": "Carleton University (student)", "earliest_start_date": "immediately"}
         self.assertEqual("None — I am not currently employed.",
                          resolve_text_question("What is your current notice period?", profile).value)
+
+
+class FreshPoolFixTests(unittest.TestCase):
+    def test_arbitration_acknowledgement_is_required_consent(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"application_policy": {"required_consents": True}}
+        self.assertEqual("0", resolve_question("Applicant Arbitration Agreement Acknowledgement", profile,
+                                               {"0": "I acknowledge and agree"}, required=True).choice)
+
+    def test_local_to_city_relocation_option(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"address_city": "Ottawa", "employment_preferences": {"willing_to_relocate": True}}
+        options = {"0": "I can reliably be in NYC for in-person collaboration",
+                   "1": "I am not currently in NYC, but I am willing to relocate",
+                   "2": "I am not currently in NYC, and I am not open to relocating"}
+        q = "We want the person in this role to be local to NYC. Which option best describes your situation?"
+        self.assertEqual("1", resolve_question(q, profile, options).choice)
+
+    def test_education_start_from_resume_dates(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        profile = {"resume_facts": {"education": [{"dates": "Sep 2022 - Apr 2027"}]}}
+        self.assertEqual("September", resolve_text_question("Start date month*", profile).value)
+        self.assertEqual("2022", resolve_text_question("Start date year*", profile).value)
