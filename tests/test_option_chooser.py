@@ -274,3 +274,21 @@ class PermanentRightAndVisaDetailsTests(unittest.TestCase):
         q = ("If you are on a current visa that gives you the right to live and work in the UK "
              "please provide details of the type of visa and expiry date.*")
         self.assertIn("do not currently hold a UK visa", resolve_text_question(q, self.PROFILE).value)
+
+
+class AmpersandAndCommuteTests(unittest.TestCase):
+    def test_ampersand_right_to_live_and_work(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"work_authorization": {"UK": {"authorized": False, "requires_sponsorship": True}}}
+        self.assertEqual("no", resolve_question(
+            "If no, do you have a current right to live & work in the UK?", profile,
+            {"yes": "Yes", "no": "No", "review": "Review"}).choice)
+
+    def test_commute_confirmation_states_relocation(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        profile = {"address_city": "Ottawa", "address_region": "Ontario", "address_country": "Canada",
+                   "employment_preferences": {"willing_to_relocate": True}}
+        value = resolve_text_question(
+            "Please confirm you live within a commutable distance to our offices at Howbery Park*", profile).value
+        self.assertIn("Ottawa", value)
+        self.assertIn("willing to relocate", value)

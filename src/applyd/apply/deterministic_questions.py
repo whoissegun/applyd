@@ -374,7 +374,7 @@ def immigration_authorization_required_question(question: str) -> bool:
 def _legal(question: str, profile: Mapping[str, Any], options: Any,
            job_locations: Sequence[str],
            form_regions: Sequence[str] = ()) -> DeterministicAnswer | None:
-    text = _norm(question)
+    text = _norm(question.replace("&", " and "))
     # "Are you at least 18? (If not, you may need authorization to work.)" is
     # an age question; the parenthetical must not make it a legal one.
     if re.search(r"\bat least 18\b|\b18 years (?:of age|old)\b|\bover 18\b", text):
@@ -1343,6 +1343,15 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             value = grad_start.strftime('%Y-%m' if input_type == 'month' else '%Y-%m-%d')
             return DeterministicAnswer('text', 'start_availability', value,
                                        'start anchored on graduation month')
+    if re.search(r"\bcommut\w*\b", text) and re.search(r"\b(?:confirm|do you live|live within|currently live)\b", text):
+        city, region, country = (profile.get("address_city"), profile.get("address_region"), profile.get("address_country"))
+        place = ", ".join(str(v) for v in (city, region, country) if v)
+        relocate = _preference(profile, "willing_to_relocate")
+        local = bool(city) and _norm(city) in text
+        if place and not local and relocate is True:
+            return DeterministicAnswer("text", "commute_relocation",
+                                       f"I currently live in {place} and am willing to relocate to work from your office.",
+                                       "not local; structured relocation preference")
     visa_details = re.search(r"\bif you (?:are on|hold|have) (?:a )?(?:current )?visa\b.*\b(?:details|type|expiry|expiration)\b", text)
     if visa_details:
         regions = _regions(question) or _location_regions(profile, job_locations)
