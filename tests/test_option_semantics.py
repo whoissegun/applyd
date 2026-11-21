@@ -232,3 +232,12 @@ class NonCompeteTests(unittest.TestCase):
                   "By applying you consent to a background check*"):
             with self.subTest(q=q):
                 self.assertEqual("yes", resolve_question(q, profile, self.OPTIONS, required=True).choice)
+
+
+class SavedAnswerComboboxTests(unittest.TestCase):
+    def test_saved_exact_answer_reaches_text_resolver(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        profile = {"historical_application_answers": {"Area of Interest": "Product Engineering"}}
+        self.assertEqual("Product Engineering",
+                         resolve_text_question("Area of Interest*", profile).value)
+        self.assertIsNone(resolve_text_question("Areas of interest outside work", profile))

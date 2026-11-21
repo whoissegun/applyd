@@ -1052,6 +1052,14 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
     review result.
     """
     text = _norm(question)
+    # A user-saved answer for this exact question wins (also for comboboxes,
+    # which reach this resolver rather than the closed-question one).
+    saved = profile.get("historical_application_answers")
+    if isinstance(saved, Mapping):
+        for saved_question, saved_value in saved.items():
+            if _norm(saved_question) == text and isinstance(saved_value, str) and saved_value.strip():
+                return DeterministicAnswer('text', 'saved_exact_answer', saved_value,
+                                           'exact saved answer from the profile')
     if text == 'reason for leaving or job search' and required:
         return DeterministicAnswer('text', 'job_search_motivation',
             'I am seeking a role where I can contribute, keep developing my skills, and take on meaningful technical work.',
