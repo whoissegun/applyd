@@ -210,3 +210,40 @@ class Batch20FixTests(unittest.TestCase):
         from applyd.apply.deterministic_questions import resolve_text_question
         self.assertEqual("https://spequlo.com", resolve_text_question(
             "Please provide a link to a project you've built", self.PROFILE).value)
+
+
+class RetestFollowUpTests(unittest.TestCase):
+    PROFILE = dict(Batch20FixTests.PROFILE,
+                   resume_facts={"skills": {"Languages": ["JavaScript", "TypeScript", "Python"]}},
+                   over_18=True,
+                   work_authorization={"US": {"authorized": False, "requires_sponsorship": True},
+                                       "UK": {"authorized": False, "requires_sponsorship": True}})
+
+    def pick(self, q, labels, **kw):
+        from applyd.apply.deterministic_questions import resolve_question
+        options = {str(i): label for i, label in enumerate(labels)}
+        return options.get(resolve_question(q, self.PROFILE, options, required=True, **kw).choice)
+
+    def test_age_question_with_authorization_parenthetical(self) -> None:
+        self.assertEqual("Yes", self.pick(
+            "Are you at least 18 years old? (If not, you may be required to provide authorization to work.)",
+            ["Yes", "No"]))
+
+    def test_work_status_category_binds_sponsorship_option(self) -> None:
+        self.assertEqual("I require sponsorship to work in the United Kingdom", self.pick(
+            "Eligibility to work in the United Kingdom.",
+            ["I am a British Citizen", "I hold a valid Visa to work in the United Kingdom",
+             "I require sponsorship to work in the United Kingdom"]))
+        self.assertEqual("I require visa sponsorship to work in the US.", self.pick(
+            "Work authorization status", ["I am a US Citizen / Permanent Resident.",
+                                          "I currently hold a valid US Work Visa (e.g., H1-B, O-1, TN).",
+                                          "I require visa sponsorship to work in the US.", "Other."]))
+
+    def test_skill_questions_grounded_in_resume_skills(self) -> None:
+        self.assertEqual("Yes", self.pick("Do you have experience with JavaScript or TypeScript?", ["Yes", "No"]))
+        self.assertIsNone(self.pick("Do you have experience with Rust or Go?", ["Yes", "No"]))
+
+    def test_text_path_defers_sensitive_and_gpa_to_real_options(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        self.assertIsNone(resolve_text_question("What is your sex?*", self.PROFILE, required=True))
+        self.assertIsNone(resolve_text_question("What is your GPA?*", self.PROFILE, required=True))

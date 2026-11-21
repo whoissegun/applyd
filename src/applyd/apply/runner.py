@@ -1265,9 +1265,19 @@ def _profile_already_answers(
     if deterministic is not None and deterministic.predicate in {
         "prior_company", "github_url", "start_availability", "compensation",
         "role_country_residence", "residence_region",
-        "job_search_motivation",
+        "job_search_motivation", "education_control", "work_authorized",
+        "work_requires_sponsorship", "saved_exact_answer",
     }:
         return deterministic.value is not None
+    # Work-eligibility labels ("Eligibility to work in the United Kingdom.")
+    # are answered from the structured regional record once options render.
+    if re.search(r"\b(?:eligib\w*|authori[sz]\w*|right to work|sponsor\w*)\b", text):
+        from .deterministic_questions import _location_regions, _regions, _work_record
+        regions = _regions(label) or _location_regions(profile, job_locations or [])
+        if len(regions) == 1:
+            record = _work_record(profile, regions[0]) or {}
+            if isinstance(record.get("authorized"), bool) and isinstance(record.get("requires_sponsorship"), bool):
+                return True
 
     if _historical_production_claim(text):
         return isinstance(_historical_application_answer(profile, text), bool)

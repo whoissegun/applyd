@@ -375,6 +375,30 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
            job_locations: Sequence[str],
            form_regions: Sequence[str] = ()) -> DeterministicAnswer | None:
     text = _norm(question)
+    # "Are you at least 18? (If not, you may need authorization to work.)" is
+    # an age question; the parenthetical must not make it a legal one.
+    if re.search(r"\bat least 18\b|\b18 years (?:of age|old)\b|\bover 18\b", text):
+        return None
+    # Work-status category pickers ("I am a US citizen" / "I hold a valid work
+    # visa" / "I require visa sponsorship"): bind only the sponsorship option,
+    # only when the structured record says unauthorized + needs sponsorship.
+    rendered = _options(options)
+    sponsor_options = [k for k, label in rendered.items()
+                       if re.search(r"\brequire\w*\b.*\bsponsor", _norm(label))]
+    status_options = [k for k, label in rendered.items()
+                      if re.search(r"\b(?:citizen|permanent resident|green card|visa|settled status|indefinite leave)\b", _norm(label))]
+    # A direct "Are you authorized to work ...?" is never answered by picking
+    # a sponsorship category; only status/eligibility-style questions are.
+    direct_authorization = re.search(r"\b(?:are|is) you (?:currently |legally )*(?:authori[sz]ed|eligible)\b", text)
+    if len(sponsor_options) == 1 and status_options and not direct_authorization:
+        regions = _regions(question) or _regions(" ".join(rendered.values())) \
+            or _location_regions(profile, job_locations)
+        if len(regions) == 1:
+            record = _work_record(profile, regions[0]) or {}
+            if record.get("authorized") is False and record.get("requires_sponsorship") is True:
+                return DeterministicAnswer(sponsor_options[0], "work_status_category", rendered[sponsor_options[0]],
+                                           "structured record: not authorized and requires sponsorship")
+        return _review(options, "work_status_category", "work-status category needs an explicit status")
     if (text.startswith('skip this question if you are applying to work in canada or the uk')
             and _location_regions(profile, job_locations) in [['CA'], ['UK']]):
         return _review(options, 'legal_not_applicable', 'form explicitly says to skip for the role country')
@@ -803,7 +827,7 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                                        "structured graduation date bound to offered option")
     # GPA bands on a 4.0 scale from a different-scale GPA, when the profile
     # explicitly allows linear conversion.
-    if re.search(r"\bgpa\b|grade point average", text):
+    if re.search(r"\bgpa\b|grade point average", text) and not set(_options(options)) <= {"yes", "no", "review"}:
         gpa = profile.get("gpa")
         rendered = _options(options)
         if isinstance(gpa, Mapping) and isinstance(gpa.get("value"), (int, float)) and gpa.get("disclose") is not False:
@@ -822,6 +846,19 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
         if isinstance(disability, str) and _norm(disability).startswith("no"):
             return _result(options, True, "essential_functions",
                            "profile states no disability; able with or without accommodation")
+    skill_question = re.search(r"\b(?:experience|proficien\w*|familiar\w*|worked) (?:with|in)\b", text)
+    facts_for_skills = profile.get("resume_facts") or {}
+    skills = facts_for_skills.get("skills") if isinstance(facts_for_skills, Mapping) else None
+    if skill_question and isinstance(skills, (Mapping, list)) and not re.search(
+            r"\b(?:years|production|professional|lead|expert|advanced|scale)\b", text):
+        known = [str(v) for v in (sum((list(v) for v in skills.values() if isinstance(v, list)), [])
+                                  if isinstance(skills, Mapping) else skills)]
+        named = [k for k in known if re.search(rf"(?<![a-z0-9]){re.escape(_norm(k))}(?![a-z0-9])", text)]
+        # Every technology named must be on the resume ("X or Y": any one).
+        groups = [g for g in re.split(r"\band\b", text) if re.search(r"\bor\b|,", g) or g]
+        if named and all(any(re.search(rf"(?<![a-z0-9]){re.escape(_norm(k))}(?![a-z0-9])", g) for k in known)
+                         for g in groups if re.search(r"\b(?:javascript|typescript|python|java|react|node|sql|c\+\+|go|rust|swift|kotlin|graphql|aws|docker)\b", g)):
+            return _result(options, True, "skill_experience", f"resume skills list {', '.join(named[:4])}")
     if (re.search(r"\bhave you (?:built|developed|created|shipped)\b.*\b(?:software|application|app)\b", text)
             and re.search(r"\b(?:coursework|internships?|personal projects?|professional experience)\b", text)
             and not re.search(r"\b(?:frontend|backend|mobile|ios|android|machine learning|production|"
@@ -1111,7 +1148,7 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     sensitive = re.search(
         r"\b(?:what is your sex|your sex|sex registered|sex assigned|assigned at birth|registered at birth|"
         r"sexual orientation|religion|belief|what is your age|age range|age group|age bracket)\b", text)
-    if sensitive:
+    if sensitive and not set(_options(options)) <= {"yes", "no", "review"}:
         gender = demographics.get("gender", profile.get("gender"))
         if re.search(r"\b(?:what is your sex|your sex)\b", text) and isinstance(gender, str) \
                 and not any(t in _norm(gender) for t in decline_terms):
