@@ -664,3 +664,15 @@ class ImmigrationScopeTests(unittest.TestCase):
         self.assertEqual("yes", self.ask(
             "Are you authorized to work in the country you are applying to?",
             locations=["Toronto, ON, Canada"]))
+
+    def test_sponsorship_question_with_trailing_purpose_clause(self) -> None:
+        us = ["Nashville, TN"]
+        for q in ("Will you now or in the future require visa sponsorship to be eligible to work in the United States?",
+                  "Do you need sponsorship to be authorized to work in the US?"):
+            with self.subTest(q=q):
+                self.assertEqual("yes", self.ask(q, locations=us))
+        # Authorization phrase first: still an authorization question.
+        self.assertEqual("no", self.ask(
+            "Are you authorized to work in the United States without requiring sponsorship?", locations=us))
+        self.assertEqual("yes", self.ask(
+            "Are you eligible to work in Canada without needing sponsorship?"))

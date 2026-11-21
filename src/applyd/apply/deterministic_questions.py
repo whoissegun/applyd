@@ -422,6 +422,19 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
         "authorized to work", "authorised to work", "eligible to work", "right to work",
         "authorized in", "work lawfully", "valid authorization", "valid authorisation",
     )) or bool(re.search(r'\bhave\b.*\bwork authori[sz]ation\b', text))
+    # "Will you require visa sponsorship to be eligible to work in the U.S.?"
+    # asks the sponsorship fact; the trailing authorization phrase is only its
+    # purpose. ("Authorized to work ... without sponsorship" stays an
+    # authorization question: there the authorization phrase comes first.)
+    sponsor_request = re.search(
+        r"\b(?:require|requires|required|need|needs|needed)\b(?:\s+\w+){0,4}?\s+"
+        r"(?:visa |employment |employer |immigration )?sponsor(?:ship|ed|ing)?\b", text)
+    if authorization_predicate and sponsor_request:
+        first_auth = min((text.find(p) for p in (
+            "authorized to work", "authorised to work", "eligible to work", "right to work",
+            "authorized in", "work lawfully") if p in text), default=len(text))
+        if sponsor_request.start() < first_auth:
+            authorization_predicate = False
     if re.search(r'\b(?:ever|previously|denied)\b', text):
         return _review(options, 'legal_ambiguous', 'historical immigration fact is not established by current authorization')
     # "Authorized to work ... with or without sponsorship?" asks whether the
