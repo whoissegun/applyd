@@ -947,6 +947,10 @@ def run_apply(
                         resume_text=resume_tex,
                         job_locations=job_locations,
                     )
+                    # Constrained-chooser calls happen inside tools/planner;
+                    # count them toward this attempt's spend and budget.
+                    from . import option_chooser
+                    actual_cost_usd += option_chooser.drain_cost()
                     if name == "upload_resume" and result.startswith("ok:"):
                         resume_uploaded = True
                     if (hybrid_response is not None and result.startswith("ok:")

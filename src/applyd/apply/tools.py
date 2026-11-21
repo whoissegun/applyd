@@ -31,7 +31,7 @@ from ..tailor.structured import escape_latex
 from . import option_semantics
 from .deterministic_questions import (
     graduation_start_date, immigration_authorization_required_question,
-    required_consent_authorized, resolve_question,
+    required_consent_authorized, resolve_question, resolve_text_question,
 )
 
 
@@ -499,6 +499,17 @@ def _degree_claim_guard(question: str, value: str, profile: dict[str, Any]) -> s
     return None
 
 
+def _covenant_answer_ok(text: str, desired: str, profile: dict[str, Any]) -> bool:
+    """A non-compete answer backed by the explicit restrictive-covenant fact."""
+    fact = ((profile.get("background_defaults") or {}).get("no_restrictive_covenants"))
+    if not isinstance(fact, bool) or not re.search(r"\bnon[ -]?(?:compete|competition|solicit)", text):
+        return False
+    wanted = _normalize_option_text(desired)
+    says_no = wanted in {"no", "false"} or wanted.startswith("no ")
+    says_yes = wanted in {"yes", "true"} or wanted.startswith("yes ")
+    return (fact and says_no) or (not fact and says_yes)
+
+
 def _profile_click_guard(
     page: Page, ref: str, profile: dict[str, Any] | None,
     job_locations: list[str] | None = None,
@@ -510,7 +521,8 @@ def _profile_click_guard(
     legal_label = question + ' ' + str(loc.get_attribute('data-applyd-label') or '').casefold()
     required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
     standing_consent = required_consent_authorized(legal_label, profile, required=required)
-    if not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', legal_label):
+    if (not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', legal_label)
+            and not _covenant_answer_ok(legal_label, str(loc.get_attribute("data-applyd-option") or ""), profile)):
         return _err(f'click {ref}: unusual legal attestation requires human review')
     option = " ".join(
         re.sub(
@@ -931,6 +943,43 @@ def _grounded_fill_value(
     return value, None
 
 
+_CONSEQUENTIAL_TEXT = re.compile(
+    r"\b(?:criminal|convict\w*|felon\w*|offen[cs]es?|cautions?|arrest\w*|misdemeano\w*|"
+    r"sanction\w*|debarr\w*|authori[sz]ed to work|authori[sz]ation to work|sponsor\w*|visas?|"
+    r"citizen\w*|permanent resident|security clearance|export control\w*|gender|race|"
+    r"ethnic\w*|hispanic|latin[oax]|veteran|disabilit\w*|non ?compet\w*|non ?solicit\w*)\b",
+    re.I)
+
+
+def _consequential_text_guard(
+    loc: Any, value: str, profile: dict[str, Any] | None, job_locations: list[str] | None,
+) -> str | None:
+    """Typed answers to legal/history/demographic questions must be profile-backed.
+
+    Free-text inputs bypass the dropdown guards, so without this a model
+    could type "No" to "Do you have any unspent convictions?" with no fact
+    behind it. Allowed only when the deterministic resolver produced the
+    same answer (or a standing required consent covers an affirmative).
+    """
+    if not profile:
+        return None
+    label = " ".join(str(loc.get_attribute(attr) or "") for attr in (
+        "data-applyd-label", "data-applyd-question", "aria-label", "placeholder"))
+    if not _CONSEQUENTIAL_TEXT.search(label):
+        return None
+    wanted = _normalize_option_text(value)
+    if required_consent_authorized(label, profile, required=True) and re.match(r"^(?:yes|i agree|i consent)\b", wanted):
+        return None
+    answer = resolve_text_question(label, profile, job_locations=job_locations or (), required=True)
+    expected = _normalize_option_text(str(answer.value)) if answer and answer.value is not None else ""
+    if expected and (expected == wanted or (
+            re.match(r"^(yes|no)\b", expected) and re.match(r"^(yes|no)\b", wanted)
+            and expected.split()[0] == wanted.split()[0])):
+        return None
+    return ("consequential question (legal status, history, or demographics) has no "
+            "matching structured profile fact; typed answer blocked; send to review")
+
+
 def fill(
     page: Page, ref: str, value: str, profile: dict[str, Any] | None = None,
     resume_text: str = "", job_locations: list[str] | None = None,
@@ -945,6 +994,10 @@ def fill(
         value, grounding_note = _grounded_fill_value(
             page, ref, value, profile, resume_text, job_locations
         )
+        if grounding_note is None:
+            blocked = _consequential_text_guard(loc, value, profile, job_locations)
+            if blocked:
+                return _err(f"fill {ref}: {blocked}")
         if _should_humanize(page):
             _human_type(loc, value)
         else:
@@ -976,6 +1029,11 @@ def fill_many(
             val, grounding_note = _grounded_fill_value(
                 page, ref, val, profile, resume_text, job_locations
             )
+            if grounding_note is None:
+                blocked = _consequential_text_guard(loc, val, profile, job_locations)
+                if blocked:
+                    out.append(f"  err: {ref} :: {blocked}")
+                    continue
             if _should_humanize(page):
                 _human_type(loc, val)
                 # Brief think-time between fields — but not after the last one.
@@ -1871,7 +1929,8 @@ def _select_profile_guard(
                 f"select_option {ref}: refused contradictory "
                 "interview-recording consent"
             )
-    if not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', question + ' ' + label):
+    if (not standing_consent and re.search(r'\b(?:arbitration|non[ -]?compete|waiv(?:e|er) of rights)\b', question + ' ' + label)
+            and not _covenant_answer_ok(question + ' ' + label, value, profile)):
         return _err(f'select_option {ref}: unusual legal attestation requires human review')
 
     if _historical_production_claim(question):
@@ -2476,6 +2535,56 @@ def _select_profile_guard(
     return None
 
 
+CHOOSE_FROM_OPTIONS = "__applyd_choose_from_rendered_options__"
+
+
+def _resolve_from_rendered_options(
+    page: Page, ref: str, profile: dict[str, Any] | None, resume_text: str,
+    job_locations: list[str] | None, company: str,
+) -> str:
+    """Bind a field with no profile mapping by reading its real options.
+
+    Deterministic policy gets the first chance against the rendered labels;
+    only an unclassified, low-risk question reaches the constrained chooser.
+    Returns the chosen option text, or an ``error:`` asking for review.
+    """
+    if not profile:
+        return _err(f"select_option {ref}: no profile; send to review")
+    loc = _ref_locator(page, ref)
+    label = str(loc.get_attribute("data-applyd-label") or "")
+    options = _read_options(page) if loc.get_attribute("data-applyd-combobox-open") == "1" else []
+    if not options:
+        opened = open_dropdown(page, ref)
+        if opened.startswith("error:"):
+            return opened.replace("open_dropdown", "select_option", 1)
+        options = _read_options(page)
+    texts = _option_texts(options)
+    rendered = {str(i): text for i, text in enumerate(texts)}
+    required = loc.get_attribute("aria-required") == "true" or loc.get_attribute("required") is not None
+    answer = resolve_question(label, profile, rendered, job_locations=job_locations or (),
+                              company=company, required=required)
+    if answer.choice in rendered:
+        return rendered[answer.choice]
+    if answer.predicate != "unclassified":
+        return _err(f"select_option {ref}: no deterministic option for {label[:120]!r} "
+                    f"({answer.reason}). Handle this field explicitly, or send to review "
+                    "if it needs a fact the profile does not contain.")
+    from . import option_chooser
+    from ..local_store import get_local_store
+    try:
+        store = get_local_store()
+    except Exception:  # noqa: BLE001
+        store = None
+    choice = option_chooser.choose(label, texts, profile, resume_text=resume_text, store=store)
+    if choice.index is None:
+        return _err(f"select_option {ref}: no grounded option for {label[:120]!r} "
+                    f"({choice.reason}). Handle this field explicitly, or send to review "
+                    "if it needs a fact the profile does not contain.")
+    print(f"[chooser] {label[:80]!r} -> {texts[choice.index]!r} "
+          f"(evidence={choice.evidence[:60]!r}, cached={choice.cached})", file=sys.stderr, flush=True)
+    return texts[choice.index]
+
+
 def select_option(
     page: Page,
     ref: str,
@@ -2492,6 +2601,11 @@ def select_option(
     the real choices so the agent can decide explicitly on its next turn.
     """
     try:
+        if value == CHOOSE_FROM_OPTIONS:
+            value = _resolve_from_rendered_options(
+                page, ref, profile, resume_text, job_locations, company)
+            if value.startswith("error:"):
+                return value
         guard = _select_profile_guard(
             page, ref, value, profile, resume_text, job_locations, company
         )

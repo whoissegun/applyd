@@ -842,6 +842,11 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
                       if isinstance(policy.get(key), bool)), None)
         return _result(options, value, "consent", "explicit structured talent-pool consent") \
             if isinstance(value, bool) else _review(options, "consent", "talent-pool consent missing")
+    # A vague label whose options are a privacy-notice consent ("Yes, I
+    # consent to the Privacy Notice") is the ordinary required privacy consent.
+    if re.search(r"\b(?:consent to|accept|agree to|acknowledge)\b.*\bprivacy (?:notice|policy)\b", option_text) \
+            and required_consent_authorized(f"I consent to the privacy notice", profile, required=required):
+        return _result(options, True, "required_consent", "user authorized required privacy consent")
 
     consent_map = (
         (("recruiting marketing", "future job opportunities", "talent network", "whatsapp"), ("recruiting_marketing_consent", "recruiting_communications_consent")),
@@ -892,6 +897,14 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             return _result(options, not value, "restrictive_covenants",
                            "structured background fact about non-compete/non-solicit agreements")
         return _review(options, "sensitive_history", "restrictive-covenant fact missing")
+    if re.search(r"\b(?:convict\w*|criminal (?:record|offen[cs]e|history|conviction)|felon\w*|"
+                 r"unspent|conditional cautions?|misdemeano\w*)\b", text) \
+            and not re.search(r"\b(?:background check|willing|consent|agree|authori[sz]e)\b", text):
+        value = background.get("no_criminal_convictions")
+        if isinstance(value, bool):
+            return _result(options, not value, "criminal_history",
+                           "explicit structured criminal-history fact")
+        return _review(options, "sensitive_history", "criminal-history fact missing")
     if any(term in text for term in ("criminal offence", "criminal offense", "non compete",
                                      "non competition", "non solicitation", "non solicit")):
         return _review(options, "sensitive_history", "historical fact missing")
@@ -1188,7 +1201,9 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             return DeterministicAnswer("text", "start_availability", "Available immediately",
                                        "structured immediate availability")
         return DeterministicAnswer("review", "start_availability", None, "notice period missing")
-    if text == "desired pay":
+    if text == "desired pay" or re.search(
+            r"\b(?:target|desired|expected|expectation s?|requirements?)\b.*\b(?:salary|base salary|compensation|pay)\b"
+            r"|\b(?:salary|compensation) (?:expectations?|requirements?)\b", text):
         policy = profile.get("salary_expectation")
         if isinstance(policy, Mapping) and policy.get("fallback") == "Negotiable":
             return DeterministicAnswer("text", "compensation", "Negotiable",

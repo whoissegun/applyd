@@ -56,6 +56,7 @@
     "no_immediate_family_at_target_company": true,
     "no_immediate_family_in_government": true,
     "no_restrictive_covenants": null,
+    "no_criminal_convictions": null,
     "recruitment_events": {}
   },
   "security_clearance": {

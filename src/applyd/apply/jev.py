@@ -207,6 +207,27 @@ class JevPlanner:
         self.decision_attempts = {}
         self.decision_last_refs = {}
 
+    def _constrained_choice(self, question, options, profile):
+        """Low-risk fallback: evidence-grounded model choice among real options."""
+        from applyd.apply import option_chooser
+        labels = [str(option.get('label') or '') for option in options]
+        if option_chooser.risk_tier(question, labels) != 'allowed':
+            return None
+        try:
+            from applyd.local_store import get_local_store
+            store = get_local_store()
+        except Exception:  # noqa: BLE001
+            store = None
+        result = option_chooser.choose(question, labels, profile, store=store)
+        if result.index is None:
+            return None
+        return options[result.index], {
+            'model': 'constrained_chooser', 'choice': options[result.index].get('key'),
+            'confidence': result.confidence, 'evidence': result.evidence[:200],
+            'cached': result.cached, 'chooser_reason': result.reason,
+            'estimated_cost_usd': result.cost_usd,
+        }
+
     def _post(self, body):
         url, model = _provider(self.key, self.use_openrouter)
         body = dict(body, model=model)
@@ -274,6 +295,14 @@ class JevPlanner:
                             required=bool(field.get('required')),
                         )
                 if answer is None:
+                    if field.get('select') and field.get('required'):
+                        # No label-only mapping: let select_option read the
+                        # real options and bind them (policy first, then the
+                        # constrained chooser for low-risk questions).
+                        from applyd.apply.tools import CHOOSE_FROM_OPTIONS
+                        self.seen.add((label, 'choose_from_options'))
+                        deterministic_actions.append((
+                            'select_option', {'ref': field['ref'], 'value': CHOOSE_FROM_OPTIONS}))
                     continue
                 if answer.value is None:
                     if field.get('required'):
@@ -531,6 +560,13 @@ class JevPlanner:
             if (choice == 'review' or choice not in criteria
                     or isinstance(confidence, bool) or not isinstance(confidence, (int, float))
                     or not math.isfinite(confidence) or confidence < threshold):
+                chosen = self._constrained_choice(question, options, profile)
+                if chosen is not None:
+                    selected, chooser_metrics = chosen
+                    metrics.update(chooser_metrics)
+                    if group.get('kind') == 'select':
+                        return [('select_option', {'ref': group['ref'], 'value': selected['label']})], metrics
+                    return [('click', {'ref': selected['ref']})], metrics
                 return [('report_done', {'status': 'review',
                     'note': 'review:jev_decision | unsupported or uncertain answer'})], metrics
             selected = next(option for option in options if option['key'] == choice)

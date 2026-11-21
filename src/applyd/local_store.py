@@ -843,6 +843,41 @@ class LocalStore:
 
     # ---- tailoring/applications -------------------------------------
 
+    _OPTION_CHOICES_DDL = """CREATE TABLE IF NOT EXISTS option_choices (
+        question_norm TEXT NOT NULL,
+        options_hash TEXT NOT NULL,
+        choice_label TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        model TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (question_norm, options_hash)
+    )"""
+
+    def get_option_choice(self, question_norm: str, options_hash: str) -> dict[str, Any] | None:
+        """Cached constrained-chooser answer for an identical question + option set."""
+        with self._lock:
+            self._conn.execute(self._OPTION_CHOICES_DDL)
+            row = self._conn.execute(
+                "SELECT * FROM option_choices WHERE question_norm=? AND options_hash=?",
+                (question_norm, options_hash),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def put_option_choice(self, question_norm: str, options_hash: str, *, choice_label: str,
+                          evidence: str, confidence: float, model: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(self._OPTION_CHOICES_DDL)
+            conn.execute(
+                """INSERT INTO option_choices VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(question_norm, options_hash) DO UPDATE SET
+                   choice_label=excluded.choice_label, evidence=excluded.evidence,
+                   confidence=excluded.confidence, model=excluded.model,
+                   created_at=excluded.created_at""",
+                (question_norm, options_hash, choice_label, evidence, float(confidence),
+                 model, datetime.now(timezone.utc).isoformat()),
+            )
+
     def applied_companies(self, exclude_job_id: str | None = None) -> list[str]:
         """Companies with a confirmed submitted application (for "applied before?")."""
         with self._lock:
