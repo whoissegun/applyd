@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass
 from typing import Any
 
@@ -141,6 +142,38 @@ def academic_policy_reasons(job: Job, facts: dict[str, Any], profile: dict[str, 
              "user_fact": profile.get("academic_status") or profile.get("degree")}]
 
 
+def _company_key(name: Any) -> str:
+    words = re.sub(r"[^a-z0-9]+", " ", str(name or "").casefold()).split()
+    while len(words) > 1 and words[-1] in {"inc", "llc", "ltd", "corp", "ai", "labs", "technologies"}:
+        words.pop()
+    return " ".join(words)
+
+
+def company_exclusion_match(company: str, profile: dict[str, Any], today: date | None = None) -> str | None:
+    """Return the matching rule when the user excluded this company.
+
+    Entries in employment_preferences.excluded_companies are a company name or
+    {"name": ..., "until": "YYYY-MM-DD", "reason": ...}; an expired ``until``
+    no longer excludes (e.g. a per-company application cap that resets).
+    """
+    prefs = profile.get("employment_preferences") or {}
+    rules = prefs.get("excluded_companies") if isinstance(prefs, dict) else None
+    target = _company_key(company)
+    today = today or date.today()
+    for rule in rules or []:
+        name, until = (rule.get("name"), rule.get("until")) if isinstance(rule, dict) else (rule, None)
+        if not name or _company_key(name) != target:
+            continue
+        if until:
+            try:
+                if date.fromisoformat(str(until)) < today:
+                    continue
+            except ValueError:
+                pass
+        return str(name) + (f" (until {until})" if until else "")
+    return None
+
+
 def title_exclusion_match(title: str, profile: dict[str, Any]) -> tuple[str, str] | None:
     """Return (pattern, matched text) for the first user title exclusion hit.
 
@@ -214,6 +247,14 @@ def evaluate_job(
                 "user_fact": sorted(spoken_languages),
             }
         )
+
+    company_rule = company_exclusion_match(job.company, profile)
+    if company_rule:
+        blockers.append({
+            "code": "company_excluded",
+            "job_evidence": job.company,
+            "user_rule": company_rule,
+        })
 
     title_match = title_exclusion_match(job.title, profile)
     if title_match:

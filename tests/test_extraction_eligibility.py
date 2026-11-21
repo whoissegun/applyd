@@ -272,3 +272,22 @@ class ExtractionEligibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompanyExclusionTests(unittest.TestCase):
+    def test_excluded_company_with_expiry(self) -> None:
+        from datetime import date
+        from applyd.eligibility import company_exclusion_match
+        profile = {"employment_preferences": {"excluded_companies": [
+            {"name": "OpenAI", "until": "2027-05-20"}, "Example Corp"]}}
+        self.assertIsNotNone(company_exclusion_match("openai", profile, today=date(2026, 11, 21)))
+        self.assertIsNone(company_exclusion_match("OpenAI", profile, today=date(2027, 6, 1)))
+        self.assertIsNotNone(company_exclusion_match("Example Corp Inc", profile))
+        self.assertIsNone(company_exclusion_match("Anthropic", profile))
+
+    def test_evaluate_blocks_excluded_company(self) -> None:
+        j = job("Software Engineer")
+        j.company = "openai"
+        profile = {"employment_preferences": {"excluded_companies": [{"name": "OpenAI", "until": "2999-01-01"}]}}
+        result = evaluate_job(j, {}, profile)
+        self.assertEqual("ineligible", result.decision)
