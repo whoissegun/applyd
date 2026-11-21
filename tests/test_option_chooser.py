@@ -301,3 +301,20 @@ class NationalityTests(unittest.TestCase):
         for options, expected in (({"0": "British", "1": "Nigerian"}, "Nigerian"),
                                   ({"0": "United Kingdom", "1": "Nigeria"}, "Nigeria")):
             self.assertEqual(expected, options[resolve_question("Nationality*", profile, options).choice])
+
+
+class OtherNationalityTests(unittest.TestCase):
+    OPTIONS = {"0": "I do not hold any other nationality / citizenship", "1": "British", "2": "Nigerian"}
+
+    def test_current_other_nationality_none(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        a = resolve_question("Do you currently hold any other (dual) nationality or citizenships?*",
+                             {"citizenships": ["NG"]}, self.OPTIONS, required=True)
+        self.assertEqual("0", a.choice)
+
+    def test_historical_other_nationality_needs_fact(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        q = "Have you previously held any other (dual) nationality or citizenships?*"
+        self.assertNotEqual("0", resolve_question(q, {"citizenships": ["NG"]}, self.OPTIONS, required=True).choice)
+        self.assertEqual("0", resolve_question(q, {"citizenships": ["NG"], "never_held_other_citizenship": True},
+                                               self.OPTIONS, required=True).choice)

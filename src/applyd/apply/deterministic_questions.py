@@ -642,6 +642,23 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     education = profile.get("education") if isinstance(profile.get("education"), Mapping) else {}
     employment = profile.get("employment") if isinstance(profile.get("employment"), Mapping) else {}
 
+    # "Other / second / dual nationality": a single structured citizenship
+    # means none, using the form's own "no other nationality" choice.
+    if re.search(r"\b(?:other|second|dual|additional|secondary) (?:nationalit\w*|citizenship\w*)\b", text):
+        citizenships = profile.get("citizenships")
+        historical = re.search(r"\b(?:previously|ever|formerly|in the past|have you held)\b", text)
+        if historical and identity.get("never_held_other_citizenship") is not True \
+                and profile.get("never_held_other_citizenship") is not True:
+            return _review(options, "nationality", "citizenship history is not in the profile")
+        if isinstance(citizenships, list) and len([c for c in citizenships if str(c).strip()]) == 1:
+            rendered = _options(options)
+            none = [k for k, label in rendered.items()
+                    if re.search(r"\b(?:do not|don t|no)\b.*\bother\b|^(?:none|n a|not applicable)\b", _norm(label))]
+            if len(none) == 1:
+                return DeterministicAnswer(none[0], "nationality", rendered[none[0]],
+                                           "single structured citizenship; no other nationality")
+            if set(rendered) <= {"yes", "no", "review"} or any(_boolean_label(l) is not None for l in rendered.values()):
+                return _result(options, False, "nationality", "single structured citizenship")
     # Citizenship and permanent residence are not the same as work authorization.
     if "citizen" in text and "export control" not in text:
         countries = [_norm(v) for v in (profile.get("citizenships") or identity.get("citizenships") or [])]
