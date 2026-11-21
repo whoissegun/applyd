@@ -691,7 +691,19 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             value = date(2000, int(str(grad)[5:7]), 1).strftime("%B") if grad else None
         elif text in {"end date year", "graduation year", "expected graduation year"}:
             value = str(grad)[:4] if grad else None
-        elif text in {"graduation date", "expected graduation date", "graduation date or anticipated graduation date"}: value = grad
+        elif text in {"graduation date", "expected graduation date", "graduation date or anticipated graduation date"}:
+            value = grad
+            policy = profile.get("application_policy")
+            if (grad and isinstance(policy, Mapping)
+                    and policy.get("graduation_date_nearest_option") is True
+                    and _bind(options, grad) is None):
+                # User opt-in: no offered option covers the real graduation
+                # month, so take the closest one offered.
+                choice = option_semantics.bind_nearest_month(_options(options), grad, prefer_after=False)
+                if choice is not None:
+                    return DeterministicAnswer(
+                        choice, "education_control", _options(options)[choice],
+                        "user policy: closest offered option to the graduation month")
         else: value = "Currently pursuing a Bachelor's degree" if currently_student and degree and "bachelor" in _norm(degree) else None
         return _result(options, value, "education_control", "structured education field") if value else _review(options, "education_control", "education fact missing")
     if "years" in text and "experience" in text and any(

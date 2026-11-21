@@ -142,3 +142,44 @@ class GraduationAnchoredStartTests(unittest.TestCase):
         options = {"0": "Dec 2025", "1": "May 2026", "2": "June 2026", "3": "July 2026"}
         answer = resolve_question("Graduation Date*", self.PROFILE, options)
         self.assertNotIn(answer.choice, options)
+
+
+class GraduationNearestPolicyTests(unittest.TestCase):
+    BASE = {"expected_grad_date": "2027-04", "earliest_start_date": "immediately"}
+    ON = dict(BASE, application_policy={"graduation_date_nearest_option": True})
+    SUPERAPP = ("Dec 2025", "May 2026", "June 2026", "July 2026")
+
+    def resolve(self, profile, question, labels):
+        options = {str(i): label for i, label in enumerate(labels)}
+        return options.get(resolve_question(question, profile, options).choice)
+
+    def test_policy_on_picks_closest_graduation_option(self) -> None:
+        self.assertEqual("July 2026", self.resolve(self.ON, "Graduation Date*", self.SUPERAPP))
+        # Pure closest: March (1 month) beats August (4 months).
+        self.assertEqual("March 2027", self.resolve(
+            self.ON, "Expected graduation date", ("March 2027", "August 2027")))
+        # An exact option still wins over any nearest logic.
+        self.assertEqual("April 2027", self.resolve(
+            self.ON, "Graduation Date", ("March 2027", "April 2027")))
+
+    def test_policy_off_keeps_graduation_exact(self) -> None:
+        self.assertIsNone(self.resolve(self.BASE, "Graduation Date*", self.SUPERAPP))
+
+    def test_guard_allows_only_the_nearest_offered_option(self) -> None:
+        from applyd.apply.tools import _date_profile_guard
+        self.assertIsNone(_date_profile_guard(
+            "Graduation Date*", "July 2026", self.ON, offered=list(self.SUPERAPP)))
+        self.assertIsNotNone(_date_profile_guard(
+            "Graduation Date*", "May 2026", self.ON, offered=list(self.SUPERAPP)))
+        self.assertIsNotNone(_date_profile_guard(
+            "Graduation Date*", "July 2026", self.BASE, offered=list(self.SUPERAPP)))
+
+    def test_start_date_guard_accepts_closest_past_option(self) -> None:
+        from datetime import date
+        from applyd.apply.tools import _date_profile_guard
+        self.assertIsNone(_date_profile_guard(
+            "Target Start Date*", "July 2026", self.BASE,
+            offered=list(self.SUPERAPP), today=date(2026, 11, 21)))
+        self.assertIsNotNone(_date_profile_guard(
+            "Target Start Date*", "Dec 2025", self.BASE,
+            offered=list(self.SUPERAPP), today=date(2026, 11, 21)))

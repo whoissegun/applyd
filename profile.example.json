@@ -107,6 +107,7 @@
   },
   "application_policy": {
     "required_consents": false,
+    "graduation_date_nearest_option": false,
     "required_narrative_invention": false,
     "optional_cover_letter": "skip",
     "required_cover_letter": "generate_from_grounded_facts_and_upload",

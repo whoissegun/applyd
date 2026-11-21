@@ -61,7 +61,12 @@ secrets in the file and do not run a real application.
    explicit degree focus areas or concentrations that may be claimed, such as
    machine-learning systems; do not infer them from a broad major.
 10. What is the start date and actual or expected graduation date? Use `YYYY-MM`
-    where possible.
+    where possible. While the graduation date is in the future, every job
+    start-date answer anchors on it (the closest offered option). If a
+    graduation dropdown offers no option covering your month, should applyd
+    pick the closest offered date (`application_policy.graduation_date_nearest_option:
+    true`) or send the application to review (`false`, the default)? Picking a
+    date other than your real one can conflict with your transcript.
 11. What is your GPA and its original scale? May it be disclosed? If a form
     requires another scale, may applyd convert it arithmetically, or should the
     application enter review?

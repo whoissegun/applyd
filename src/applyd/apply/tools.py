@@ -23,7 +23,7 @@ import tempfile
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
@@ -1278,11 +1278,14 @@ def pick_option(
                 return profile_guard.replace(
                     f"select_option {target_ref}", f"pick_option {option_ref}", 1
                 )
-        date_guard = _date_profile_guard(target_label, option_text, profile)
+        offered = _option_texts(_read_options(page)) if profile else []
+        date_guard = _date_profile_guard(target_label, option_text, profile, offered=offered)
         if date_guard:
             return date_guard.replace(
                 "error: ", f"error: pick_option {option_ref}: ", 1
             )
+        if target_ref and profile and _nearest_offered_ok(target_label, option_text, profile, offered):
+            _mark_nearest_ok(page, target_ref, option_text)
         event_guard = _recruitment_event_profile_guard(
             target_label, option_text, profile, company,
             error_prefix=f"pick_option {option_ref}",
@@ -1474,15 +1477,91 @@ def _question_date(value: str) -> tuple[int, int, int | None] | None:
     return int(match.group(3)), _MONTH_NUMBERS[match.group(2)], day
 
 
+_GRADUATION_FIELD_PHRASES = (
+    "graduation date", "expected graduation", "graduation month", "graduation year",
+)
+_START_FIELD_PHRASES = (
+    "target start date", "employment start date", "job start date",
+    "available to start", "availability date",
+)
+
+
+def graduation_nearest_policy(profile: dict[str, Any] | None) -> bool:
+    """User opt-in: graduation dropdowns may take the closest offered date."""
+    policy = (profile or {}).get("application_policy") or {}
+    return isinstance(policy, dict) and policy.get("graduation_date_nearest_option") is True
+
+
+def _nearest_offered_ok(
+    label: str, value: str, profile: dict[str, Any], offered: Sequence[str] | None,
+    today: date | None = None,
+) -> bool:
+    """True when ``value`` is exactly the offered option nearest the anchor.
+
+    Start dates anchor on graduation (a preference). Graduation dates take
+    this route only under the explicit user policy above.
+    """
+    if not offered:
+        return False
+    field = _normalize_option_text(label)
+    if any(phrase in field for phrase in _GRADUATION_FIELD_PHRASES):
+        if not graduation_nearest_policy(profile):
+            return False
+        anchor = str(profile.get("expected_grad_date") or "")
+    elif any(phrase in field for phrase in _START_FIELD_PHRASES):
+        start = graduation_start_date(profile, today=today)
+        anchor = (start or today or date.today()).strftime("%Y-%m")
+    else:
+        return False
+    labels = {str(i): str(text) for i, text in enumerate(offered)}
+    graduation = any(phrase in field for phrase in _GRADUATION_FIELD_PHRASES)
+    key = option_semantics.bind_nearest_month(labels, anchor, prefer_after=not graduation)
+    return key is not None and (
+        _normalize_option_text(labels[key]) == _normalize_option_text(value))
+
+
+def _offered_option_texts(page: Page, ref: str) -> list[str]:
+    """Options the form offers for ``ref``: native <select> or open listbox."""
+    try:
+        native = _ref_locator(page, ref).evaluate(
+            "el => el.tagName === 'SELECT' ? [...el.options].map(o => (o.text || '').trim()) : null",
+            timeout=3000,
+        )
+        if isinstance(native, list) and native:
+            return [str(text) for text in native]
+        return _option_texts(_read_options(page))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _option_texts(options: Any) -> list[str]:
+    """Option labels from read_options results (dicts or plain strings)."""
+    if not isinstance(options, list):
+        return []
+    return [str(o.get("text", "")) if isinstance(o, dict) else str(o) for o in options]
+
+
+def _mark_nearest_ok(page: Page, ref: str, value: str) -> None:
+    """Record that the runner verified this nearest-date choice (read at submit)."""
+    try:
+        _ref_locator(page, ref).evaluate(
+            "(el, v) => el.setAttribute('data-applyd-nearest-ok', v)", value, timeout=3000)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _date_profile_guard(
     label: str,
     value: str,
     profile: dict[str, Any] | None,
     *,
     today: date | None = None,
+    offered: Sequence[str] | None = None,
 ) -> str | None:
     """Reject dropdown dates that contradict grounded education/availability."""
     if not profile:
+        return None
+    if _nearest_offered_ok(label, value, profile, offered, today=today):
         return None
     field = _normalize_option_text(label)
     chosen = _normalize_option_text(value)
@@ -2092,11 +2171,17 @@ def _select_profile_guard(
     if event_guard:
         return event_guard
 
-    date_guard = _date_profile_guard(label, value, profile)
+    offered = _offered_option_texts(page, ref)
+    date_guard = _date_profile_guard(label, value, profile, offered=offered)
     if date_guard:
         return date_guard.replace(
             "error: ", f"error: select_option {ref}: ", 1
         )
+    if _nearest_offered_ok(label, value, profile, offered):
+        # The value written may be the rendered option text; tag both forms.
+        nearest = next((text for text in offered
+                        if _normalize_option_text(text) == _normalize_option_text(value)), value)
+        _mark_nearest_ok(page, ref, nearest)
 
     # Never let a conditional U.S.-state control fabricate residence. Some
     # Greenhouse forms leave the field required even after Canada is selected;
@@ -2907,10 +2992,19 @@ def submit(page: Page, ref: str, test_mode: bool, verify_ctx: dict | None = None
             dates = page.evaluate(r"""() => [...document.querySelectorAll('input,textarea,select')]
               .filter(e=>e.type!=='hidden' && (e.getBoundingClientRect().width || e.getBoundingClientRect().height))
               .map(e=>({label:e.getAttribute('data-applyd-label') || e.getAttribute('aria-label') || '',
-                        value:(e.tagName==='SELECT' ? e.selectedOptions[0]?.text : e.value) || ''}))
+                        value:(e.tagName==='SELECT' ? e.selectedOptions[0]?.text : e.value) || '',
+                        offered:e.tagName==='SELECT' ? [...e.options].map(o=>(o.text||'').trim()) : null,
+                        nearestOk:e.getAttribute('data-applyd-nearest-ok') || ''}))
               .filter(e=>/graduat/i.test(e.label) && /date|month|year/i.test(e.label) && e.value)""")
             for field in dates:
-                error = _date_profile_guard(field['label'], field['value'], profile)
+                # A nearest-date choice the runner already verified at select
+                # time (custom dropdowns expose no option list here).
+                if (graduation_nearest_policy(profile) and field.get('nearestOk')
+                        and _normalize_option_text(field['nearestOk'])
+                        == _normalize_option_text(field['value'])):
+                    continue
+                error = _date_profile_guard(field['label'], field['value'], profile,
+                                            offered=field.get('offered'))
                 if error:
                     return error + '; submission not attempted'
         except Exception as exc:

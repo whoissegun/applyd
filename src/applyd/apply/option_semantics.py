@@ -216,11 +216,14 @@ def bind_same_month(labels: dict[str, str], value: object) -> str | None:
     return narrowest[0] if len(narrowest) == 1 else None
 
 
-def bind_nearest_month(labels: dict[str, str], anchor: object) -> str | None:
-    """Option closest to ``anchor``, preferring options on or after it.
+def bind_nearest_month(labels: dict[str, str], anchor: object,
+                       prefer_after: bool = True) -> str | None:
+    """Option closest to ``anchor``.
 
-    Used for target start dates, which are a preference anchored on the
-    graduation month rather than a historical fact.
+    ``prefer_after`` (start dates) takes the nearest option on/after the
+    anchor before any earlier one. Without it (graduation under the user's
+    nearest-option policy) the smallest month distance wins, ties going to
+    the later option.
     """
     wanted = parse_months(anchor)
     if not wanted or len(wanted) != 1:
@@ -236,11 +239,16 @@ def bind_nearest_month(labels: dict[str, str], anchor: object) -> str | None:
         if target in starts:
             distance, before = 0, 0
         else:
-            after = [d for d in starts if d >= target]
-            nearest = min(after) if after else max(starts)
-            distance = abs((nearest.year - target.year) * 12 + nearest.month - target.month)
+            def gap(d: date) -> int:
+                return abs((d.year - target.year) * 12 + d.month - target.month)
+            if prefer_after:
+                after = [d for d in starts if d >= target]
+                nearest = min(after) if after else max(starts)
+            else:
+                nearest = min(starts, key=lambda d: (gap(d), d < target))
+            distance = gap(nearest)
             before = 0 if nearest >= target else 1
-        candidates.append((before, distance, key))
+        candidates.append((before, distance, key) if prefer_after else (distance, before, key))
     if not candidates:
         return None
     candidates.sort()
