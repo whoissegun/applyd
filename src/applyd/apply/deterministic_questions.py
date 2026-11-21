@@ -1277,6 +1277,19 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             return DeterministicAnswer(choice, "demographic_unset", rendered[choice],
                                        "profile does not state this; use the form's decline option")
         return _review(options, "demographic_unset", "profile does not state this demographic")
+    # US EEO "Ethnicity group" is the Hispanic/Latino question when its
+    # options are "Hispanic or Latino" / "Not Hispanic or Latino".
+    if "ethnic" in text:
+        labels = [_norm(label) for label in _options(options).values()]
+        if any("not hispanic" in l for l in labels) and any(l.startswith("hispanic") for l in labels):
+            value = demographics.get("hispanic_latino", profile.get("hispanic_latino"))
+            if isinstance(value, bool):
+                rendered = _options(options)
+                wanted = "hispanic or latino" if value else "not hispanic or latino"
+                match = [k for k, l in rendered.items() if _norm(l) == wanted]
+                if len(match) == 1:
+                    return DeterministicAnswer(match[0], "hispanic_latino", rendered[match[0]],
+                                               "structured Hispanic/Latino fact")
     for terms, key in demographic_map:
         if any(term in text for term in terms):
             value = demographics.get(key, profile.get(key))

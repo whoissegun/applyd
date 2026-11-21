@@ -460,3 +460,11 @@ class AccuracyCertificationTests(unittest.TestCase):
         profile = {"application_policy": {"ordinary_accuracy_attestation": "authorized"}}
         self.assertEqual("0", resolve_question(q, profile, {"0": q}, required=True).choice)
         self.assertNotEqual("0", resolve_question(q, {}, {"0": q}, required=True).choice)
+
+
+class EthnicityGroupTests(unittest.TestCase):
+    def test_ethnicity_group_with_hispanic_options(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        options = {"0": "Hispanic or Latino", "1": "Not Hispanic or Latino", "2": "I do not wish to disclose"}
+        self.assertEqual("1", resolve_question("Indicate Ethnicity group", {"hispanic_latino": False},
+                                               options, required=True).choice)
