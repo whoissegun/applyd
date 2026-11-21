@@ -318,3 +318,21 @@ class OtherNationalityTests(unittest.TestCase):
         self.assertNotEqual("0", resolve_question(q, {"citizenships": ["NG"]}, self.OPTIONS, required=True).choice)
         self.assertEqual("0", resolve_question(q, {"citizenships": ["NG"], "never_held_other_citizenship": True},
                                                self.OPTIONS, required=True).choice)
+
+
+class ConfidentialityAgreementTests(unittest.TestCase):
+    YN = {"yes": "Yes", "no": "No", "review": "Review"}
+
+    def ask(self, q, background):
+        from applyd.apply.deterministic_questions import resolve_question
+        return resolve_question(q, {"background_defaults": background}, self.YN, required=True).choice
+
+    def test_compound_needs_both_facts(self) -> None:
+        q = "Are you subject to any noncompete nondisclosure/confidentiality agreement?*"
+        self.assertEqual("review", self.ask(q, {"no_restrictive_covenants": True}))
+        self.assertEqual("no", self.ask(q, {"no_restrictive_covenants": True, "no_confidentiality_agreements": True}))
+        self.assertEqual("yes", self.ask(q, {"no_restrictive_covenants": True, "no_confidentiality_agreements": False}))
+
+    def test_willing_to_sign_is_not_a_fact(self) -> None:
+        self.assertEqual("review", self.ask("Are you willing to sign a non-disclosure agreement?",
+                                            {"no_confidentiality_agreements": True}))

@@ -504,9 +504,15 @@ def _degree_claim_guard(question: str, value: str, profile: dict[str, Any]) -> s
 
 def _covenant_answer_ok(text: str, desired: str, profile: dict[str, Any]) -> bool:
     """A non-compete answer backed by the explicit restrictive-covenant fact."""
-    fact = ((profile.get("background_defaults") or {}).get("no_restrictive_covenants"))
+    background = profile.get("background_defaults") or {}
+    fact = background.get("no_restrictive_covenants")
     if not isinstance(fact, bool) or not re.search(r"\bnon[ -]?(?:compete|competition|solicit)", text):
         return False
+    if re.search(r"\bnon[ -]?disclosure|\bconfidentiality\b|\bnda\b", text):
+        nda = background.get("no_confidentiality_agreements")
+        if not isinstance(nda, bool):
+            return False
+        fact = fact and nda
     wanted = _normalize_option_text(desired)
     says_no = wanted in {"no", "false"} or wanted.startswith("no ")
     says_yes = wanted in {"yes", "true"} or wanted.startswith("yes ")

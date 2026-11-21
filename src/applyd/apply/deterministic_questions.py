@@ -1027,12 +1027,21 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
     if "driver s license" in text:
         value = credentials.get("drivers_license")
         return _result(options, value, "drivers_license", "structured credential") if isinstance(value, bool) else _review(options, "drivers_license", "credential missing")
-    if re.search(r"\bnon ?(?:compete|competition|solicitation|solicit)\b", text):
+    nda_question = re.search(r"\b(?:non ?disclosure|confidentiality (?:agreement|obligation)s?|nda s?|ndas)\b", text)
+    covenant_question = re.search(r"\bnon ?(?:compete|competition|solicitation|solicit)\b", text)
+    if nda_question and re.search(r"\b(?:are|were|will) you\b|\bsubject to\b|\bbound by\b|\bparty to\b", text) \
+            and not re.search(r"\b(?:agree|sign|willing)\b", text):
+        # Nondisclosure/confidentiality is its own fact; a compound question
+        # ("noncompete or nondisclosure") needs every named fact.
+        facts = [background.get("no_confidentiality_agreements")]
+        if covenant_question:
+            facts.append(background.get("no_restrictive_covenants"))
+        if all(isinstance(f, bool) for f in facts):
+            return _result(options, not all(facts), "restrictive_covenants",
+                           "structured non-compete / confidentiality-agreement facts")
+        return _review(options, "sensitive_history", "nondisclosure/confidentiality agreement fact missing")
+    if covenant_question:
         value = background.get("no_restrictive_covenants")
-        # Nondisclosure/confidentiality agreements are a different fact
-        # (internships usually involve one); never answer them from this one.
-        if re.search(r"\b(?:non ?disclosure|confidentiality|nda)\b", text):
-            return _review(options, "sensitive_history", "nondisclosure/confidentiality agreement fact missing")
         if isinstance(value, bool) and not re.search(r"\b(?:agree|sign|willing)\b", text):
             return _result(options, not value, "restrictive_covenants",
                            "structured background fact about non-compete/non-solicit agreements")
