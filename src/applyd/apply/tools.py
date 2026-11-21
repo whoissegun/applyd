@@ -509,6 +509,23 @@ def _degree_claim_guard(question: str, value: str, profile: dict[str, Any]) -> s
     return None
 
 
+def _denies_authorization(desired: str) -> bool:
+    """Option text that denies current authorization in any wording.
+
+    "I don't currently have the right to work in the UK and would need visa
+    sponsorship" was read as claiming the right because only exact phrases
+    were listed. A negation shortly before have/hold/right/authorized never
+    claims current authorization. (Needing sponsorship alone does not excuse
+    an option that also claims to hold a visa.)
+    """
+    text = " " + _normalize_option_text(desired) + " "
+    return bool(re.search(
+        r"\b(?:not|do not|don t|dont|does not|doesn t|cannot|can t|no|without|lack)\b"
+        r"(?:\s+\w+){0,3}?\s+(?:currently\s+)?(?:have|hold|possess|authori[sz]ed|eligible|right|permitted)\b",
+        text,
+    ))
+
+
 def _covenant_answer_ok(text: str, desired: str, profile: dict[str, Any]) -> bool:
     """A non-compete answer backed by the explicit restrictive-covenant fact."""
     background = profile.get("background_defaults") or {}
@@ -2460,7 +2477,7 @@ def _select_profile_guard(
             "not currently authorized", "not authorized", "not authorised",
             "do not have work authorization", "no work authorization",
             "do not have the right to work", "no right to work",
-        ))
+        )) or _denies_authorization(desired)
         claims_current_status = (
             "can work for" in desired
             or "authorized to work" in desired
@@ -2484,7 +2501,7 @@ def _select_profile_guard(
                 "not currently authorized", "not authorized", "not authorised",
                 "do not have work authorization", "no work authorization",
                 "do not have the right to work", "no right to work",
-            )) or desired in {"no", "false"}
+            )) or desired in {"no", "false"} or _denies_authorization(desired)
             says_authorized = (
                 desired in {"yes", "true"}
                 or any(phrase in desired for phrase in (

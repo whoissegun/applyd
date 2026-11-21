@@ -780,6 +780,20 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             if answer.choice and answer.choice != "review":
                 return answer
 
+    # Office/hybrid/onsite questions answered by location options ("I am
+    # based in San Francisco" / "I am open to relocating" / "not willing"):
+    # a non-local candidate willing to relocate takes the relocating option.
+    if re.search(r"\b(?:office|hybrid|onsite|on site|in person|based out of|located)\b", text):
+        rendered = _options(options)
+        relocating = [k for k, label in rendered.items()
+                      if re.search(r"\brelocat", _norm(label)) and not re.search(r"\b(?:not|unable|no|cannot)\b", _norm(label))]
+        based = [k for k, label in rendered.items() if re.search(r"\b(?:based in|live in|located in|local to)\b", _norm(label))]
+        if len(relocating) == 1 and based:
+            city = _norm(profile.get("address_city") or "")
+            local = bool(city) and any(city in _norm(rendered[k]) for k in based)
+            if not local and _preference(profile, "willing_to_relocate") is True:
+                return DeterministicAnswer(relocating[0], "onsite_with_relocation", rendered[relocating[0]],
+                                           "not local; structured relocation preference")
     # Relocation timeline options ("relocate within 30 days / 3 months"):
     # a candidate who can relocate immediately takes the soonest window.
     if "relocat" in text:

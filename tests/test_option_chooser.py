@@ -402,3 +402,20 @@ class RelativeWindowGuardTests(unittest.TestCase):
         label = "If you receive and accept an offer, when would you be available to start?*"
         self.assertIsNone(_date_profile_guard(label, offered[3], profile, offered=offered, today=date(2026, 11, 21)))
         self.assertIsNotNone(_date_profile_guard(label, offered[0], profile, offered=offered, today=date(2026, 11, 21)))
+
+
+class DenialAndRelocatingOptionTests(unittest.TestCase):
+    def test_denial_wording_variants(self) -> None:
+        from applyd.apply.tools import _denies_authorization
+        self.assertTrue(_denies_authorization(
+            "I don't currently have the right to work in the UK and would need visa sponsorship"))
+        self.assertFalse(_denies_authorization("I have the right to work in the UK"))
+        self.assertFalse(_denies_authorization("I currently hold a valid UK work visa"))
+
+    def test_hybrid_question_with_location_options(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        profile = {"address_city": "Ottawa", "employment_preferences": {"willing_to_relocate": True}}
+        options = {"0": "I am based in San Francisco", "1": "I am open to relocating to San Francisco",
+                   "2": "I am not willing to relocate"}
+        q = "Our positions are based out of our San Francisco office (3-4 days in the office). Are you open to this?"
+        self.assertEqual("1", resolve_question(q, profile, options).choice)
