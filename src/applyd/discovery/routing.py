@@ -17,6 +17,12 @@ ATS_DOMAINS = {
     "careers.smartrecruiters.com": "smartrecruiters",
 }
 
+# Platforms retained for explicit/manual lookup but excluded from the default
+# discovery, ranking, and batch-apply path. SmartRecruiters has repeatedly
+# failed to produce a confirmed automated submission across independent
+# employers, so spending enrichment/matching capacity on it is counterproductive.
+DEFAULT_EXCLUDED_ATS = frozenset({"smartrecruiters"})
+
 
 # Domains that effectively always require account creation or login
 # before the apply form is reachable. `apply_gate="portal"` at URL-time.

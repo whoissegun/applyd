@@ -109,6 +109,13 @@ def _tier1_ats_api(
             target_job = job
             break
     if target_job is None:
+        # Workable's board endpoint is paginated. A posting missing from the
+        # first page can still be available through its per-posting endpoint.
+        if ats == "workable":
+            try:
+                return module.fetch_description(company, job_id, client)
+            except (httpx.HTTPError, ValueError, TypeError):
+                return None
         return None
 
     # bulk response already had a description → use it
@@ -117,6 +124,14 @@ def _tier1_ats_api(
         return desc
 
     # per-ATS fallback for bulk-omits-description
+    if ats == "workable":
+        try:
+            desc = module.fetch_description(company, target_job.external_id, client)
+        except (httpx.HTTPError, ValueError, TypeError):
+            desc = None
+        if desc and len(desc) >= MIN_USEFUL_CHARS:
+            target_job.description = desc
+            return desc
     if ats == "smartrecruiters":
         desc = _fetch_smartrecruiters_description(company, target_job.external_id, client)
         if desc and len(desc) >= MIN_USEFUL_CHARS:
@@ -164,6 +179,27 @@ def job_is_live(
         return None
     if any(_job_id_matches(job, job_id) for job in board):
         return True
+    if ats == "workable":
+        # The public board endpoint returns only one page; absence there is
+        # not evidence of closure. Check the individual posting instead.
+        try:
+            with http_client(client) as c:
+                response = c.get(
+                    f"https://apply.workable.com/api/v2/accounts/{company}/jobs/{job_id}",
+                    follow_redirects=True, timeout=15.0,
+                )
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            data = response.json()
+            if str(data.get("shortcode") or "") != job_id:
+                return None
+            state = data.get("state")
+            if state == "published":
+                return True
+            return False if state in {"closed", "archived"} else None
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
     # Board says absent — but Lever keeps "confidential"/unlisted postings off
     # the board list AND out of its posting API while the direct link still
     # serves a live, submittable form (confirmed on a Palantir internship that

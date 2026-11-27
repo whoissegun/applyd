@@ -1,7 +1,8 @@
 """Direct apply runner: tool-use loop driving a persistent local Chrome profile.
 
-All LLM calls go through OpenRouter's OpenAI-compatible API. Kimi K2.6 is the
-default, but any tool-capable OpenRouter model can be selected with --model.
+Jev owns bounded decisions by default; Kimi K2.6 handles navigation and
+grounded free-form writing. The restricted pure-Jev controller remains a
+separate test surface.
 
 `run_apply(...)` is the stateless browser entry point. SQLite claiming and
 attempt persistence live in `applyd.commands.apply`.
@@ -17,6 +18,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Callable
 
@@ -27,7 +29,10 @@ from ..llm_errors import is_transient_llm_error
 from .browser import BrowserConnectError, browser_page
 from .email_verify import build_code_reader
 from .prompts import SYSTEM_PROMPT, build_user_blocks
-from .tools import TOOL_DEFS, dispatch
+from .tools import (
+    TOOL_DEFS, _historical_application_answer, _historical_production_claim,
+    _narrative_question, dispatch,
+)
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -60,6 +65,67 @@ MAX_WALL_SECONDS = int(os.environ.get("APPLYD_APPLY_MAX_SECONDS", "420"))
 DEFAULT_MAX_COST_USD = 0.0
 # Grace on top of MAX_WALL_SECONDS before the hard watchdog kills the process.
 WATCHDOG_GRACE_SECONDS = 60
+# OpenRouter has occasionally returned an HTTP-success response from Kimi with
+# finish_reason="stop", no content, no tool calls, no usage, and no charge even
+# when a tool was explicitly forced. Retry only that provider-empty signature;
+# ordinary prose stalls still follow the one-nudge agent policy below.
+EMPTY_COMPLETION_RETRIES = int(
+    os.environ.get("APPLYD_EMPTY_COMPLETION_RETRIES", "5")
+)
+
+
+_TEST_AUDIT_SENSITIVE_LABEL = re.compile(
+    r"\b(?:first|last|full|legal|preferred|family|given|sur)\s*name\b|^name$|"
+    r"\b(?:e-?mail|phone|mobile|telephone|street address|address line|postal|zip|"
+    r"linkedin|github|portfolio|website|date of birth|birth date|gender|sex|race|"
+    r"ethnicity|hispanic|disability|veteran)\b",
+    re.I,
+)
+
+
+def _test_mode_answer_audit(page: Any) -> list[dict[str, str]]:
+    """Capture non-PII answers locally before a test or real submission."""
+    rows = page.evaluate(r"""() => {
+      const visible = e => { const r=e.getBoundingClientRect(); const s=getComputedStyle(e);
+        return (r.width || r.height) && s.display !== 'none' && s.visibility !== 'hidden'; };
+      const out=[];
+      for (const e of document.querySelectorAll('[data-applyd-ref]')) {
+        if (!visible(e)) continue;
+        const tag=e.tagName.toLowerCase(), type=(e.type || '').toLowerCase();
+        const question=(e.getAttribute('data-applyd-question') ||
+          e.getAttribute('data-applyd-label') || '').trim();
+        const option=(e.getAttribute('data-applyd-option') || '').trim();
+        let value='';
+        if (tag === 'select') value=e.selectedOptions?.[0]?.text?.trim() || '';
+        else if (type === 'radio' || type === 'checkbox') {
+          if (e.checked || e.getAttribute('aria-checked') === 'true' ||
+              e.getAttribute('data-applyd-picked')) value=option || e.value || 'selected';
+        } else if (tag === 'button' || e.getAttribute('role') === 'radio' ||
+                   e.getAttribute('role') === 'checkbox') {
+          if (e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-pressed') === 'true' || e.getAttribute('data-applyd-picked'))
+            value=option || e.textContent?.trim() || 'selected';
+        } else if (type !== 'file') value=(e.getAttribute('data-applyd-picked') || e.value || '').trim();
+        if (question && value) out.push({question, value});
+      }
+      return out;
+    }""")
+    if not isinstance(rows, list):
+        return []
+    answers: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not question or not value or _TEST_AUDIT_SENSITIVE_LABEL.search(question):
+            continue
+        identity = (question, value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        answers.append({"question": question[:500], "value": value[:4000]})
+    return answers
 
 
 class ApplyTimeoutError(Exception):
@@ -124,6 +190,29 @@ def _make_client() -> OpenAI:
             "and add it to .env."
         )
     return OpenAI(base_url=OPENROUTER_BASE_URL, api_key=key)
+
+
+def _empty_zero_usage_completion(response: Any) -> bool:
+    """Return true for the observed unbilled OpenRouter/Kimi empty response."""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return False
+    message = getattr(choices[0], "message", None)
+    if message is None or (getattr(message, "tool_calls", None) or []):
+        return False
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        if content.strip():
+            return False
+    elif content:
+        return False
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return True
+    return not any(
+        (getattr(usage, field, 0) or 0) > 0
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
+    )
 
 
 def run_apply(
@@ -196,7 +285,32 @@ def run_apply(
     }
     user_message = {"role": "user", "content": user_blocks}
 
-    client = _make_client()
+    controller_enabled = os.environ.get('APPLYD_JEV_CONTROLLER', 'false').lower() == 'true'
+    # Closed-form application answers are always routed through Jev. Prefer a
+    # direct TypeSafe key, but use the already-configured OpenRouter account
+    # when no separate TypeSafe credential exists.
+    assisted_enabled = not controller_enabled
+    expected_schema = None
+    if controller_enabled:
+        from .jev_validation import application_url, validate_manifest
+        job_url = application_url(job_url)
+    # Live Jev is a per-job canary, never a blind --test-mode false override.
+    if controller_enabled and not test_mode:
+        try:
+            from pathlib import Path
+            record=json.loads(Path(os.environ.get('APPLYD_JEV_VALIDATION','')).read_text())
+            expected_schema=validate_manifest(record,job_id,profile_context,resume_pdf_path,job_url)
+        except (OSError,ValueError):
+            expected_schema=None
+        if expected_schema is None:
+            return {'status': 'review', 'note': 'review:jev_controller | fresh matching test-mode validation required',
+                    'tokens': {}, 'actual_cost_usd': 0.0, 'browser_mb': 0.0,
+                    'turn_count': 0, 'tool_call_counts': {}}
+    controller = None
+    if controller_enabled:
+        from .jev_controller import JevController
+        controller = JevController(os.environ.get('TYPESAFE_API_KEY'),expected_schema)
+    client = None if controller_enabled else _make_client()
     messages: list[dict[str, Any]] = [system_message, user_message]
     tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
     actual_cost_usd = 0.0
@@ -224,6 +338,22 @@ def run_apply(
         # Kimi's default reasoning mode is slower and unnecessary for the
         # tightly-scoped browser loop. Tool use remains available.
         extra_body["reasoning"] = {"enabled": False}
+        # DigitalOcean repeatedly returned unbilled empty completions for
+        # forced tool calls while the same request succeeded through another
+        # Kimi endpoint. Keep fallbacks enabled and require support for the
+        # tool parameters this loop depends on.
+        ignored = [
+            provider.strip().casefold()
+            for provider in os.environ.get(
+                "APPLYD_KIMI_IGNORE_PROVIDERS", "digitalocean"
+            ).split(",")
+            if provider.strip()
+        ]
+        extra_body["provider"] = {
+            "ignore": ignored,
+            "allow_fallbacks": True,
+            "require_parameters": True,
+        }
 
     final_status: str | None = None
     final_note: str = ""
@@ -232,9 +362,24 @@ def run_apply(
     nudged = False
     submit_confirmed_turn: int | None = None
     submit_confirmation_note = ""
+    resume_uploaded = False
+    # Refs the deterministic/Jev layer answered in this attempt.
+    controller_refs: set[str] = set()
     failed_action_counts: dict[str, int] = {}
     event_sequence = 0
     preflight_required = False
+    preflight_violations = 0
+    jev_planner = None
+    jev_pending = False
+    if assisted_enabled:
+        from .jev import JevPlanner
+        typesafe_key = os.environ.get('TYPESAFE_API_KEY')
+        openrouter_key = os.environ.get('OPENROUTER_API_KEY')
+        jev_planner = JevPlanner(
+            typesafe_key or openrouter_key,
+            max_requests=25,
+            use_openrouter=not bool(typesafe_key),
+        )
 
     def _emit(
         event_type: str,
@@ -271,6 +416,8 @@ def run_apply(
             "note": final_note,
             "tokens": tokens,
             "actual_cost_usd": actual_cost_usd,
+            "jev_estimated_cost_usd": controller.cost if controller else (jev_planner.cost if jev_planner else 0.0),
+            "jev_validated_schema": controller.validated_schema if controller else None,
             "browser_mb": 1.5 if (browser_provider or os.environ.get(
                 "APPLYD_BROWSER_PROVIDER", "local"
             )).lower() == "brightdata" else 0.0,
@@ -280,7 +427,7 @@ def run_apply(
 
     print(
         f"→ direct-apply [{company}] {title} ({job_id})\n"
-        f"  test_mode={test_mode} model={model}",
+        f"  test_mode={test_mode} model={'jev-1.13.0/controller' if controller else model}",
         file=sys.stderr,
     )
     _emit(
@@ -289,7 +436,7 @@ def run_apply(
             "job_id": job_id,
             "company": company,
             "title": title,
-            "model": model,
+            "model": 'jev-1.13.0/controller' if controller else model,
             "test_mode": bool(test_mode),
             "browser_provider": (
                 browser_provider or os.environ.get("APPLYD_BROWSER_PROVIDER", "local")
@@ -319,7 +466,8 @@ def run_apply(
             browser_provider, test_mode=bool(test_mode)
         ) as page:
             for turn in range(MAX_TURNS):
-                if max_cost_usd > 0 and actual_cost_usd >= max_cost_usd:
+                budget_cost = actual_cost_usd + (controller.cost if controller else (jev_planner.cost if jev_planner else 0))
+                if max_cost_usd > 0 and budget_cost >= max_cost_usd:
                     final_status = "review"
                     final_note = (
                         f"review:cost_budget | spent=${actual_cost_usd:.4f} "
@@ -335,20 +483,91 @@ def run_apply(
                     tool_choice: Any = {"type": "function", "function": {"name": "navigate"}}
                 elif turn == 1:
                     tool_choice = {"type": "function", "function": {"name": "snapshot"}}
+                elif preflight_required:
+                    tool_choice = {"type": "function", "function": {"name": "preflight"}}
                 elif nudged:
                     # Just nudged after a prose stall — force a tool call.
                     tool_choice = "required"
                 else:
                     tool_choice = "auto"
 
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=TOOL_DEFS,
-                    tool_choice=tool_choice,
-                    max_tokens=4096,
-                    extra_body=extra_body,
-                )
+                empty_retries = 0
+                hybrid_response = None
+                if controller is not None:
+                    hybrid_response, controller_metrics = controller.next(
+                        page, profile_context, turn, preflight_required)
+                    _emit('jev_controller_decision', turn=turn, payload=controller_metrics)
+                if jev_pending and not preflight_required and jev_planner is not None:
+                    from .jev import tool_response
+                    jev_pending = False
+                    actions, jev_metrics = jev_planner.propose(
+                        page, profile_context, job_locations=job_locations,
+                        company=company,
+                    )
+                    _emit('jev_decision', turn=turn, payload=jev_metrics)
+                    if actions:
+                        hybrid_response = tool_response(actions, turn)
+                    elif assisted_enabled:
+                        _emit('jev_fallback', turn=turn, payload={
+                            'provider': 'kimi_freeform_only',
+                            'reason': jev_metrics.get('reason', 'no_authorized_actions')})
+                while True:
+                    resp = hybrid_response or client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=TOOL_DEFS,
+                        tool_choice=tool_choice,
+                        max_tokens=4096,
+                        extra_body=extra_body,
+                    )
+                    forced_tool = tool_choice != "auto"
+                    if not forced_tool or not _empty_zero_usage_completion(resp):
+                        break
+                    if empty_retries >= EMPTY_COMPLETION_RETRIES:
+                        break
+                    empty_retries += 1
+                    choice = resp.choices[0]
+                    _emit(
+                        "model_retry",
+                        turn=turn,
+                        payload={
+                            "reason": "empty_zero_usage_forced_tool_completion",
+                            "retry": empty_retries,
+                            "max_retries": EMPTY_COMPLETION_RETRIES,
+                            "finish_reason": getattr(choice, "finish_reason", None),
+                            "response_id": getattr(resp, "id", None),
+                        },
+                    )
+                    print(
+                        "  ↻ retrying empty zero-usage forced-tool response "
+                        f"({empty_retries}/{EMPTY_COMPLETION_RETRIES})",
+                        file=sys.stderr,
+                    )
+                    time.sleep(min(1.0 * (2 ** (empty_retries - 1)), 8.0))
+
+                if (
+                    tool_choice != "auto"
+                    and _empty_zero_usage_completion(resp)
+                    and empty_retries >= EMPTY_COMPLETION_RETRIES
+                ):
+                    turns_done = turn + 1
+                    final_status = "infra_error"
+                    final_note = (
+                        "empty zero-usage forced-tool completion after "
+                        f"{EMPTY_COMPLETION_RETRIES + 1} attempts"
+                    )
+                    _emit(
+                        "model_turn",
+                        turn=turn,
+                        payload={
+                            "tool_names": [],
+                            "has_text": False,
+                            "cumulative_cost_usd": actual_cost_usd,
+                            "tokens": dict(tokens),
+                            "empty_completion_retries_exhausted": True,
+                        },
+                    )
+                    break
 
                 _accumulate_tokens(tokens, resp.usage)
                 actual_cost_usd += getattr(resp.usage, "cost", 0.0) or 0.0
@@ -365,6 +584,7 @@ def run_apply(
                     turn=turn,
                     payload={
                         "tool_names": [tc.function.name for tc in tool_calls],
+                        "provider": "jev_controller" if controller else ("jev_assisted" if hybrid_response else "kimi"),
                         "has_text": bool(asst.content),
                         "cumulative_cost_usd": actual_cost_usd,
                         "tokens": dict(tokens),
@@ -417,6 +637,13 @@ def run_apply(
                         reported_gaps = [
                             gap for gap in args.get("missing_fields", [])
                             if isinstance(gap, dict) and str(gap.get("label", "")).strip()
+                            and " ".join(re.sub(
+                                r"[^a-z0-9]+", " ",
+                                str(gap.get("label", "")).casefold(),
+                            ).split()) not in {
+                                "apply", "apply now", "apply for this job",
+                                "continue", "next", "start application",
+                            }
                         ]
                         overridden = [
                             gap for gap in reported_gaps
@@ -426,6 +653,7 @@ def run_apply(
                                 resume_text=resume_tex,
                                 company=company,
                             )
+                            or _visible_optional_gap(page, str(gap.get('label', '')))
                         ]
                         gaps = [gap for gap in reported_gaps if gap not in overridden]
                         if overridden:
@@ -468,6 +696,8 @@ def run_apply(
                             done = True
                             break
                         preflight_required = False
+                        preflight_violations = 0
+                        jev_pending = jev_planner is not None
                         override_note = ""
                         if overridden:
                             override_note = (
@@ -492,6 +722,7 @@ def run_apply(
                         continue
 
                     if preflight_required and name not in {"snapshot", "report_done"}:
+                        preflight_violations += 1
                         result = (
                             f"error: skipped {name}; call preflight first and inspect "
                             "every visible required question before changing the form"
@@ -503,6 +734,11 @@ def run_apply(
                             "tool_result", turn=turn, name=name,
                             payload={"result": result},
                         )
+                        if preflight_violations >= 2:
+                            final_status = "review"
+                            final_note = "review:agent_stall | required preflight ignored twice"
+                            done = True
+                            break
                         continue
 
                     if ref_barrier is not None:
@@ -548,6 +784,7 @@ def run_apply(
                                 resume_text=resume_tex,
                                 company=company,
                             )
+                            or _visible_optional_gap(page, label)
                             for label in missing_labels
                         ):
                             result = (
@@ -570,6 +807,7 @@ def run_apply(
                         # success.
                         if requested_status == "applied" and (
                             submit_confirmed_turn is None or submit_confirmed_turn >= turn
+                            or (controller is not None and not controller.confirmation_observed)
                         ):
                             result = (
                                 "error: cannot report applied until a prior turn's "
@@ -583,6 +821,7 @@ def run_apply(
                             submit_confirmed_turn is not None
                             and submit_confirmed_turn < turn
                             and requested_status != "applied"
+                            and (controller is None or controller.confirmation_observed)
                         ):
                             # Browser evidence outranks a contradictory model
                             # summary. This specifically covers Greenhouse's
@@ -618,6 +857,82 @@ def run_apply(
                         # that happens to follow an accepted report_done.
                         break
 
+                    if jev_planner is not None and hybrid_response is None:
+                        from .jev import is_bounded_answer_action, is_optional_answer_action, is_satisfied_answer_action
+                        if name in {'fill', 'fill_autocomplete'} and is_optional_answer_action(page, name, args):
+                            result = 'skipped: optional field left unchanged; only required free-form fields may be composed.'
+                            messages.append({'role':'tool','tool_call_id':tc.id,'content':result})
+                            _emit('tool_result', turn=turn, name=name, payload={'result':result})
+                            continue
+                        if name == 'fill_many':
+                            args = dict(args, fields=[field for field in args.get('fields', [])
+                                if not is_optional_answer_action(page, 'fill', field)])
+                        if is_bounded_answer_action(page, name, args):
+                            action_refs = (args.get('refs') if name == 'click_many'
+                                           else [args.get('ref')])
+                            if name == 'pick_option':
+                                # pick_option names an option (o*); its field is
+                                # the combobox currently marked open.
+                                try:
+                                    open_ref = page.evaluate(
+                                        "() => document.querySelector('[data-applyd-combobox-open]')"
+                                        "?.getAttribute('data-applyd-ref') || ''")
+                                except Exception:  # noqa: BLE001
+                                    open_ref = ''
+                                action_refs = [open_ref] if open_ref else []
+                            if action_refs and all(ref in controller_refs for ref in action_refs):
+                                # The deterministic layer already answered this
+                                # field (e.g. the closest graduation option);
+                                # Kimi may not overwrite it, and that is not a
+                                # reason to abandon the application.
+                                result = ('skipped: this question was already answered by the '
+                                          'controller from the structured profile. The answer was '
+                                          'not changed. Do not retry it; continue with other fields.')
+                                messages.append({'role': 'tool', 'tool_call_id': tc.id, 'content': result})
+                                _emit('tool_result', turn=turn, name=name, payload={'result': result})
+                                continue
+                            if is_satisfied_answer_action(page, name, args, jev_planner.decision_attempts):
+                                result = ('skipped: these closed questions are optional or already answered '
+                                          'by the controller. Existing answers were not changed. Do not retry them.')
+                                messages.append({'role': 'tool', 'tool_call_id': tc.id, 'content': result})
+                                _emit('tool_result', turn=turn, name=name, payload={'result': result})
+                                continue
+                            if is_optional_answer_action(page, name, args):
+                                result = ('skipped: optional bounded question left unchanged. '
+                                          'Do not retry it. Continue with required fields only.')
+                                messages.append({'role': 'tool', 'tool_call_id': tc.id, 'content': result})
+                                _emit('tool_result', turn=turn, name=name, payload={'result': result})
+                                continue
+                            result = (
+                                f"error: {name} blocked; bounded application answers "
+                                "are owned by Jev and cannot be selected by Kimi"
+                            )
+                            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                            _emit("tool_result", turn=turn, name=name, payload={"result": result})
+                            final_status = "review"
+                            final_note = "review:jev_required | Kimi attempted a bounded answer"
+                            done = True
+                            break
+
+                    if (name == "submit" and not resume_uploaded
+                            and _required_resume_input_empty(page)):
+                        result = (
+                            "error: submit blocked; this form has a required resume "
+                            "upload and upload_resume has not succeeded. Upload the "
+                            "resume to its file input first."
+                        )
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                        _emit("tool_result", turn=turn, name=name, payload={"result": result})
+                        continue
+
+                    if name == "submit":
+                        _emit(
+                            "test_answer_audit" if test_mode else "answer_audit",
+                            turn=turn,
+                            name=name,
+                            payload={"answers": _test_mode_answer_audit(page)},
+                        )
+
                     result = dispatch(
                         page,
                         name,
@@ -632,6 +947,21 @@ def run_apply(
                         resume_text=resume_tex,
                         job_locations=job_locations,
                     )
+                    # Constrained-chooser calls happen inside tools/planner;
+                    # count them toward this attempt's spend and budget.
+                    from . import option_chooser
+                    actual_cost_usd += option_chooser.drain_cost()
+                    if name == "upload_resume" and result.startswith("ok:"):
+                        resume_uploaded = True
+                    if (hybrid_response is not None and result.startswith("ok:")
+                            and name in {"select_option", "click", "click_many", "pick_option",
+                                         "fill_autocomplete"}):
+                        controller_refs.update(
+                            ref for ref in (args.get("refs") if name == "click_many"
+                                            else [args.get("ref")])
+                            if isinstance(ref, str))
+                    if controller is not None:
+                        controller.observe(name, result)
                     if not result.startswith("error:") and name == "open_dropdown":
                         # The option refs must be consumed on the next model
                         # turn, after the model has actually seen them. Other
@@ -655,6 +985,15 @@ def run_apply(
                         # dispatch appends a fresh snapshot after a failed
                         # submit, which may expose conditional required fields.
                         preflight_required = True
+                    if (
+                        jev_planner is not None
+                        and result.startswith("ok:")
+                        and name not in {"navigate", "snapshot", "preflight", "open_dropdown", "report_done"}
+                    ):
+                        # Re-enter Jev after every successful mutation. It gets
+                        # first refusal on the next still-empty closed question;
+                        # Kimi is used only when no bounded decision remains.
+                        jev_pending = True
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                     _emit(
                         "tool_result",
@@ -677,7 +1016,7 @@ def run_apply(
                         )
                         if failed_action_counts[signature] >= 2:
                             final_status = "review"
-                            final_note = f"review:repeated_tool_failure | tool={name}"
+                            final_note = _repeated_failure_note(name, result)
                             done = True
                             break
                     if (
@@ -712,6 +1051,9 @@ def run_apply(
                 final_status, final_note = _max_turns_verdict(
                     submit_confirmed_turn, MAX_TURNS
                 )
+                if controller is not None and submit_confirmed_turn is not None and not controller.confirmation_observed:
+                    final_status='review'
+                    final_note='review:submission_confirmed_unobserved | do not resubmit'
     except Exception as e:
         # Transient infra (no credits, rate limit, provider outage, Bright Data
         # refusing the CDP connect) is not this job's fault — surface a distinct
@@ -742,6 +1084,32 @@ def run_apply(
         file=sys.stderr,
     )
     return _result()
+
+
+_REQUIRED_RESUME_INPUT_JS = r"""() => [...document.querySelectorAll('input[type=file]')].some(el => {
+    if (el.files && el.files.length) return false;
+    const required = el.required || el.getAttribute('aria-required') === 'true'
+        || /^\s*\*/.test(el.getAttribute('data-applyd-label') || '');
+    if (!required) return false;
+    const ids = (el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
+    const identity = [el.id, el.name, el.getAttribute('data-ui'), el.getAttribute('aria-label'),
+        el.getAttribute('data-applyd-label'),
+        ...ids.map(id => document.getElementById(id)?.innerText || '')].join(' ');
+    return /\b(resume|cv|curriculum vitae)\b/i.test(identity);
+})"""
+
+
+def _required_resume_input_empty(page: Any) -> bool:
+    """True when a required resume file input is still empty.
+
+    The runner owns resume upload, so submit must not proceed (even in test
+    mode) until upload_resume has succeeded. Inspection failure fails open so
+    this guard never blocks forms it cannot read.
+    """
+    try:
+        return page.evaluate(_REQUIRED_RESUME_INPUT_JS) is True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _accumulate_tokens(tokens: dict[str, int], usage: Any) -> None:
@@ -787,9 +1155,34 @@ def _normalize_report_status(status: str, note: str) -> str:
     return status
 
 
+def _repeated_failure_note(name: str, result: str) -> str:
+    if any(marker in result for marker in (
+        "refused false", "date selection blocked", "refused invented",
+        "refused unrecorded",
+    )):
+        return f"review:policy_guard | tool={name}"
+    if any(marker in result for marker in (
+        "no unambiguous match", "no selectable suggestion",
+        "combobox requires", "no options rendered",
+    )):
+        return f"review:agent_stall | tool={name}"
+    return f"review:repeated_tool_failure | tool={name}"
+
+
 def _terminal_tool_verdict(name: str, result: str) -> tuple[str, str] | None:
+    if "legal answer blocked:" in result:
+        return "review", "review:missing_info | legal answer country or profile fact is unresolved"
+    if result.startswith("error:") and (
+        "TargetClosedError" in result
+        or "Target page, context or browser has been closed" in result
+    ):
+        return "infra_error", "infra:browser_closed | submission unconfirmed; inspect before retry"
+    if "is not in the structured profile; send to review" in result:
+        return "review", "review:missing_info | consequential answer is not in profile"
     if name != "submit":
         return None
+    if result.startswith('error:') and 'flagged as possible spam' in result.casefold():
+        return 'review', 'gated:spam | employer rejected submission as possible spam; not confirmed; inspect before retry'
     if "captcha did not resolve within" in result:
         return "review", "gated:captcha"
     if "EMAIL VERIFICATION WALL" in result:
@@ -824,6 +1217,25 @@ def _missing_info_labels(note: str) -> list[str]:
     return labels
 
 
+def _visible_optional_gap(page: Any, label: str) -> bool:
+    """Dismiss only a unique visible, positively optional DOM field."""
+    result = page.evaluate(r"""label => {
+      const norm=s=>s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+      const wanted=norm(label);
+      if (!wanted) return false;
+      const matches=[...document.querySelectorAll('[data-applyd-ref]')].filter(e=>{
+        const r=e.getBoundingClientRect(), s=getComputedStyle(e);
+        return (r.width || r.height) && s.display!=='none' && s.visibility!=='hidden'
+          && ['INPUT','SELECT','TEXTAREA'].includes(e.tagName)
+          && [e.getAttribute('data-applyd-question')||'',e.getAttribute('data-applyd-label')||'']
+            .some(text=>norm(text)===wanted);
+      });
+      return matches.length===1 && matches[0].getAttribute('data-applyd-required')==='false'
+        && !matches[0].required && matches[0].getAttribute('aria-required')!=='true';
+    }""", label)
+    return result is True
+
+
 def _profile_already_answers(
     label: str,
     profile: dict[str, Any],
@@ -834,13 +1246,54 @@ def _profile_already_answers(
 ) -> bool:
     """Reject false model gaps only when the structured profile has the fact."""
     text = " ".join(re.sub(r"[^a-z0-9]+", " ", label.casefold()).split())
+    from .deterministic_questions import required_consent_authorized, resolve_text_question
+    # Identity/contact fields with an exact label mapping and a stored value
+    # are never "missing" (Sirion: the model listed First/Last Name and Email).
+    from .jev import FIELDS
+    bare = re.sub(r"\s+(?:required|optional)$", "", text)
+    for key, pattern in FIELDS.items():
+        value = profile.get(key)
+        if re.fullmatch(pattern, bare) and isinstance(value, str) and value.strip():
+            return True
+    if required_consent_authorized(label, profile, required=True):
+        return True
+    if ((profile.get('application_policy') or {}).get('required_narrative_invention') is True
+            and _narrative_question(label)):
+        return True
+    deterministic = resolve_text_question(label, profile, company=company,
+                                          job_locations=job_locations or (), required=True)
+    if deterministic is not None and deterministic.predicate in {
+        "prior_company", "github_url", "start_availability", "compensation",
+        "role_country_residence", "residence_region",
+        "job_search_motivation", "education_control", "work_authorized",
+        "work_requires_sponsorship", "saved_exact_answer", "skill_experience",
+        "general_software_experience", "nationality", "gpa_band", "visa_details",
+        "commute_relocation", "work_permanent_right", "restrictive_covenants",
+        "criminal_history", "essential_functions", "interview_accommodations",
+        "accuracy_attestation", "required_consent", "notice_period", "relocation_timeline",
+        "onsite_with_relocation", "work_status_category",
+    }:
+        return deterministic.value is not None
+    # Work-eligibility labels ("Eligibility to work in the United Kingdom.")
+    # are answered from the structured regional record once options render.
+    if re.search(r"\b(?:eligib\w*|authori[sz]\w*|right to work|sponsor\w*)\b", text):
+        from .deterministic_questions import _location_regions, _regions, _work_record
+        regions = _regions(label) or _location_regions(profile, job_locations or [])
+        if len(regions) == 1:
+            record = _work_record(profile, regions[0]) or {}
+            if isinstance(record.get("authorized"), bool) and isinstance(record.get("requires_sponsorship"), bool):
+                return True
+
+    if _historical_production_claim(text):
+        return isinstance(_historical_application_answer(profile, text), bool)
 
     # The resume path is runner-bound. A model-generated generic attachment
     # gap is not a missing candidate fact, especially on Greenhouse pages that
     # expose several unlabeled optional `Attach` inputs.
-    if text in {
+    if (text in {
         "resume", "resume cv", "cv", "file upload area", "file upload areas",
-    } and resume_text.strip():
+    } or re.fullmatch(r"(?:resume|resume cv|cv)(?: attach| choose file| upload)?(?: (?:attach|enter manually|dropbox|google drive))*", text)
+    ) and resume_text.strip():
         return True
 
     # These prompts are explicitly delegated composition, not missing facts.
@@ -879,10 +1332,31 @@ def _profile_already_answers(
 
     application_policy = profile.get("application_policy") or {}
     if (
-        "privacy notice" in text
+        any(phrase in text for phrase in (
+            "privacy notice", "privacy acknowledgement",
+            "privacy acknowledgment", "applicant privacy",
+        ))
         and application_policy.get("ordinary_accuracy_attestation") == "authorized"
     ):
         return True
+    generic_recruiting_consent = (
+        any(phrase in text for phrase in (
+            "recruitment marketing", "recruiting marketing", "talent network",
+            "future job opportunities", "training opportunities", "job alerts",
+        ))
+        and any(term in text for term in (
+            "communication", "contact me", "receive information", "receive updates",
+        ))
+    )
+    if generic_recruiting_consent:
+        return isinstance(
+            application_policy.get("recruiting_communications_consent"), bool
+        )
+    if (
+        any(term in text for term in ("sms", "whatsapp", "text message"))
+        and any(term in text for term in ("communication", "message", "contact"))
+    ):
+        return isinstance(application_policy.get("sms_recruiting_consent"), bool)
 
     if any(phrase in text for phrase in (
         "immediate family", "family member", "member of your family", "relative",
@@ -995,11 +1469,105 @@ def _profile_already_answers(
             )
         )
 
+    if text in {"phone", "phone number", "mobile", "mobile number"}:
+        return bool(str(profile.get("phone", "")).strip())
+
+    if text == "current location":
+        return any(
+            str(profile.get(key, "")).strip()
+            for key in ("address_city", "address_region", "address_country")
+        )
+
+    residence_boolean = (
+        any(phrase in text for phrase in (
+            "currently living", "currently reside", "currently based",
+            "do you live", "do you reside", "are you located",
+        ))
+        and any(term in text for term in (
+            " area", " city", " state", " province", " country", "office",
+            "london", "seoul", "new york", "san francisco", "canada",
+            "united states", "united kingdom",
+        ))
+    )
+    if residence_boolean and all(
+            str(profile.get(key, "")).strip()
+            for key in ("address_city", "address_region", "address_country")
+        ):
+        return True
+
+    # Boolean education-status questions are answerable from the combination
+    # of the grounded degree and graduation date. Do not confuse this with a
+    # preference question merely mentioning a degree (for example, interest
+    # in pursuing a Master's), which must remain a real profile gap.
+    education_status_question = (
+        "degree" in text
+        and any(term in text for term in (
+            "completed", "complete", "pursuing", "enrolled",
+            "graduated", "graduate", "attending",
+        ))
+        and any(term in text for term in (
+            "are you", "have you", "does this apply", "do you",
+        ))
+        and "interested" not in text
+    )
+    if education_status_question:
+        return bool(profile.get("degree") and profile.get("expected_grad_date"))
+    if text in {"degree", "degree type"}:
+        return bool(profile.get("degree"))
+    if any(phrase in text for phrase in (
+        "does your degree focus", "is your degree focused",
+        "degree concentration", "degree specialization",
+    )):
+        return isinstance(profile.get("degree_focus_areas"), list)
+
+    # A school name does not ground academic rank or subject performance.
+    # Canonical's form uses labels such as "How did you perform in
+    # mathematics at high school?"; broad matching on the word "school"
+    # previously overrode a legitimate profile gap.
+    if "high school" in text and any(term in text for term in (
+        "perform", "performance", "rank", "ranking", "score",
+    )):
+        performance = profile.get("high_school_performance")
+        return isinstance(performance, dict) and bool(performance)
+
+    # Knowing which languages a candidate speaks does not establish a CEFR
+    # level, native status, fluency, or bilingualism.  Keep proficiency forms
+    # in review unless the profile records that separate consequential fact.
+    language_proficiency_question = (
+        any(term in text for term in ("language", "english", "french", "spanish"))
+        and any(term in text for term in (
+            "proficiency", "fluency", "fluent", "conversational", "cefr",
+        ))
+    )
+    if 'native language' in text:
+        return bool(profile.get('native_language'))
+    if language_proficiency_question:
+        proficiency = profile.get("language_proficiency")
+        if not isinstance(proficiency, dict) or not proficiency:
+            return False
+        named = [
+            value for language, value in proficiency.items()
+            if str(language).casefold() in text and str(value or "").strip()
+        ]
+        return bool(named) or (
+            len(proficiency) == 1
+            and any(str(value or "").strip() for value in proficiency.values())
+        )
+
     known_fields = (
+        (("linkedin profile", "linkedin url"), "linkedin_url"),
         (("preferred first name", "preferred name", "nickname"), "first_name"),
         (("name pronunciation", "name pronounciation", "phonetic spelling"), "name_pronunciation"),
         (("education", "school", "university", "institution"), "school"),
-        (("degree",), "degree"),
+        # A structured degree answers degree-type controls, not every sentence
+        # containing the word "degree". Broad substring matching previously
+        # hid genuinely unknown preference questions such as interest in a
+        # Master's program during preflight.
+        ((
+            "which degree", "what degree", "select your degree",
+            "highest degree", "highest level of education",
+            "level of education", "type of degree",
+        ), "degree"),
         (("major", "discipline", "field of study", "degree subject"), "major"),
         (("over 18", "at least 18"), "over_18"),
         (("veteran",), "veteran_status"),
@@ -1015,9 +1583,10 @@ def _profile_already_answers(
         ((
             "start date", "available to start", "when are you available",
             "when would you be available", "availability date",
+            "when can you start a new role",
         ), "earliest_start_date"),
         (("contact your previous", "contact previous employer"), "previous_employers_may_be_contacted"),
-        (("citizenship", "citizen of"), "citizenships"),
+        (("citizenship", "citizen"), "citizenships"),
         (("language", "languages do you speak"), "spoken_languages"),
         (("how did you hear", "referral source", "source did you hear"), "referral_source"),
         (("street address", "address line 1", "mailing address"), "address_line1"),
@@ -1067,6 +1636,10 @@ def _profile_already_answers(
         (("hybrid",), "willing_to_work_hybrid"),
         (("work remote", "remote work"), "willing_to_work_remote"),
         (("travel",), "willing_to_travel"),
+        ((
+            "interested in gaining a master", "interest in gaining a master",
+            "interested in pursuing a master", "interest in pursuing a master",
+        ), "willing_to_pursue_masters_while_working"),
     )
     if any(
         any(phrase in text for phrase in phrases)

@@ -17,7 +17,7 @@ from .discovery.routing import detect_gate
 from .models import Job
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _utcnow() -> str:
@@ -255,6 +255,14 @@ class LocalStore:
 
                 CREATE INDEX IF NOT EXISTS apply_trace_attempt_idx
                     ON apply_trace_events(attempt_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS apply_resume_artifacts (
+                    attempt_id TEXT PRIMARY KEY REFERENCES apply_attempts(id),
+                    tailored_resume_id TEXT REFERENCES tailored_resumes(id),
+                    pdf_path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    captured_at TEXT NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS profile_question_gaps (
                     normalized_label TEXT PRIMARY KEY,
@@ -808,7 +816,7 @@ class LocalStore:
         with self._lock:
             rows = self._conn.execute(
                 """SELECT m.*, j.company, j.title, j.url, j.locations_json,
-                          j.posted_at, j.source
+                          j.posted_at, j.source, j.first_seen_at
                    FROM match_scores m JOIN jobs j ON j.id=m.job_id
                    LEFT JOIN job_duplicates d ON d.job_id=m.job_id
                    WHERE m.score>=? AND d.job_id IS NULL AND j.active=1
@@ -824,6 +832,7 @@ class LocalStore:
                 "url": row["url"],
                 "locations": _loads(row["locations_json"], []),
                 "posted_at": row["posted_at"],
+                "first_seen_at": row["first_seen_at"],
                 "source": row["source"],
                 "score": row["score"],
                 "band": row["band"],
@@ -833,6 +842,114 @@ class LocalStore:
             }
 
     # ---- tailoring/applications -------------------------------------
+
+    _OPTION_CHOICES_DDL = """CREATE TABLE IF NOT EXISTS option_choices (
+        question_norm TEXT NOT NULL,
+        options_hash TEXT NOT NULL,
+        choice_label TEXT NOT NULL,
+        evidence TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        model TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (question_norm, options_hash)
+    )"""
+
+    def get_option_choice(self, question_norm: str, options_hash: str) -> dict[str, Any] | None:
+        """Cached constrained-chooser answer for an identical question + option set."""
+        with self._lock:
+            self._conn.execute(self._OPTION_CHOICES_DDL)
+            row = self._conn.execute(
+                "SELECT * FROM option_choices WHERE question_norm=? AND options_hash=?",
+                (question_norm, options_hash),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def put_option_choice(self, question_norm: str, options_hash: str, *, choice_label: str,
+                          evidence: str, confidence: float, model: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(self._OPTION_CHOICES_DDL)
+            conn.execute(
+                """INSERT INTO option_choices VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(question_norm, options_hash) DO UPDATE SET
+                   choice_label=excluded.choice_label, evidence=excluded.evidence,
+                   confidence=excluded.confidence, model=excluded.model,
+                   created_at=excluded.created_at""",
+                (question_norm, options_hash, choice_label, evidence, float(confidence),
+                 model, datetime.now(timezone.utc).isoformat()),
+            )
+
+    _OUTREACH_DDL = """CREATE TABLE IF NOT EXISTS outreach (
+        job_id TEXT PRIMARY KEY,
+        company_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        contact_name TEXT, contact_title TEXT, contact_email TEXT,
+        email_status TEXT, source TEXT, provider TEXT,
+        credits_used REAL NOT NULL DEFAULT 0,
+        detail TEXT,
+        created_at TEXT NOT NULL
+    )"""
+
+    def outreach_for_company(self, company_key: str) -> dict[str, Any] | None:
+        """Latest outreach row for a company (one contact per company)."""
+        with self._lock:
+            self._conn.execute(self._OUTREACH_DDL)
+            row = self._conn.execute(
+                "SELECT * FROM outreach WHERE company_key=? ORDER BY created_at DESC LIMIT 1",
+                (company_key,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def outreach_for_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._conn.execute(self._OUTREACH_DDL)
+            row = self._conn.execute("SELECT * FROM outreach WHERE job_id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_outreach(self, job_id: str, company_key: str, status: str, **fields: Any) -> None:
+        cols = ("contact_name", "contact_title", "contact_email", "email_status", "source",
+                "provider", "credits_used", "detail")
+        values = [fields.get(c) for c in cols]
+        values[cols.index("credits_used")] = float(fields.get("credits_used") or 0)
+        with self.transaction() as conn:
+            conn.execute(self._OUTREACH_DDL)
+            conn.execute(
+                f"""INSERT INTO outreach (job_id, company_key, status, {", ".join(cols)}, created_at)
+                    VALUES (?,?,?,{",".join("?" * len(cols))},?)
+                    ON CONFLICT(job_id) DO UPDATE SET company_key=excluded.company_key,
+                    status=excluded.status, {", ".join(f"{c}=excluded.{c}" for c in cols)},
+                    created_at=excluded.created_at""",
+                (job_id, company_key, status, *values, datetime.now(timezone.utc).isoformat()),
+            )
+
+    def applied_companies(self, exclude_job_id: str | None = None) -> list[str]:
+        """Companies with a confirmed submitted application (for "applied before?")."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT j.company FROM jobs j JOIN applications a ON a.job_id=j.id
+                   WHERE a.status='applied' AND j.id != ?""",
+                (exclude_job_id or "",),
+            ).fetchall()
+        return sorted(str(row[0]) for row in rows if row[0])
+
+    def iter_prior_application_jobs(self) -> Iterator[Job]:
+        """All attempted postings, including inactive and deduplicated rows.
+
+        A newer canonical catalog row must not hide an older submission.
+        Unconfirmed attempts also remain protected from automatic retries.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT j.* FROM jobs j WHERE EXISTS (
+                       SELECT 1 FROM applications a WHERE a.job_id=j.id AND (
+                           a.status IN ('applied', 'in_progress')
+                           OR a.reason GLOB 'manual_only_ats:*'
+                           OR EXISTS (SELECT 1 FROM apply_attempts aa
+                                      WHERE aa.application_id=a.id)
+                       )
+                   ) ORDER BY j.id"""
+            ).fetchall()
+        for row in rows:
+            yield self._row_to_job(row)
 
     def save_tailored_resume(
         self,
@@ -952,7 +1069,29 @@ class LocalStore:
                    ) VALUES(?,?,?,?,?)""",
                 (attempt_id, row["id"], "in_progress", model, now),
             )
+            # Tailoring can replace out/<company-role>/resume.pdf. Bind this
+            # attempt and its upload to a private snapshot before the browser
+            # starts, so application history can retrieve the actual bytes.
+            snapshot_path = None
+            source_pdf = Path(row["pdf_path"])
+            if source_pdf.is_file():
+                archive = self.path.resolve().parent / "application-resumes"
+                archive.mkdir(parents=True, exist_ok=True, mode=0o700)
+                snapshot_path = archive / f"{attempt_id}.pdf"
+                pdf_bytes = source_pdf.read_bytes()
+                with snapshot_path.open("xb") as snapshot_file:
+                    snapshot_file.write(pdf_bytes)
+                snapshot_path.chmod(0o600)
+                conn.execute(
+                    """INSERT INTO apply_resume_artifacts(
+                           attempt_id, tailored_resume_id, pdf_path, sha256, captured_at
+                       ) VALUES(?,?,?,?,?)""",
+                    (attempt_id, row["tailored_resume_id"], str(snapshot_path),
+                     hashlib.sha256(pdf_bytes).hexdigest(), now),
+                )
         result = dict(row)
+        if snapshot_path is not None:
+            result["pdf_path"] = str(snapshot_path)
         result["edit_plan"] = _loads(result.pop("edit_plan_json", None), {})
         return result, attempt_id
 

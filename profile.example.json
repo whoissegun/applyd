@@ -16,7 +16,9 @@
   "school": "Carleton University",
   "current_company": null,
   "degree": "Bachelor of Computer Science",
+  "academic_status": {"level": "bachelors", "status": "in_progress"},
   "major": "Computer Science",
+  "degree_focus_areas": [],
   "expected_grad_date": "2027-04",
   "gpa": {
     "value": 9.6,
@@ -27,9 +29,11 @@
   "citizenships": [],
   "spoken_languages": ["English"],
   "language_proficiency": {},
+  "historical_application_answers": {},
   "over_18": true,
   "security_clearances": [],
   "years_professional_experience": 1,
+  "experience_counts_as_full_time": null,
   "work_authorization": {
     "CA": {
       "authorized": true,
@@ -52,6 +56,9 @@
     "never_employed_by_target_unless_listed_on_resume": true,
     "no_immediate_family_at_target_company": true,
     "no_immediate_family_in_government": true,
+    "no_restrictive_covenants": null,
+    "no_criminal_convictions": null,
+    "no_confidentiality_agreements": null,
     "recruitment_events": {}
   },
   "security_clearance": {
@@ -71,6 +78,7 @@
     "most_recent_citizenship_or_permanent_residency": "non-U.S. country"
   },
   "preferences": {
+    "excluded_required_education": [],
     "allowed_seniority": ["intern", "new_grad", "entry", "mid", "senior", "staff_plus", "manager"],
     "allow_internships": true,
     "excluded_role_families": [],
@@ -91,20 +99,27 @@
     "employment_types": ["internship", "placement", "new_grad", "full_time", "contract"],
     "accept_any_role_option": false,
     "willing_to_relocate": true,
+    "relocation_timeline": null,
     "willing_to_work_onsite": true,
     "willing_to_work_hybrid": true,
     "willing_to_work_remote": true,
     "willing_to_work_any_onsite_schedule": false,
+    "willing_to_pursue_masters_while_working": null,
     "willing_to_travel": true,
     "excluded_titles": [],
     "excluded_companies": [],
     "excluded_locations": []
   },
   "application_policy": {
+    "required_consents": false,
+    "graduation_date_nearest_option": false,
+    "required_narrative_invention": false,
     "optional_cover_letter": "skip",
     "required_cover_letter": "generate_from_grounded_facts_and_upload",
     "optional_free_text": "skip",
     "missing_required_factual_answer": "review",
+    "recruiting_communications_consent": null,
+    "sms_recruiting_consent": null,
     "ordinary_accuracy_attestation": "authorized",
     "unusual_legal_attestation": "review",
     "gpa_forced_conversion": "review",
@@ -123,5 +138,26 @@
     "invented_factual_events_allowed": false
   },
   "narrative_hooks": [],
-  "story_bank": []
+  "story_bank": [],
+  "outreach": {
+      "enabled": false,
+      "allow_catch_all_emails": false,
+      "subject": "i'll be brief - applied for {role}",
+      "greeting": "hey {first_name}!",
+      "intro": "i'm <Name>, a <year> cs student @ <School>.",
+      "applied": "i just applied for the {role} role. some stuff i've done:",
+      "bullets": [
+          "<Role> at <Company>",
+          "<Role> at <Company>",
+          "<a project, with one concrete result>"
+      ],
+      "closing": [
+          "i like building systems that actually ship and get used, and i think i'd be a great fit.",
+          "if you're open, would love to chat."
+      ],
+      "signoff": "best,",
+      "signature_name": "<Name>",
+      "signature_url": "<your LinkedIn URL>",
+      "fallback_company_line": "i think what you guys do at {company} is really cool."
+  }
 }

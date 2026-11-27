@@ -33,8 +33,21 @@ Evidence must be copied exactly from the title or posting. Never use an ellipsis
 or repair punctuation inside evidence. Distinguish already possessing an active
 clearance from merely being eligible to obtain one. Right to work is not the
 same as citizenship. Silence about sponsorship means not_stated. A list of
+application questions about authorization, sponsorship, citizenship, or clearance
+does not establish an employer restriction. For example, "Will you require
+sponsorship?" does not mean sponsorship is unavailable. Use not_stated unless
+the posting actually states the restriction.
+Never treat a question's mere presence as a hard requirement. A list of
 office locations alone does not prove onsite or hybrid work. For tiered roles,
-do not treat a requirement for only the highest tier as universal. Include at
+do not treat a requirement for only the highest tier as universal.
+Education must reflect the MINIMUM accepted degree or enrollment level, not
+the highest degree mentioned. Bachelor's OR master's OR PhD means bachelors_required.
+Advanced degrees that are merely preferred/desired are not required. An explicit
+equivalent-experience alternative means no mandatory advanced degree. A PhD-only
+internship or requirement to be enrolled in a master's/doctoral program is an
+advanced academic requirement even if the degree is not yet completed. Quote
+the complete requirement and alternatives; do not truncate away 'preferred' or
+'or equivalent experience'. Include at
 most 12 hard_requirements, choosing only the most consequential. Return JSON only."""
 
 
@@ -145,6 +158,18 @@ def normalize_facts(raw: dict[str, Any], *, title: str, description: str) -> dic
             warnings.append(f"{name}: unsupported conclusion {value!r}; reset to default")
             field = dict(default)
             field["evidence_grounded"] = False
+
+        # A verbatim applicant question is grounded text, but it does not prove
+        # the employer refuses sponsorship or imposes a legal prerequisite.
+        if name in {"sponsorship", "citizenship", "clearance"} and consequential and grounded:
+            evidence_text = _normalized(str(evidence or ""))
+            question_only = "?" in evidence_text and re.match(
+                r"^(?:will|would|do|does|did|are|is|have|has|can|could)\b", evidence_text,
+            )
+            if question_only:
+                warnings.append(f"{name}: applicant question does not establish an employer restriction; reset to default")
+                field = dict(default)
+                field["evidence_grounded"] = False
 
         for list_key in ("countries",):
             if list_key in field and not isinstance(field[list_key], list):

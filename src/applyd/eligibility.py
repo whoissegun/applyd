@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,13 +87,117 @@ def _work_authorization(profile: dict[str, Any], country: str) -> Any:
     return None
 
 
+def academic_policy_reasons(job: Job, facts: dict[str, Any], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    """Exclude required postgraduate education, not preferred degrees or alternatives."""
+    excluded = set((profile.get("preferences") or {}).get("excluded_required_education") or [])
+    education = facts.get("education") or {}
+    if not isinstance(education, dict):
+        return []
+    level = {"masters_required": "masters", "doctorate_required": "doctorate"}.get(education.get("value"))
+    if level not in excluded:
+        return []
+    evidence = str(education.get("evidence") or "").strip()
+    normalize = lambda value: " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+    # Do not trust a stale boolean flag alone: recheck the actual source quote.
+    source = f"{job.title}\n{job.description or ''}"
+    if not evidence or " ".join(evidence.casefold().split()) not in " ".join(source.casefold().split()):
+        return []
+    text = normalize(evidence)
+    degree_pattern = (r"\b(?:master(?: s|s)?|m s|ms(?! excel)|m sc|msc|m eng|meng|mba|m b a)\b"
+                      if level == "masters" else r"\b(?:ph ?d|doctorate|doctoral|doctor of philosophy|dphil)\b")
+    if (re.search(degree_pattern + r"(?:(?!\b(?:required|must|minimum|essential)\b).){0,60}\b(?:preferred|desired|desirable|a plus)\b", text)
+            or re.search(r"\b(?:preferred|desired|desirable)\b.{0,30}" + degree_pattern, text)):
+        return []
+    bachelor = r"\b(?:bachelor(?: s|s)?|b s|b a|bs|ba|bsc|beng|undergraduate)\b"
+    advanced = r"\b(?:master(?: s|s)?|m s|ms|m sc|msc|m eng|meng|mba|m b a|ph ?d|doctorate|doctoral|doctor of philosophy|dphil)\b"
+    if re.search(bachelor, text):
+        alternatives = (re.search(bachelor + r".{0,100}\bor\b.{0,40}" + advanced, text)
+                        or re.search(advanced + r".{0,100}\bor\b.{0,40}" + bachelor, text)
+                        or '/' in evidence)
+        if alternatives or not re.search(advanced, text) or not re.search(
+            r"\b(?:required|must|minimum|need|at least|essential|and)\b", text
+        ):
+            return []
+    if re.search(r"\bor\b.{0,30}\bequivalent\b.{0,30}\bexperience\b", text):
+        return []
+    if re.search(r"\bor\s+(?:an?\s+)?early career\s+(?:researcher|engineer)", text):
+        return []
+    # 'Preferably from a top university' qualifies the institution, not the
+    # required degree. Only neutralize preference language about the degree.
+    if re.search(r"\b(?:preferred|desirable|nice to have|bonus|a plus)\b", text) and not re.search(
+        r"\b(?:required|must|minimum|need|at least|essential)\b", text
+    ):
+        return []
+    if not re.search(degree_pattern, text):
+        return []
+    # Catch a shortened model quote such as "Master's degree" when the source
+    # immediately continues with "preferred".
+    flat_source = " ".join(source.casefold().split())
+    quote = " ".join(evidence.casefold().split())
+    end = flat_source.find(quote) + len(quote)
+    if re.match(r"\s*(?:is\s+|are\s+)?(?:strongly\s+)?(?:preferred|desirable)\b", flat_source[end:]):
+        return []
+    return [{"code": "required_education_excluded", "job_value": level,
+             "job_evidence": evidence, "user_rule": sorted(excluded),
+             "user_fact": profile.get("academic_status") or profile.get("degree")}]
+
+
+def _company_key(name: Any) -> str:
+    words = re.sub(r"[^a-z0-9]+", " ", str(name or "").casefold()).split()
+    while len(words) > 1 and words[-1] in {"inc", "llc", "ltd", "corp", "ai", "labs", "technologies"}:
+        words.pop()
+    return " ".join(words)
+
+
+def company_exclusion_match(company: str, profile: dict[str, Any], today: date | None = None) -> str | None:
+    """Return the matching rule when the user excluded this company.
+
+    Entries in employment_preferences.excluded_companies are a company name or
+    {"name": ..., "until": "YYYY-MM-DD", "reason": ...}; an expired ``until``
+    no longer excludes (e.g. a per-company application cap that resets).
+    """
+    prefs = profile.get("employment_preferences") or {}
+    rules = prefs.get("excluded_companies") if isinstance(prefs, dict) else None
+    target = _company_key(company)
+    today = today or date.today()
+    for rule in rules or []:
+        name, until = (rule.get("name"), rule.get("until")) if isinstance(rule, dict) else (rule, None)
+        if not name or _company_key(name) != target:
+            continue
+        if until:
+            try:
+                if date.fromisoformat(str(until)) < today:
+                    continue
+            except ValueError:
+                pass
+        return str(name) + (f" (until {until})" if until else "")
+    return None
+
+
+def title_exclusion_match(title: str, profile: dict[str, Any]) -> tuple[str, str] | None:
+    """Return (pattern, matched text) for the first user title exclusion hit.
+
+    Title exclusions need no extracted facts, so enrichment calls this before
+    paying for retrieval or Kimi extraction.
+    """
+    preferences = profile.get("preferences") or {}
+    for pattern in preferences.get("exclude_title_patterns") or []:
+        try:
+            matched = re.search(str(pattern), title or "", re.IGNORECASE)
+        except re.error:
+            continue
+        if matched:
+            return str(pattern), matched.group(0)
+    return None
+
+
 def evaluate_job(
     job: Job,
     facts: dict[str, Any],
     profile: dict[str, Any],
 ) -> EligibilityResult:
     preferences = profile.get("preferences") or {}
-    blockers: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = academic_policy_reasons(job, facts, profile)
     uncertainties: list[dict[str, Any]] = []
 
     role_family_fact = facts.get("role_family") or {}
@@ -143,19 +248,23 @@ def evaluate_job(
             }
         )
 
-    for pattern in preferences.get("exclude_title_patterns") or []:
-        try:
-            matched = re.search(str(pattern), job.title, re.IGNORECASE)
-        except re.error:
-            continue
-        if matched:
-            blockers.append(
-                {
-                    "code": "title_excluded",
-                    "job_evidence": matched.group(0),
-                    "user_rule": str(pattern),
-                }
-            )
+    company_rule = company_exclusion_match(job.company, profile)
+    if company_rule:
+        blockers.append({
+            "code": "company_excluded",
+            "job_evidence": job.company,
+            "user_rule": company_rule,
+        })
+
+    title_match = title_exclusion_match(job.title, profile)
+    if title_match:
+        blockers.append(
+            {
+                "code": "title_excluded",
+                "job_evidence": title_match[1],
+                "user_rule": title_match[0],
+            }
+        )
 
     seniority = _fact(facts, "seniority", "unknown")
     allowed = preferences.get("allowed_seniority")

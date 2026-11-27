@@ -15,8 +15,10 @@ from ..tailor.structured import (
     StructuredTailorClient,
     TailorPlanError,
     load_resume,
+    normalize_empty_plan_entries,
     pdf_page_count,
     render_latex,
+    trim_plan_for_layout,
 )
 
 
@@ -57,7 +59,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         description=job.description,
         job_facts=facts,
     )
-    plan = result.plan
+    plan = normalize_empty_plan_entries(resume, result.plan)
     total_cost = result.cost_usd
     output_dir = Path(args.output) / _slug(f"{job.company}-{job.title}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +80,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
                     print(f"  - {error}", file=sys.stderr)
                 return 2
             repair = client.shorten(plan, errors, resume)
-            plan = repair.plan
+            plan = normalize_empty_plan_entries(resume, repair.plan)
             total_cost += repair.cost_usd
             continue
 
@@ -95,6 +97,22 @@ def cmd_tailor(args: argparse.Namespace) -> int:
             break
         if attempt == 2:
             if pages == 2:
+                for _ in range(30):
+                    compact = trim_plan_for_layout(plan)
+                    if compact is None:
+                        break
+                    compact_latex, compact_errors = render_latex(resume, compact, args.template)
+                    if compact_errors:
+                        break
+                    plan = compact
+                    tex_path.write_text(compact_latex, encoding="utf-8")
+                    pdf_path = compile_pdf(tex_path, outdir=output_dir)
+                    pages = pdf_page_count(pdf_path)
+                    if pages == 1:
+                        break
+                if pages == 1:
+                    print("✓ fit one page using deterministic bullet selection", file=sys.stderr)
+                    break
                 print(
                     "⚠ tailored resume remains 2 pages; saving and continuing",
                     file=sys.stderr,
@@ -110,7 +128,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
             ],
             resume,
         )
-        plan = repair.plan
+        plan = normalize_empty_plan_entries(resume, repair.plan)
         total_cost += repair.cost_usd
 
     (output_dir / "edit_plan.json").write_text(

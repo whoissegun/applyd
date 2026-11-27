@@ -4,11 +4,13 @@ import argparse
 import sys
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 
 from ..config import load_env
+from ..eligibility import title_exclusion_match
 from ..enrichment import MIN_USEFUL_CHARS, fetch_text, local_browser_retriever
 from ..enrichment.extract import JobExtractor
 from ..discovery.routing import parse_ats_url
@@ -17,11 +19,18 @@ from ..local_store import get_local_store
 from ..models import Job
 
 
+RECENT_SOURCE_DAYS = 7
+
+
 def _is_credit_budget_error(exc: BaseException) -> bool:
     if getattr(exc, "status_code", None) == 402:
         return True
     text = str(exc).casefold()
     return "in_flight_budget_exhausted" in text or "requires more credits" in text
+
+
+def _is_provider_auth_error(exc: BaseException) -> bool:
+    return getattr(exc, "status_code", None) in {401, 403}
 
 
 def _retrieval_url(job: Job) -> str:
@@ -45,8 +54,26 @@ def cmd_enrich(args: argparse.Namespace) -> int:
             source=args.source,
         )
     )
-    for job in source_iter:
+    profile_record = repo.get_profile()
+    profile = profile_record[0] if profile_record else {}
+    first_seen_on = getattr(args, "first_seen_on", None)
+    title_skipped = 0
+
+    def wanted(job: Job) -> bool:
+        nonlocal title_skipped
+        if first_seen_on and job.first_seen_at.date().isoformat() != first_seen_on:
+            return False
         if args.source and job.source != args.source:
+            return False
+        # Evaluation rejects these from the title alone; do not pay to fetch
+        # or extract them. They stay pending if the user drops the pattern.
+        if title_exclusion_match(job.title, profile):
+            title_skipped += 1
+            return False
+        return True
+
+    for job in source_iter:
+        if not wanted(job):
             continue
         if not job.url and not extract_only:
             continue
@@ -58,8 +85,39 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         if args.limit and len(candidates) >= args.limit:
             break
 
+    # Discovery stores ATS descriptions directly, so those jobs never look
+    # "pending retrieval". Extract them in the same run, but only recently
+    # listed ones so a plain `enrich` never backfills a stale catalog.
+    source_described: list[Job] = []
+    if not extract_only and use_extractor:
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(days=RECENT_SOURCE_DAYS)
+        queued = {job.id for job in candidates}
+        for job in repo.iter_unclassified():
+            if args.limit and len(candidates) + len(source_described) >= args.limit:
+                break
+            if job.id in queued or not wanted(job):
+                continue
+            if not job.description or len(job.description) < MIN_USEFUL_CHARS:
+                continue
+            last_seen = job.last_seen_at
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            if not first_seen_on and last_seen < recent_cutoff:
+                continue
+            source_described.append(job)
+
     mode = "extract" if extract_only else "retrieve+extract"
     print(f"→ {len(candidates)} jobs to {mode}", file=sys.stderr)
+    if source_described:
+        print(
+            f"→ {len(source_described)} jobs with source descriptions to extract",
+            file=sys.stderr,
+        )
+    if title_skipped:
+        print(
+            f"→ {title_skipped} jobs skipped by exclude_title_patterns (no fetch, no Kimi)",
+            file=sys.stderr,
+        )
     if args.dry_run:
         by_source: dict[str, int] = {}
         for job in candidates:
@@ -186,9 +244,11 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                 repo.mark_enriched(job.id, job.description, "failed", error)
                 retrieval_stats["failed"] += 1
 
+    described.extend(source_described)
     extraction_stats = {"ok": 0, "failed": 0, "requests": 0, "fallback": 0}
     extraction_cost = 0.0
     credit_exhausted = False
+    provider_auth_failed = False
     if use_extractor and described:
         try:
             extractor = JobExtractor()
@@ -245,7 +305,15 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                                 work.appendleft([jobs_by_id[job_id]])
                                 extraction_stats["fallback"] += 1
                         except Exception as exc:  # noqa: BLE001
-                            if _is_credit_budget_error(exc):
+                            if _is_provider_auth_error(exc):
+                                provider_auth_failed = True
+                                extraction_stats["failed"] += len(batch)
+                                print(
+                                    "  ⚠ OpenRouter authentication rejected; "
+                                    "stopping new extraction requests; update OPENROUTER_API_KEY",
+                                    file=sys.stderr,
+                                )
+                            elif _is_credit_budget_error(exc):
                                 credit_exhausted = True
                                 extraction_stats["failed"] += len(batch)
                                 print(
@@ -266,7 +334,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
                                     f"{type(exc).__name__}: {str(exc)[:240]}",
                                     file=sys.stderr,
                                 )
-                    while work and len(pending) < workers and not credit_exhausted:
+                    while work and len(pending) < workers and not (credit_exhausted or provider_auth_failed):
                         batch = work.popleft()
                         pending[pool.submit(extract_batch, batch)] = batch
 
@@ -280,4 +348,4 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         f"Kimi=${extraction_cost:.4f}",
         file=sys.stderr,
     )
-    return 3 if credit_exhausted else 0
+    return 3 if credit_exhausted or provider_auth_failed else 0

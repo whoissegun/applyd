@@ -57,9 +57,16 @@ secrets in the file and do not run a real application.
 ### 3. Education
 
 8. What school do you attend or most recently attended?
-9. What is the exact degree and major/discipline/field of study?
+9. What is the exact degree and major/discipline/field of study? List any
+   explicit degree focus areas or concentrations that may be claimed, such as
+   machine-learning systems; do not infer them from a broad major.
 10. What is the start date and actual or expected graduation date? Use `YYYY-MM`
-    where possible.
+    where possible. While the graduation date is in the future, every job
+    start-date answer anchors on it (the closest offered option). If a
+    graduation dropdown offers no option covering your month, should applyd
+    pick the closest offered date (`application_policy.graduation_date_nearest_option:
+    true`) or send the application to review (`false`, the default)? Picking a
+    date other than your real one can conflict with your transcript.
 11. What is your GPA and its original scale? May it be disclosed? If a form
     requires another scale, may applyd convert it arithmetically, or should the
     application enter review?
@@ -120,6 +127,14 @@ These are consequential legal facts. Unknown answers must go to review.
     non-competes, conflicts, regulated-industry relationships, or government
     employment facts that require a saved truthful answer?
 
+If an application asks a specific Yes/No question about production deployments,
+advertising or ranking systems, feedback optimization, real user traffic, or
+revenue/conversion impact, record your explicitly verified answer in
+`historical_application_answers` using the exact question text as the key and
+a JSON boolean as the value. Leave it out for review if the compound claim is
+not fully supported; a related technology or metric on your resume does not
+answer every part of the question.
+
 ### 8. Relationships and background defaults
 
 29. May applyd assume no immediate family member works for the target company
@@ -150,7 +165,8 @@ These are consequential legal facts. Unknown answers must go to review.
 37. Which titles, companies, industries, locations, schedules, or job features
     should always be excluded?
 38. Are unpaid programs acceptable? Are there minimum hours, duration, or
-    compensation constraints?
+    compensation constraints? Would you be willing to pursue a Master's degree
+    while working full-time when a role includes that arrangement?
 
 ### 10. Compensation and referral defaults
 
@@ -160,7 +176,8 @@ These are consequential legal facts. Unknown answers must go to review.
     acceptable? Common choices are company careers page, LinkedIn, Indeed, and
     Other.
 41. Should optional referral-source, salary, and free-text questions be skipped?
-42. Should SMS recruiting or marketing consent default to No?
+42. Should optional recruiting/marketing communications (including talent
+    networks, future-job alerts, email, SMS, and WhatsApp) default to No?
 
 ### 11. Demographics
 
@@ -215,8 +232,8 @@ Before running `applyd init`, confirm:
   source resume;
 - language proficiency is not inferred;
 - demographics reflect your choice;
-- role-option, relocation, onsite-frequency, travel, compensation, and
-  exclusion policies are yours;
+- role-option, relocation, onsite-frequency, Master's-study, travel,
+  compensation, and exclusion policies are yours;
 - creative writing is allowed only for opinions and motivation, never factual
   history;
 - unknown consequential facts route to review;

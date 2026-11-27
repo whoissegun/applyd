@@ -3,12 +3,12 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from applyd.eligibility import evaluate_job
 from applyd.enrichment.extract import JobExtractor, normalize_facts
 from applyd.models import Job
-from applyd.commands.enrich import _is_credit_budget_error
+from applyd.commands.enrich import _is_credit_budget_error, cmd_enrich
 
 
 def job(title: str = "Software Engineer", locations: list[str] | None = None) -> Job:
@@ -21,6 +21,84 @@ def job(title: str = "Software Engineer", locations: list[str] | None = None) ->
 
 
 class ExtractionEligibilityTests(unittest.TestCase):
+    def test_applicant_sponsorship_question_is_not_employer_refusal(self) -> None:
+        question = 'Will you now, or in the future, require sponsorship to legally work in the U.S.?'
+        facts = normalize_facts(
+            {"sponsorship": {"value": "unavailable", "countries": ["US"], "evidence": question}},
+            title="Associate Software Developer", description=question,
+        )
+        self.assertEqual("not_stated", facts["sponsorship"]["value"])
+        result = evaluate_job(job(locations=["United States"]), facts, {
+            "work_authorization": {"US": {"authorized": False, "requires_sponsorship": True}}
+        })
+        self.assertEqual("eligible", result.decision)
+
+    def test_auth_rejection_stops_queue_without_individual_retries(self) -> None:
+        class AuthError(Exception):
+            status_code = 401
+
+        jobs = [job() for _ in range(20)]
+        for index, item in enumerate(jobs):
+            item.id = str(index)
+            item.description = "Grounded source job description. " * 30
+        repo = Mock()
+        repo.get_profile.return_value = None
+        repo.iter_unclassified.return_value = iter(jobs)
+        extractor = Mock()
+        extractor.extract_many.side_effect = AuthError("User not found")
+        args = SimpleNamespace(classify_backfill=True, source=None, limit=0,
+                               dry_run=False, workers=1, batch_size=5)
+        with patch("applyd.commands.enrich.load_env"), \
+             patch("applyd.commands.enrich.get_local_store", return_value=repo), \
+             patch("applyd.commands.enrich.JobExtractor", return_value=extractor):
+            self.assertEqual(3, cmd_enrich(args))
+        self.assertEqual(1, extractor.extract_many.call_count)
+        extractor.extract.assert_not_called()
+        repo.set_classification.assert_not_called()
+
+    def _extract_run(self, pending, unclassified, profile=None, **overrides):
+        repo = Mock()
+        repo.get_profile.return_value = (profile, "hash") if profile else None
+        repo.iter_pending_enrichment.return_value = iter(pending)
+        repo.iter_unclassified.return_value = iter(unclassified)
+        extractor = Mock()
+        extractor.extract.return_value = SimpleNamespace(
+            facts={}, model="m", cost_usd=0.0)
+        args = SimpleNamespace(classify_backfill=False, source=None, limit=0,
+                               dry_run=False, workers=1, batch_size=1,
+                               retry_failed=False, first_seen_on=None,
+                               no_browser=True, no_extract=False)
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        with patch("applyd.commands.enrich.load_env"), \
+             patch("applyd.commands.enrich.get_local_store", return_value=repo), \
+             patch("applyd.commands.enrich.JobExtractor", return_value=extractor):
+            cmd_enrich(args)
+        return repo, extractor
+
+    def test_enrich_extracts_recent_source_descriptions_but_not_stale(self) -> None:
+        recent = job("Backend Engineer")
+        recent.id = "recent"
+        recent.description = "Source-provided ATS description. " * 30
+        stale = job("Platform Engineer")
+        stale.id = "stale"
+        stale.description = recent.description
+        stale.last_seen_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        repo, extractor = self._extract_run([], [recent, stale])
+        titles = [call.args[0] for call in extractor.extract.call_args_list]
+        self.assertEqual(["Backend Engineer"], titles)
+        repo.set_classification.assert_called_once()
+
+    def test_title_excluded_jobs_skip_fetch_and_extraction(self) -> None:
+        excluded = job("Data Engineer")
+        excluded.id = "data"
+        excluded.description = "Source-provided ATS description. " * 30
+        profile = {"preferences": {"exclude_title_patterns": [r"\bdata\b"]}}
+        repo, extractor = self._extract_run([excluded], [excluded], profile)
+        extractor.extract.assert_not_called()
+        extractor.extract_many.assert_not_called()
+        repo.mark_enriched.assert_not_called()
+
     def test_grounded_excluded_role_family_is_ineligible(self) -> None:
         result = evaluate_job(
             job(title="Business Data Analyst"),
@@ -194,3 +272,22 @@ class ExtractionEligibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompanyExclusionTests(unittest.TestCase):
+    def test_excluded_company_with_expiry(self) -> None:
+        from datetime import date
+        from applyd.eligibility import company_exclusion_match
+        profile = {"employment_preferences": {"excluded_companies": [
+            {"name": "OpenAI", "until": "2027-05-20"}, "Example Corp"]}}
+        self.assertIsNotNone(company_exclusion_match("openai", profile, today=date(2026, 11, 21)))
+        self.assertIsNone(company_exclusion_match("OpenAI", profile, today=date(2027, 6, 1)))
+        self.assertIsNotNone(company_exclusion_match("Example Corp Inc", profile))
+        self.assertIsNone(company_exclusion_match("Anthropic", profile))
+
+    def test_evaluate_blocks_excluded_company(self) -> None:
+        j = job("Software Engineer")
+        j.company = "openai"
+        profile = {"employment_preferences": {"excluded_companies": [{"name": "OpenAI", "until": "2999-01-01"}]}}
+        result = evaluate_job(j, {}, profile)
+        self.assertEqual("ineligible", result.decision)

@@ -13,7 +13,12 @@ from ..config import load_env
 from ..local_store import get_local_store
 from ..discovery import ATS_MODULES, ResolverCache, aggregators, resolve
 from ..discovery.cache import BroadSearchCache
-from ..discovery.routing import detect_ats, extract_company_slug, parse_ats_url
+from ..discovery.routing import (
+    DEFAULT_EXCLUDED_ATS,
+    detect_ats,
+    extract_company_slug,
+    parse_ats_url,
+)
 from ..discovery.search import SearchProvider, make_provider
 from ..models import Job
 
@@ -44,10 +49,11 @@ def _seed_cache_from_jobs(cache: ResolverCache, jobs: Iterable[Job]) -> int:
 
 
 def _freshest_within_limit(
-    jobs: Iterable[Job], *, written: int, limit: int
+    jobs: Iterable[Job], *, written: int, limit: int,
+    existing_ids: set[str] | None = None,
 ) -> list[Job]:
     """Return the freshest remaining slice under a run-wide hard cap."""
-    values = list(jobs)
+    values = [job for job in jobs if existing_ids is None or job.id not in existing_ids]
     values.sort(
         key=lambda job: job.posted_at.timestamp() if job.posted_at else 0,
         reverse=True,
@@ -58,13 +64,19 @@ def _freshest_within_limit(
     return values[:remaining]
 
 
-def _supported_jobs(jobs: Iterable[Job]) -> tuple[list[Job], int]:
-    """Keep jobs on ATS platforms supported by both retrieval and apply."""
+def _supported_jobs(
+    jobs: Iterable[Job], *, include_default_excluded: bool = False
+) -> tuple[list[Job], int]:
+    """Keep jobs on ATS platforms in the default automated path."""
     supported: list[Job] = []
     skipped = 0
     for job in jobs:
         parsed = parse_ats_url(job.url)
-        if parsed and parsed[0] in ATS_MODULES:
+        if (
+            parsed
+            and parsed[0] in ATS_MODULES
+            and (include_default_excluded or parsed[0] not in DEFAULT_EXCLUDED_ATS)
+        ):
             supported.append(job)
         else:
             skipped += 1
@@ -84,6 +96,8 @@ def _attach_retrieval_route(job: Job, ats: str, slug: str) -> None:
 def cmd_discover(args: argparse.Namespace) -> int:
     load_env()
     repo = get_local_store()
+    existing_ids = {job.id for job in repo.iter_all(active_only=False)} \
+        if getattr(args, "new_only", False) else None
 
     cache = ResolverCache(Path(args.cache))
     cache.load()
@@ -132,9 +146,12 @@ def cmd_discover(args: argparse.Namespace) -> int:
             if not args.include_unsupported_ats:
                 candidate_jobs, unsupported = _supported_jobs(fetched_jobs)
             jobs = _freshest_within_limit(
-                candidate_jobs, written=total_new + total_updated, limit=args.limit
+                candidate_jobs, written=total_new + total_updated, limit=args.limit,
+                existing_ids=existing_ids,
             )
             new, updated = repo.upsert(jobs)
+            if existing_ids is not None:
+                existing_ids.update(job.id for job in jobs)
             total_new += new
             total_updated += updated
             seeded = _seed_cache_from_jobs(cache, jobs)
@@ -162,13 +179,17 @@ def cmd_discover(args: argparse.Namespace) -> int:
                     keyword_queries=broad_dorks,
                     client=client,
                     cache=broad_cache,
+                    include_default_excluded=args.include_unsupported_ats,
                 )
                 jobs = _freshest_within_limit(
                     fetched_jobs,
                     written=total_new + total_updated,
                     limit=args.limit,
+                    existing_ids=existing_ids,
                 )
                 new, updated = repo.upsert(jobs)
+                if existing_ids is not None:
+                    existing_ids.update(job.id for job in jobs)
                 total_new += new
                 total_updated += updated
                 per_ats = ", ".join(
@@ -232,6 +253,13 @@ def cmd_discover(args: argparse.Namespace) -> int:
                         continue
 
                 ats, slug = resolved
+                if ats in DEFAULT_EXCLUDED_ATS and not args.include_unsupported_ats:
+                    print(
+                        f"  ? {ats}:{slug} is excluded from the default automated "
+                        "path; use --include-unsupported-ats for manual research",
+                        file=sys.stderr,
+                    )
+                    continue
                 module = ATS_MODULES.get(ats)
                 if module is None:
                     print(f"  ? unknown ATS '{ats}' for '{company}'", file=sys.stderr)
@@ -245,8 +273,11 @@ def cmd_discover(args: argparse.Namespace) -> int:
                         fetched_jobs,
                         written=total_new + total_updated,
                         limit=args.limit,
+                        existing_ids=existing_ids,
                     )
                     new, updated = repo.upsert(jobs)
+                    if existing_ids is not None:
+                        existing_ids.update(job.id for job in jobs)
                     total_new += new
                     total_updated += updated
                     print(

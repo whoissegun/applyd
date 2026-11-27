@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import load_env
+from ..discovery.routing import DEFAULT_EXCLUDED_ATS, detect_ats
 from ..local_store import get_local_store
 from ..matching import (
     DEFAULT_EMBED_MODEL,
@@ -40,6 +41,11 @@ def _normalize(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
+def _default_rankable_job(job) -> bool:
+    """Exclude ATSes that are retained only for explicit manual research."""
+    return detect_ats(job.url) not in DEFAULT_EXCLUDED_ATS
+
+
 def cmd_match(args: argparse.Namespace) -> int:
     """Rank currently eligible jobs with local KNN and deterministic features."""
     load_env()
@@ -63,14 +69,17 @@ def cmd_match(args: argparse.Namespace) -> int:
         )
         return 2
 
-    eligible = list(store.iter_eligible_for_matching())
+    all_eligible = list(store.iter_eligible_for_matching())
+    eligible = [row for row in all_eligible if _default_rankable_job(row[0])]
+    excluded = len(all_eligible) - len(eligible)
     if not eligible:
         print("✗ no current eligible jobs; run `applyd evaluate` first", file=sys.stderr)
         return 2
 
     started = time.monotonic()
     print(
-        f"→ matching {len(eligible)} eligible jobs locally with {args.model}",
+        f"→ matching {len(eligible)} eligible jobs locally with {args.model}"
+        + (f" ({excluded} default-excluded ATS jobs skipped)" if excluded else ""),
         file=sys.stderr,
     )
     embedder = LocalEmbedder(model=args.model)

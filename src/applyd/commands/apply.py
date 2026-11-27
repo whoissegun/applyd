@@ -9,6 +9,7 @@ from typing import Any
 
 from ..apply.runner import DEFAULT_MODEL, run_apply
 from ..config import load_env
+from ..eligibility import academic_policy_reasons
 from ..discovery.routing import detect_ats, preferred_apply_url
 from ..liveness import check_jobs_liveness
 from ..local_store import get_local_store
@@ -25,6 +26,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if profile_record is None:
         print("✗ no profile in SQLite; run `applyd evaluate --profile profile.json`", file=sys.stderr)
         return 3
+
+    academic_blockers = academic_policy_reasons(job, store.get_facts(job.id) or {}, profile_record[0])
+    if academic_blockers:
+        store.set_evaluation(job.id, "ineligible", academic_blockers, profile_record[1])
+        print(f"✗ academic profile filter: {academic_blockers[0]['job_value']} required; application not started", file=sys.stderr)
+        return 1
 
     liveness = store.get_liveness(job.id)
     fresh_after = datetime.now(timezone.utc) - timedelta(
@@ -69,6 +76,18 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 3
 
     profile, _ = profile_record
+    source_resume_path = Path("resume.json")
+    if source_resume_path.exists():
+        source_resume = json.loads(source_resume_path.read_text(encoding="utf-8"))
+        profile = dict(profile, resume_employers=[
+            str(entry["company"]) for entry in source_resume.get("experience", [])
+            if isinstance(entry, dict) and entry.get("company")
+        ], resume_facts={key: source_resume[key]
+                         for key in ('education', 'experience', 'projects', 'skills')
+                         if key in source_resume})
+    # Confirmed applyd submissions answer "Have you applied before?" only when
+    # the user attests applyd's history is complete (no manual applications).
+    profile = dict(profile, previously_applied_companies=store.applied_companies(job.id))
     persisted = False
 
     def persist_event(event: dict[str, Any]) -> None:
@@ -141,6 +160,20 @@ def cmd_apply(args: argparse.Namespace) -> int:
         raise
 
     stored_status = "tested" if args.test_mode and result["status"] == "applied" else result["status"]
+    if stored_status == "applied" and not args.test_mode:
+        # Confirmed real submission: find the hiring contact and save a Gmail
+        # draft (never sent). Outreach must never affect the application.
+        try:
+            from ..outreach import draft_outreach_for_job
+            from ..outreach.pipeline import report
+            try:
+                from ..discovery.search.brave import BraveSearch
+                search = BraveSearch()
+            except Exception:  # noqa: BLE001
+                search = None
+            report(draft_outreach_for_job(store, job, profile, search=search))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ✉ outreach skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
     print(
         f"✓ apply finished: status={stored_status} cost=${result['actual_cost_usd']:.4f} "
         f"turns={result['turn_count']} note={result['note']}",
