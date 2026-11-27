@@ -468,3 +468,38 @@ class EthnicityGroupTests(unittest.TestCase):
         options = {"0": "Hispanic or Latino", "1": "Not Hispanic or Latino", "2": "I do not wish to disclose"}
         self.assertEqual("1", resolve_question("Indicate Ethnicity group", {"hispanic_latino": False},
                                                options, required=True).choice)
+
+
+class FreshBatch27Tests(unittest.TestCase):
+    PROFILE = {
+        "work_authorization": {"US": {"authorized": False, "requires_sponsorship": True},
+                               "UK": {"authorized": False, "requires_sponsorship": True}},
+        "background_defaults": {"never_employed_by_target_unless_listed_on_resume": True,
+                                "no_immediate_family_at_target_company": True,
+                                "no_immediate_family_in_government": True,
+                                "no_criminal_convictions": True, "no_restrictive_covenants": True},
+        "resume_employers": ["Lyft", "Shopify"],
+    }
+    YN = {"0": "Yes", "1": "No"}
+
+    def test_one_word_legal_labels_use_role_country(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        self.assertEqual("1", resolve_question("Authorization", self.PROFILE, self.YN, job_locations=["Austin, TX"]).choice)
+        self.assertEqual("0", resolve_question("Sponsorship", self.PROFILE, self.YN, job_locations=["Austin, TX"]).choice)
+
+    def test_permit_details_text(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        v = resolve_text_question("Do you have a work permit or eligibility to work in the UK? If so, please "
+                                  "specify your work permit or visa type.", self.PROFILE).value
+        self.assertTrue(v.startswith("No,") and "sponsorship" in v)
+
+    def test_conditional_explanation_na(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_text_question
+        q = "If you answered “Yes” to either of the questions above, please explain.*"
+        self.assertEqual("N/A", resolve_text_question(q, self.PROFILE, company="XPENG Motors").value)
+        self.assertIsNone(resolve_text_question(q, self.PROFILE, company="Shopify"))
+
+    def test_salary_awareness(self) -> None:
+        from applyd.apply.deterministic_questions import resolve_question
+        self.assertEqual("0", resolve_question("The salary for this position is $50k - $60k. Are you aware of this?",
+                                               {}, self.YN).choice)

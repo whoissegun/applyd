@@ -442,6 +442,21 @@ def _legal(question: str, profile: Mapping[str, Any], options: Any,
         status = (record or {}).get("status") or (record or {}).get("visa_status")
         return _result(options, status, "immigration_status", "structured Canadian status") \
             if status else _review(options, "immigration_status", "status missing")
+    # One-word labels on yes/no buttons ("Authorization" / "Sponsorship"):
+    # read as "authorized to work in the role's country?" / "require
+    # sponsorship there?", using the job location.
+    if text in {"authorization", "authorisation", "work authorization", "work authorisation",
+                "work eligibility", "sponsorship", "visa sponsorship", "sponsorship required",
+                "requires sponsorship", "visa"} and set(_options(options)) - {"review"}:
+        if all(_boolean_label(l) is not None for k, l in _options(options).items() if k != "review"):
+            regions = _location_regions(profile, job_locations)
+            if len(regions) == 1:
+                record = _work_record(profile, regions[0]) or {}
+                field = "requires_sponsorship" if re.search(r"sponsor|visa", text) else "authorized"
+                if isinstance(record.get(field), bool):
+                    return _result(options, record[field], f"work_{field}",
+                                   "one-word legal label answered for the role's country")
+            return _review(options, "legal_jurisdiction", "one-word legal label without a single role country")
     status_question = any(term in text for term in (
         "authorized to work", "authorised to work", "eligible to work", "legal right to work",
         "right to work", "right to live and work", "authorized in", "work lawfully",
@@ -1340,6 +1355,10 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             if choice is not None:
                 return DeterministicAnswer(choice, "education_control", rendered[choice],
                                            "structured school (or the catalog's explicit Other)")
+    # "The salary for this position is $50k - $60k. Are you aware of this?"
+    # Awareness is an acknowledgement of the posted range, not an acceptance.
+    if re.search(r"\bare you aware\b", text) and re.search(r"\b(?:salary|pay|compensation|range|rate)\b", text):
+        return _result(options, True, "salary_awareness", "acknowledges the posted range")
     if "current age" in text:
         rendered = _options(options)
         decline = next((key for key, label in rendered.items()
@@ -1487,6 +1506,37 @@ def resolve_text_question(question: str, profile: Mapping[str, Any], *,
             if _norm(saved_question) == text and isinstance(saved_value, str) and saved_value.strip():
                 return DeterministicAnswer('text', 'saved_exact_answer', saved_value,
                                            'exact saved answer from the profile')
+    # "Do you have a work permit or eligibility to work in the UK? If so,
+    # please specify your permit or visa type." (free text)
+    if (re.search(r"\b(?:work permit|eligib\w*|right to work|authori[sz]\w*)\b", text)
+            and re.search(r"\bif (?:so|yes)\b|\bplease specify\b|\bwhat type\b|\bwhich (?:visa|permit)\b", text)
+            and not re.search(r"\b(?:ever|previously|denied)\b", text)):
+        regions = _regions(question) or _location_regions(profile, job_locations)
+        if len(regions) == 1:
+            record = _work_record(profile, regions[0]) or {}
+            names = {"UK": "the UK", "US": "the U.S.", "CA": "Canada", "EU": "the EU"}
+            where = names.get(regions[0], regions[0])
+            if record.get("authorized") is False and record.get("requires_sponsorship") is True:
+                return DeterministicAnswer("text", "work_authorized",
+                                           f"No, I don't currently have a work permit for {where}, so I would need visa sponsorship.",
+                                           "structured record: not authorized; requires sponsorship")
+            status = record.get("visa_status") or record.get("status")
+            if record.get("authorized") is True and status:
+                return DeterministicAnswer("text", "work_authorized", f"Yes, {status}.",
+                                           "structured record: authorized with stated status")
+        return DeterministicAnswer("review", "legal_jurisdiction", None, "work-permit details need one known country")
+    # "If you answered Yes to either of the questions above, please explain."
+    # Those preceding questions (prior employment, relatives, history) are
+    # answered No from the profile, so there is nothing to explain.
+    if re.search(r"\bif (?:you )?answered (?:\W*)?yes\W* to (?:either|any|one|both|the)\b.*\b(?:above|previous)\b", text):
+        bg = {**(profile.get("background") or {}), **(profile.get("background_defaults") or {})}
+        employers = {_employer_name(e) for e in (profile.get("resume_employers") or [])}
+        clean = all(bg.get(k) is True for k in (
+            "never_employed_by_target_unless_listed_on_resume", "no_immediate_family_at_target_company",
+            "no_immediate_family_in_government", "no_criminal_convictions", "no_restrictive_covenants"))
+        if clean and company and _employer_name(company) not in employers and _employer_short_name(company) not in employers:
+            return DeterministicAnswer("text", "conditional_explanation", "N/A",
+                                       "preceding yes/no questions are No per the profile")
     if text == 'reason for leaving or job search' and required:
         return DeterministicAnswer('text', 'job_search_motivation',
             'I am seeking a role where I can contribute, keep developing my skills, and take on meaningful technical work.',
