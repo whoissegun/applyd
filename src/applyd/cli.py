@@ -16,6 +16,7 @@ from .commands import (
     cmd_import_resume,
     cmd_jobs,
     cmd_match,
+    cmd_outreach,
     cmd_profile_gaps,
     cmd_resolve,
     cmd_tailor,
@@ -280,6 +281,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_gaps.add_argument("--all", action="store_true")
     p_gaps.add_argument("--format", choices=["table", "json"], default="table")
     p_gaps.set_defaults(func=cmd_profile_gaps)
+
+    p_out = sub.add_parser(
+        "outreach", help="find hiring contacts for past applications and save Gmail drafts (never sends)"
+    )
+    p_out.add_argument("--limit", type=int, default=10, help="max companies to process")
+    p_out.add_argument("--dry-run", action="store_true", help="resolve domains only; no lookups or drafts")
+    p_out.set_defaults(func=cmd_outreach)
 
     p_res = sub.add_parser("resolve", help="debug: resolve a company name to (ATS, slug)")
     p_res.add_argument("company", help="company name to resolve, e.g. 'Stripe'")

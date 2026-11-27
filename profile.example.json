@@ -138,5 +138,26 @@
     "invented_factual_events_allowed": false
   },
   "narrative_hooks": [],
-  "story_bank": []
+  "story_bank": [],
+  "outreach": {
+      "enabled": false,
+      "allow_catch_all_emails": false,
+      "subject": "i'll be brief - applied for {role}",
+      "greeting": "hey {first_name}!",
+      "intro": "i'm <Name>, a <year> cs student @ <School>.",
+      "applied": "i just applied for the {role} role. some stuff i've done:",
+      "bullets": [
+          "<Role> at <Company>",
+          "<Role> at <Company>",
+          "<a project, with one concrete result>"
+      ],
+      "closing": [
+          "i like building systems that actually ship and get used, and i think i'd be a great fit.",
+          "if you're open, would love to chat."
+      ],
+      "signoff": "best,",
+      "signature_name": "<Name>",
+      "signature_url": "<your LinkedIn URL>",
+      "fallback_company_line": "i think what you guys do at {company} is really cool."
+  }
 }

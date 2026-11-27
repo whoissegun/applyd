@@ -7,6 +7,7 @@ from .enrich import cmd_enrich
 from .evaluate import cmd_evaluate
 from .jobs import cmd_jobs
 from .match import cmd_match
+from .outreach import cmd_outreach
 from .profile_gaps import cmd_profile_gaps
 from .init import cmd_init
 from .import_resume import cmd_import_resume
@@ -25,6 +26,7 @@ __all__ = [
     "cmd_evaluate",
     "cmd_jobs",
     "cmd_match",
+    "cmd_outreach",
     "cmd_profile_gaps",
     "cmd_init",
     "cmd_import_resume",

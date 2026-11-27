@@ -878,6 +878,49 @@ class LocalStore:
                  model, datetime.now(timezone.utc).isoformat()),
             )
 
+    _OUTREACH_DDL = """CREATE TABLE IF NOT EXISTS outreach (
+        job_id TEXT PRIMARY KEY,
+        company_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        contact_name TEXT, contact_title TEXT, contact_email TEXT,
+        email_status TEXT, source TEXT, provider TEXT,
+        credits_used REAL NOT NULL DEFAULT 0,
+        detail TEXT,
+        created_at TEXT NOT NULL
+    )"""
+
+    def outreach_for_company(self, company_key: str) -> dict[str, Any] | None:
+        """Latest outreach row for a company (one contact per company)."""
+        with self._lock:
+            self._conn.execute(self._OUTREACH_DDL)
+            row = self._conn.execute(
+                "SELECT * FROM outreach WHERE company_key=? ORDER BY created_at DESC LIMIT 1",
+                (company_key,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def outreach_for_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._conn.execute(self._OUTREACH_DDL)
+            row = self._conn.execute("SELECT * FROM outreach WHERE job_id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+    def record_outreach(self, job_id: str, company_key: str, status: str, **fields: Any) -> None:
+        cols = ("contact_name", "contact_title", "contact_email", "email_status", "source",
+                "provider", "credits_used", "detail")
+        values = [fields.get(c) for c in cols]
+        values[cols.index("credits_used")] = float(fields.get("credits_used") or 0)
+        with self.transaction() as conn:
+            conn.execute(self._OUTREACH_DDL)
+            conn.execute(
+                f"""INSERT INTO outreach (job_id, company_key, status, {", ".join(cols)}, created_at)
+                    VALUES (?,?,?,{",".join("?" * len(cols))},?)
+                    ON CONFLICT(job_id) DO UPDATE SET company_key=excluded.company_key,
+                    status=excluded.status, {", ".join(f"{c}=excluded.{c}" for c in cols)},
+                    created_at=excluded.created_at""",
+                (job_id, company_key, status, *values, datetime.now(timezone.utc).isoformat()),
+            )
+
     def applied_companies(self, exclude_job_id: str | None = None) -> list[str]:
         """Companies with a confirmed submitted application (for "applied before?")."""
         with self._lock:

@@ -160,6 +160,20 @@ def cmd_apply(args: argparse.Namespace) -> int:
         raise
 
     stored_status = "tested" if args.test_mode and result["status"] == "applied" else result["status"]
+    if stored_status == "applied" and not args.test_mode:
+        # Confirmed real submission: find the hiring contact and save a Gmail
+        # draft (never sent). Outreach must never affect the application.
+        try:
+            from ..outreach import draft_outreach_for_job
+            from ..outreach.pipeline import report
+            try:
+                from ..discovery.search.brave import BraveSearch
+                search = BraveSearch()
+            except Exception:  # noqa: BLE001
+                search = None
+            report(draft_outreach_for_job(store, job, profile, search=search))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ✉ outreach skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
     print(
         f"✓ apply finished: status={stored_status} cost=${result['actual_cost_usd']:.4f} "
         f"turns={result['turn_count']} note={result['note']}",
