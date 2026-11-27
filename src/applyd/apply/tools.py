@@ -204,6 +204,29 @@ def _ref_locator(page: Page, ref: str):
 
 # ── navigate ───────────────────────────────────────────────────────────────
 
+def _clear_saved_form_state(page: Page, url: str) -> None:
+    """Drop the application site's saved form drafts before loading it.
+
+    The persistent Chrome profile keeps localStorage/IndexedDB between runs,
+    and some ATS forms restore a previous (possibly wrong, test-mode) answer
+    on load. Cookies are left alone so sign-ins survive.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return
+        origin = f"{parsed.scheme}://{parsed.hostname}" + (f":{parsed.port}" if parsed.port else "")
+        session = page.context.new_cdp_session(page)
+        session.send("Storage.clearDataForOrigin", {
+            "origin": origin,
+            "storageTypes": "local_storage,session_storage,indexeddb,cache_storage,service_workers",
+        })
+        session.detach()
+    except Exception:  # noqa: BLE001
+        pass  # non-Chromium or remote browsers: best effort only
+
+
 def navigate(page: Page, url: str, wait_ms: int = 30000) -> str:
     current = page.url or ""
     if current.rstrip("/") == url.rstrip("/"):
@@ -211,6 +234,7 @@ def navigate(page: Page, url: str, wait_ms: int = 30000) -> str:
             f"navigate refused: already on {current}. Re-navigating would "
             f"clear the form. Use snapshot to re-inspect current state instead."
         )
+    _clear_saved_form_state(page, url)
     try:
         page.goto(url, timeout=wait_ms, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=10000)
@@ -645,6 +669,16 @@ def _profile_click_guard(
         "in office", "in-office", "relocate",
     ))
     negative_option = option in {"no", "nope", "not willing", "unable"} or option.startswith("no ")
+    # "Are you currently located within commuting distance ... ?" asks a
+    # fact; No is the truthful answer for a non-local candidate even though
+    # they are willing to relocate (the question offers no relocation path).
+    asks_current_location = bool(re.search(
+        r"\bcurrently (?:located|live|living|based|reside|residing)\b|\b(?:located|live|living|reside|based) "
+        r"within\b|\bcommuting distance\b|\bcommutable\b|\bare you local\b", question))
+    if asks_current_location and not re.search(r"\b(?:willing|open) to relocat|\bif not\b", question):
+        city = str(profile.get("address_city") or "").casefold()
+        if city and city not in question:
+            return None
     if onsite_question and negative_option:
         return _err(
             f"click {ref}: profile says willing to relocate and work onsite; "

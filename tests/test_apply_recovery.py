@@ -226,3 +226,17 @@ class ResumeGapLabelTests(unittest.TestCase):
             self.assertTrue(_profile_already_answers(label, {}, resume_text="resume"), label)
         for label in ("cover letter — Attach", "Transcript"):
             self.assertFalse(_profile_already_answers(label, {}, resume_text="resume"), label)
+
+
+class SavedFormStateTests(unittest.TestCase):
+    def test_clears_origin_storage_but_keeps_cookies(self) -> None:
+        from unittest.mock import MagicMock
+        from applyd.apply.tools import _clear_saved_form_state
+        page = MagicMock()
+        session = page.context.new_cdp_session.return_value
+        _clear_saved_form_state(page, "https://jobs.example.com/apply/123?x=1")
+        method, params = session.send.call_args.args
+        self.assertEqual("Storage.clearDataForOrigin", method)
+        self.assertEqual("https://jobs.example.com", params["origin"])
+        self.assertNotIn("cookies", params["storageTypes"])
+        self.assertIn("local_storage", params["storageTypes"])
