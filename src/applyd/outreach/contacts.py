@@ -42,20 +42,62 @@ def _key(company: str) -> str:
     return re.sub(r"[^a-z0-9]", "", company.casefold())
 
 
+_GENERIC_WORDS = {"inc", "llc", "ltd", "corp", "corporation", "company", "co", "technologies",
+                  "technology", "labs", "lab", "systems", "software", "group", "holdings", "ai",
+                  "hq", "intelligence", "health", "global", "studios", "studio"}
+_LABEL_PREFIXES = ("get", "try", "use", "join", "go", "hey", "with", "meet")
+_LABEL_SUFFIXES = ("", "ai", "app", "hq", "labs", "lab", "io", "inc", "co", "tech", "technologies",
+                   "health", "systems", "software", "data", "dev", "online", "group", "inc")
+
+
+def company_keys(company: str) -> set[str]:
+    """'Built Technologies' -> {'builttechnologies', 'built'}."""
+    words = re.findall(r"[a-z0-9]+", company.casefold())
+    keys = {"".join(words)}
+    core = [w for w in words if w not in _GENERIC_WORDS]
+    if core:
+        keys.add("".join(core))
+    return {k for k in keys if len(k) >= 3}
+
+
+def domain_matches_company(host: str, company: str) -> bool:
+    """Strict: the registrable label must be the company name, optionally with a
+    common prefix/suffix (getbuilt.com, fuku.ai, keplar.io), so 'Fellow' never
+    matches fellowproducts.com and 'Hyphenate' never matches
+    hyphenatemediagroup.com."""
+    parts = host.lower().removeprefix("www.").split(".")
+    if len(parts) < 2:
+        return False
+    label = parts[-3] if host.endswith((".co.uk", ".com.au")) and len(parts) >= 3 else parts[-2]
+    label = re.sub(r"[^a-z0-9]", "", label)
+    for key in company_keys(company):
+        for prefix in ("",) + _LABEL_PREFIXES:
+            for suffix in _LABEL_SUFFIXES:
+                if label == f"{prefix}{key}{suffix}":
+                    return True
+    return False
+
+
+def _registrable(host: str) -> str:
+    parts = host.lower().removeprefix("www.").split(".")
+    keep = 3 if host.endswith((".co.uk", ".com.au")) else 2
+    return ".".join(parts[-keep:])
+
+
 def domain_from_description(description: str, company: str) -> Optional[str]:
-    """Employer domain from emails in the posting (careers@kaluza.com)."""
+    """Employer domain from the posting: emails (careers@kaluza.com), links,
+    or bare mentions ("At Fellow.ai, ..."), strictly matched to the company."""
+    text = re.sub(r"<[^>]+>", " ", description or "")
     hosts = Counter(
-        h.lower() for h in re.findall(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)", description or "")
+        h.lower() for h in re.findall(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)", text)
         if not SHARED_MAILBOX_HOSTS.search(h)
     )
-    key = _key(company)
+    hosts.update(h.lower() for h in re.findall(
+        r"(?<![@\w.-])(?:https?://)?(?:www\.)?((?:[a-z0-9-]+\.)+(?:com|ai|io|co|app|dev|tech|net|org|uk|ca|xyz|so|inc))\b",
+        text, re.I))
     for host, _ in hosts.most_common():
-        flat = re.sub(r"[^a-z0-9]", "", host)
-        root = host.split(".")[-2] if "." in host else host
-        if key and (key[:5] in flat or root in key):
-            parts = host.split(".")
-            keep = 3 if host.endswith((".co.uk", ".com.au")) else 2
-            return ".".join(parts[-keep:])
+        if not NOT_EMPLOYER.search("." + host) and domain_matches_company(host, company):
+            return _registrable(host)
     return None
 
 
@@ -66,11 +108,10 @@ def domain_from_search(company: str, search: Any) -> Optional[str]:
         results = search.search(f"{company} official website", limit=8)
     except Exception:  # noqa: BLE001
         return None
-    key = _key(company)
     for result in results:
         host = (urlparse(result.url).hostname or "").lower().removeprefix("www.")
-        if host and not NOT_EMPLOYER.search("." + host) and key and key[:5] in re.sub(r"[^a-z0-9]", "", host):
-            return host
+        if host and not NOT_EMPLOYER.search("." + host) and domain_matches_company(host, company):
+            return _registrable(host)
     return None
 
 

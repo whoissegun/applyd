@@ -53,8 +53,13 @@ def draft_outreach_for_job(store: Any, job: Any, profile: Mapping[str, Any], *,
     if rejection_checker is None:
         rejection_checker = RejectionChecker()
     if getattr(rejection_checker, "configured", False):
+        # The first apply attempt is when the application went in; the
+        # application row's timestamps are bumped by later bookkeeping.
+        attempts = getattr(store, "get_apply_attempts", lambda _id: [])(job.id) or []
+        starts = sorted(str(a.get("started_at")) for a in attempts if a.get("started_at"))
         application = store.get_application_by_job(job.id) or {}
-        applied_at = _parse_time(application.get("claimed_at") or application.get("updated_at"))
+        applied_at = _parse_time(starts[0] if starts else
+                                 application.get("claimed_at") or application.get("updated_at"))
         try:
             subject = rejection_checker.find(company=job.company, title=job.title, applied_at=applied_at)
         except Exception as exc:  # noqa: BLE001

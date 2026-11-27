@@ -205,3 +205,30 @@ class WrappedLineRejectionTests(unittest.TestCase):
             "Your application to Kaluza - Software Engineer", "x@kaluza.com",
             "After reviewing your application, we’ve unfortunately decided not to\nprogress it this time around.",
             company="Kaluza", title="Software Engineer"))
+
+
+class StrictDomainTests(unittest.TestCase):
+    def test_lookalike_domains_rejected(self) -> None:
+        from applyd.outreach.contacts import domain_matches_company
+        self.assertFalse(domain_matches_company("fellowproducts.com", "Fellow"))
+        self.assertFalse(domain_matches_company("hyphenatemediagroup.com", "Hyphenate"))
+        for host, company in (("fellow.ai", "Fellow"), ("getbuilt.com", "Built Technologies"),
+                              ("kobaltlabs.com", "Kobalt Labs"), ("capitalontap.com", "Capital on Tap")):
+            self.assertTrue(domain_matches_company(host, company), host)
+
+    def test_bare_domain_in_posting(self) -> None:
+        self.assertEqual("fellow.ai", domain_from_description("At Fellow.ai http://Fellow.ai, we build", "Fellow"))
+
+
+class AppliedDateTests(unittest.TestCase):
+    def test_rejection_window_starts_at_first_attempt(self) -> None:
+        seen = {}
+        store = FakeStore()
+        store.get_application_by_job = lambda _id: {"updated_at": "2026-11-27T07:16:00+00:00"}
+        store.get_apply_attempts = lambda _id: [{"started_at": "2026-11-21T19:28:47+00:00"},
+                                                {"started_at": "2026-11-22T10:00:00+00:00"}]
+        checker = SimpleNamespace(configured=True,
+                                  find=lambda **kw: seen.update(kw) or None)
+        draft_outreach_for_job(store, JOB, {"outreach": SETTINGS}, finder=FakeFinder(FOUND),
+                               save=lambda *_: None, rejection_checker=checker)
+        self.assertEqual("2026-11-21", seen["applied_at"].date().isoformat())
