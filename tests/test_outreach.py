@@ -83,7 +83,8 @@ class PipelineTests(unittest.TestCase):
         saved = []
         summary = draft_outreach_for_job(
             store, JOB, {"outreach": settings}, finder=finder, llm=None,
-            save=lambda email, to: saved.append((email, to)) or None)
+            save=lambda email, to: saved.append((email, to)) or None,
+            rejection_checker=SimpleNamespace(configured=False))
         return summary, saved
 
     def test_drafts_verified_contact(self) -> None:
@@ -152,3 +153,55 @@ class DraftTests(unittest.TestCase):
                     os.environ[k] = v
         self.assertEqual(("append", '"[Gmail]/Drafts"', "(\\Draft)", True), calls[2])
         self.assertFalse(any(c[0] == "send" for c in calls))
+
+
+class RejectionDetectionTests(unittest.TestCase):
+    def test_real_rejection_wordings(self) -> None:
+        from applyd.outreach.inbox import is_rejection_for
+        self.assertTrue(is_rejection_for(
+            "Your application to Kaluza - Software Engineer", "talent@kaluza.com",
+            "Thank you for your interest in Kaluza and the Software Engineer role. After reviewing your "
+            "application, we've unfortunately decided not to progress it this time around.",
+            company="Kaluza", title="Software Engineer"))
+        self.assertTrue(is_rejection_for(
+            "Important information about your application to StubHub", "no-reply@stubhub.com",
+            "we have decided not to move forward with your application for the Software Engineer I "
+            "(New Grad) - Consumer Experience role at this time.",
+            company="StubHub", title="Software Engineer New Grad - Consumer Experience"))
+
+    def test_acknowledgement_is_not_rejection(self) -> None:
+        from applyd.outreach.inbox import is_rejection_for
+        self.assertFalse(is_rejection_for(
+            "Thanks for applying to Cohere!", "no-reply@ashbyhq.com",
+            "Thank you for applying to the Member of Technical Staff, Search role at Cohere! Unfortunately, "
+            "due to the high volume of interest we aren't able to personally respond to every candidate.",
+            company="cohere", title="Member of Technical Staff, Search"))
+
+    def test_rejection_for_a_different_role_does_not_count(self) -> None:
+        from applyd.outreach.inbox import is_rejection_for
+        body = ("thank you for your interest in Affirm and giving us the opportunity to consider you for the "
+                "Software Engineer I, Fullstack (Search) role. Unfortunately, we have decided not to move "
+                "forward with your candidacy at this time.")
+        self.assertFalse(is_rejection_for("Follow-up on your application to Affirm", "gem", body,
+                                          company="Affirm", title="Software Engineer 1 - Backend - Streaming Infra"))
+        self.assertTrue(is_rejection_for("Follow-up on your application to Affirm", "gem", body,
+                                         company="Affirm", title="Software Engineer I, Fullstack (Search)"))
+
+    def test_pipeline_skips_rejected_application(self) -> None:
+        store, finder = FakeStore(), FakeFinder(FOUND)
+        store.get_application_by_job = lambda job_id: {"claimed_at": "2026-11-21T00:00:00+00:00"}
+        checker = SimpleNamespace(configured=True, find=lambda **_: "Your application to Keplar")
+        summary = draft_outreach_for_job(store, JOB, {"outreach": SETTINGS}, finder=finder,
+                                         save=lambda *_: None, rejection_checker=checker)
+        self.assertEqual("rejected", summary["status"])
+        self.assertEqual(0, finder.calls)
+        self.assertEqual("rejected", store.rows[0][2])
+
+
+class WrappedLineRejectionTests(unittest.TestCase):
+    def test_line_wrapped_decision_phrase(self) -> None:
+        from applyd.outreach.inbox import is_rejection_for
+        self.assertTrue(is_rejection_for(
+            "Your application to Kaluza - Software Engineer", "x@kaluza.com",
+            "After reviewing your application, we’ve unfortunately decided not to\nprogress it this time around.",
+            company="Kaluza", title="Software Engineer"))

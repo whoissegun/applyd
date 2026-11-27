@@ -3,16 +3,26 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .compose import company_line, compose
 from .contacts import ParvenuFinder, resolve_domain
 from .drafts import save_draft
+from .inbox import RejectionChecker
 
 
 def outreach_settings(profile: Mapping[str, Any]) -> dict[str, Any]:
     settings = profile.get("outreach") if isinstance(profile.get("outreach"), Mapping) else {}
     return dict(settings)
+
+
+def _parse_time(value: Any) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc) - timedelta(days=60)
 
 
 def _company_key(company: str) -> str:
@@ -21,7 +31,8 @@ def _company_key(company: str) -> str:
 
 def draft_outreach_for_job(store: Any, job: Any, profile: Mapping[str, Any], *,
                            finder: Any = None, search: Any = None, llm: Any = None,
-                           save: Any = save_draft, dry_run: bool = False) -> dict[str, Any]:
+                           save: Any = save_draft, dry_run: bool = False,
+                           rejection_checker: Any = None) -> dict[str, Any]:
     """Look up the job's hiring contact and save one Gmail draft.
 
     One contact per company: a company already contacted (or looked up and
@@ -37,6 +48,21 @@ def draft_outreach_for_job(store: Any, job: Any, profile: Mapping[str, Any], *,
     prior = store.outreach_for_company(key) or store.outreach_for_job(job.id)
     if prior:
         return {**result, "status": "skipped_company_done", "previous": prior.get("status")}
+
+    # Never email someone who already turned this application down.
+    if rejection_checker is None:
+        rejection_checker = RejectionChecker()
+    if getattr(rejection_checker, "configured", False):
+        application = store.get_application_by_job(job.id) or {}
+        applied_at = _parse_time(application.get("claimed_at") or application.get("updated_at"))
+        try:
+            subject = rejection_checker.find(company=job.company, title=job.title, applied_at=applied_at)
+        except Exception as exc:  # noqa: BLE001
+            return {**result, "status": "inbox_check_failed", "detail": f"{type(exc).__name__}: {exc}"[:200]}
+        if subject:
+            if not dry_run:
+                store.record_outreach(job.id, key, "rejected", detail=f"inbox: {subject}"[:200])
+            return {**result, "status": "rejected", "detail": subject}
 
     domain = resolve_domain(job.company, job.description or "", search)
     if not domain:
@@ -80,5 +106,7 @@ def report(summary: Mapping[str, Any]) -> None:
     if status == "drafted":
         print(f"  ✉ outreach draft saved: {summary.get('contact')} ({summary.get('title')}) "
               f"<{summary.get('email')}> via {summary.get('source')}", file=sys.stderr, flush=True)
+    elif status == "rejected":
+        print(f"  ✉ outreach skipped: already rejected ({summary.get('detail')})", file=sys.stderr, flush=True)
     elif status not in {"disabled", "skipped_company_done"}:
         print(f"  ✉ outreach: {status} {summary.get('detail') or ''}".rstrip(), file=sys.stderr, flush=True)
