@@ -503,3 +503,19 @@ class FreshBatch27Tests(unittest.TestCase):
         from applyd.apply.deterministic_questions import resolve_question
         self.assertEqual("0", resolve_question("The salary for this position is $50k - $60k. Are you aware of this?",
                                                {}, self.YN).choice)
+
+
+class CurrentLocationTests(unittest.TestCase):
+    PROFILE = {"address_city": "Ottawa", "address_region": "Ontario", "address_country": "Canada",
+               "employment_preferences": {"willing_to_work_onsite": True, "willing_to_relocate": True}}
+    YN = {"0": "YES", "1": "NO"}
+
+    def ask(self, q):
+        from applyd.apply.deterministic_questions import resolve_question
+        return self.YN.get(resolve_question(q, self.PROFILE, self.YN, required=True).choice)
+
+    def test_currently_located_is_a_fact_not_a_preference(self) -> None:
+        self.assertEqual("NO", self.ask("Are you currently located within commuting distance of our office in "
+                                        "Elkins Park, PA and available to work in-office?"))
+        self.assertEqual("YES", self.ask("Are you currently located within commuting distance of our Ottawa office?"))
+        self.assertEqual("YES", self.ask("Are you willing to relocate if you are not currently located here?"))

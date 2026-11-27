@@ -813,6 +813,25 @@ def resolve_question(question: str, profile: Mapping[str, Any], options: Any, *,
             if not local and _preference(profile, "willing_to_relocate") is True:
                 return DeterministicAnswer(relocating[0], "onsite_with_relocation", rendered[relocating[0]],
                                            "not local; structured relocation preference")
+    # "Are you currently located within commuting distance of our office in
+    # Elkins Park, PA ... and available to work in-office?" asserts where the
+    # candidate lives NOW. Willingness to work onsite never makes that true;
+    # a non-local candidate answers No unless a relocation option exists
+    # (handled above).
+    if re.search(r"\bcurrently (?:located|live|living|based|reside|residing)\b|\b(?:located|live|living|reside|based) "
+                 r"within\b|\bcommuting distance\b|\bcommutable\b|\bare you local\b|\blocal to (?:the|our)\b", text) \
+            and not re.search(r"\b(?:willing|open) to relocat|\bor (?:willing|open|ready|able) to\b|\bif not\b", text):
+        city, region, _country = _profile_location(profile)
+        local = bool(city) and bool(re.search(rf"\b{re.escape(city)}\b", text))
+        relocation_option = any(
+            re.search(r"relocat", _norm(label))
+            and not re.search(r"\b(?:not|unable|cannot|can t)\b(?:\s+\w+){0,3}\s+relocat", _norm(label))
+            for label in _options(options).values())
+        if not local and city and not relocation_option:
+            answer = _result(options, False, "current_location",
+                             "candidate does not currently live near this office")
+            if answer.choice and answer.choice != "review":
+                return answer
     # Relocation timeline options ("relocate within 30 days / 3 months"):
     # a candidate who can relocate immediately takes the soonest window.
     if "relocat" in text:
