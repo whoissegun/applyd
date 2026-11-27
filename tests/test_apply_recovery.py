@@ -217,3 +217,12 @@ class RequiredResumeGuardTests(unittest.TestCase):
         page = MagicMock()
         page.evaluate.side_effect = RuntimeError("detached")
         self.assertFalse(_required_resume_input_empty(page))
+
+
+class ResumeGapLabelTests(unittest.TestCase):
+    def test_resume_upload_labels_are_not_missing_facts(self) -> None:
+        from applyd.apply.runner import _profile_already_answers
+        for label in ("resume — Attach||Enter manually", "Resume Choose file", "Resume"):
+            self.assertTrue(_profile_already_answers(label, {}, resume_text="resume"), label)
+        for label in ("cover letter — Attach", "Transcript"):
+            self.assertFalse(_profile_already_answers(label, {}, resume_text="resume"), label)

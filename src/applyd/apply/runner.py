@@ -1290,9 +1290,10 @@ def _profile_already_answers(
     # The resume path is runner-bound. A model-generated generic attachment
     # gap is not a missing candidate fact, especially on Greenhouse pages that
     # expose several unlabeled optional `Attach` inputs.
-    if text in {
+    if (text in {
         "resume", "resume cv", "cv", "file upload area", "file upload areas",
-    } and resume_text.strip():
+    } or re.fullmatch(r"(?:resume|resume cv|cv)(?: attach| choose file| upload)?(?: (?:attach|enter manually|dropbox|google drive))*", text)
+    ) and resume_text.strip():
         return True
 
     # These prompts are explicitly delegated composition, not missing facts.
